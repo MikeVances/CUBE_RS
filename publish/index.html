@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>📡 Данные от КУБ-1063</title>
+  <style>
+    body { font-family: sans-serif; background: #1e1e1e; color: #dcdcdc; text-align: center; padding: 2em; }
+    .data-block { font-size: 2em; margin-top: 1em; }
+    .label { color: #8abeb7; }
+    .value { font-weight: bold; }
+    .error { color: #cc6666; }
+  </style>
+</head>
+<body>
+  <h1>📟 CUBE RS WebSocket</h1>
+  <div id="status">⏳ Ожидание подключения...</div>
+  <div class="data-block" id="temperature"></div>
+  <div class="data-block" id="humidity"></div>
+  <div class="data-block" id="co2"></div>
+  <div class="data-block" id="updated_at"></div>
+
+  <script>
+    const ws = new WebSocket("ws://localhost:8765");
+
+    ws.onopen = () => {
+      document.getElementById("status").textContent = "✅ Подключено";
+      ws.send(JSON.stringify({ cmd: "get" }));
+      
+      // Автоматическое обновление каждые 5 секунд
+      setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ cmd: "get" }));
+        }
+      }, 5000);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        document.getElementById("temperature").innerHTML = `<span class="label">🌡 Температура:</span> <span class="value">${data.temp_inside ?? '—'} °C</span>`;
+        // Новая строка: счетчик дней
+        let dayCounterHtml = '';
+        if (data.day_counter !== undefined && data.day_counter !== null) {
+          dayCounterHtml = `<div class="data-block"><span class="label">📅 Счетчик дней:</span> <span class="value">${data.day_counter}</span></div>`;
+        }
+        document.getElementById("temperature").innerHTML += dayCounterHtml;
+        document.getElementById("humidity").innerHTML = `<span class="label">💧 Влажность:</span> <span class="value">${data.humidity ?? '—'} %</span>`;
+        document.getElementById("co2").innerHTML = `<span class="label">🌬 CO₂:</span> <span class="value">${data.co2 ?? '—'} ppm</span>`;
+        if (data.updated_at) {
+          const updated = new Date(data.updated_at);
+          const now = new Date();
+          const diffMs = now - updated;
+          const diffMinutes = Math.floor(diffMs / 60000);
+          const diffSeconds = Math.floor((diffMs % 60000) / 1000);
+          
+          let timeText;
+          if (diffMinutes < 1) {
+            timeText = `${diffSeconds} сек назад`;
+          } else if (diffMinutes < 60) {
+            timeText = `${diffMinutes} мин назад`;
+          } else {
+            const diffHours = Math.floor(diffMinutes / 60);
+            timeText = `${diffHours} ч назад`;
+          }
+          
+          document.getElementById("updated_at").innerHTML = `<span class="label">🕒 Обновлено:</span> <span class="value">${timeText}</span>`;
+        }
+      } catch (err) {
+        document.getElementById("status").innerHTML = `<span class="error">❌ Ошибка данных</span>`;
+      }
+    };
+
+    ws.onerror = () => {
+      document.getElementById("status").innerHTML = `<span class="error">❌ Ошибка подключения</span>`;
+    };
+
+    ws.onclose = () => {
+      document.getElementById("status").innerHTML = `<span class="error">🔌 Соединение закрыто</span>`;
+    };
+  </script>
+</body>
+</html>

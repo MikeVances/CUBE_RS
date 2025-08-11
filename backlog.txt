@@ -1,0 +1,7 @@
+To do
+- start_all
+- stop_all
+- telegramm (добавить инструкцию) 
+- websocket + index.html
+- watchdog
+- настраиваемый дашборд ()

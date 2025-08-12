@@ -399,8 +399,7 @@ class KUBTelegramBot:
             await self.application.updater.start_polling(drop_pending_updates=True)
             
             # Ждём остановки
-            while True:
-                await asyncio.sleep(1)
+            await self.application.updater.idle()
             
         except Exception as e:
             logger.error(f"❌ Ошибка запуска бота: {e}")
@@ -432,15 +431,15 @@ class KUBTelegramBot:
 async def main():
     """Основная функция запуска"""
     # Получаем токен бота
-    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    token = config.get_bot_token()
     
-    if not TOKEN:
+    if not token:
         print("❌ Не найден TELEGRAM_BOT_TOKEN в переменных окружения")
         print("💡 Установите токен: export TELEGRAM_BOT_TOKEN='your_token_here'")
         return
     
     # Создаём и запускаем бота
-    bot = KUBTelegramBot(TOKEN)
+    bot = KUBTelegramBot(token)
     
     try:
         await bot.start_bot()

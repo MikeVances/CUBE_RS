@@ -52,7 +52,7 @@ SERVICES = [
     # Telegram бот (если есть)
     {
         "name": "Telegram Bot",
-        "cmd": f"{sys.executable} publish/telegram_bot.py",
+        "cmd": f"{sys.executable} start_bot.py" ,
         "delay": 0.5,
         "optional": True  # Необязательный сервис
     }

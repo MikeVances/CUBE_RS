@@ -263,6 +263,32 @@ class KUBTelegramBot:
     # ОБРАБОТЧИКИ CALLBACK'ОВ (КНОПОК)
     # =======================================================================
     
+    async def _handle_refresh_stats(self, query):
+        """Обновление статистики"""
+        user = query.from_user
+        
+        if not check_user_permission(user.id, "read", self.bot_db):
+            await query.edit_message_text("❌ У вас нет прав для просмотра статистики")
+            return
+        
+        try:
+            stats = self.kub_system.get_system_statistics()
+            stats_text = format_system_stats(stats)
+            
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Обновить", callback_data="refresh_stats")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+            ])
+            
+            await query.edit_message_text(
+                stats_text,
+                parse_mode='Markdown',
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка: {str(e)}")
+    
+    
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик inline кнопок"""
         query = update.callback_query
@@ -303,6 +329,7 @@ class KUBTelegramBot:
             )
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка обновления: {str(e)}")
+
     
     async def _handle_reset_alarms(self, query):
         """Обработка сброса аварий через кнопку"""
@@ -431,6 +458,8 @@ class KUBTelegramBot:
 async def main():
     """Основная функция запуска"""
     # Получаем токен бота
+    from telegram_bot.secure_config import SecureConfig
+    config = SecureConfig()
     token = config.get_bot_token()
     
     if not token:

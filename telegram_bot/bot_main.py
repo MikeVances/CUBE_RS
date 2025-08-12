@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 class KUBTelegramBot:
     """Telegram Bot для управления КУБ-1063"""
     
-    def __init__(self, token: str, config_file: str = "bot_config.json"):
+    def __init__(self, token: str, config_file: str = "config/telegram_bot.json"):
         self.token = token
         self.config = self._load_config(config_file)
         
@@ -274,13 +274,13 @@ class KUBTelegramBot:
         if data == "refresh_status":
             await self._handle_refresh_status(query)
         elif data == "show_stats":
-            await self._handle_show_stats(query)
+            await self._handle_refresh_stats(query)
         elif data == "refresh_stats":
             await self._handle_refresh_stats(query)
         elif data == "reset_alarms":
             await self._handle_reset_alarms(query)
         elif data == "main_menu":
-            await self._handle_main_menu(query)
+            await self._handle_refresh_status(query)
         else:
             await query.edit_message_text("❓ Неизвестная команда")
     
@@ -391,21 +391,31 @@ class KUBTelegramBot:
             
             logger.info("🚀 Запуск Telegram Bot...")
             
-            # Запускаем бота
-            await self.application.run_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True
-            )
+            # Инициализируем приложение
+            await self.application.initialize()
+            await self.application.start()
+            
+            # Запускаем polling
+            await self.application.updater.start_polling(drop_pending_updates=True)
+            
+            # Ждём остановки
+            while True:
+                await asyncio.sleep(1)
             
         except Exception as e:
             logger.error(f"❌ Ошибка запуска бота: {e}")
-            return False
+            raise
     
     async def stop_bot(self):
         """Остановка бота"""
         try:
+            logger.info("🛑 Остановка Telegram Bot...")
+            
             if self.application:
+                if self.application.updater.running:
+                    await self.application.updater.stop()
                 await self.application.stop()
+                await self.application.shutdown()
             
             if self.kub_system:
                 self.kub_system.stop()

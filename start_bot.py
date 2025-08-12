@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Скрипт запуска Telegram Bot для КУБ-1063
-Простой запуск: python start_bot.py
+Исправленный скрипт запуска Telegram Bot для КУБ-1063
+Использует SecureConfig для безопасной работы с токенами
 """
 
 import os
@@ -26,21 +26,18 @@ def setup_logging():
         ]
     )
 
-def check_requirements():
-    """Проверка требований для запуска"""
-    print("🔍 Проверка требований...")
+def check_basic_requirements():
+    """Проверка базовых требований (без токена)"""
+    print("🔍 Проверка базовых требований...")
     
-    # Проверяем токен бота
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    if not token:
-        print("❌ TELEGRAM_BOT_TOKEN не найден в переменных окружения")
-        print("💡 Установите токен:")
-        print("   export TELEGRAM_BOT_TOKEN='your_bot_token_here'")
-        print("   или")
-        print("   set TELEGRAM_BOT_TOKEN=your_bot_token_here  (Windows)")
+    # Проверяем python-telegram-bot
+    try:
+        import telegram
+        print(f"✅ python-telegram-bot установлен (версия {telegram.__version__})")
+    except ImportError:
+        print("❌ python-telegram-bot не установлен")
+        print("💡 Установите: pip install python-telegram-bot")
         return False
-    
-    print(f"✅ Токен бота найден: {token[:10]}...{token[-5:]}")
     
     # Проверяем базу данных
     if not Path('kub_commands.db').exists():
@@ -52,12 +49,13 @@ def check_requirements():
     
     print("✅ База данных найдена")
     
-    # Проверяем модули
+    # Проверяем модули бота
     required_modules = [
         'telegram_bot/bot_main.py',
         'telegram_bot/bot_database.py', 
         'telegram_bot/bot_permissions.py',
-        'telegram_bot/bot_utils.py'
+        'telegram_bot/bot_utils.py',
+        'telegram_bot/secure_config.py'
     ]
     
     for module in required_modules:
@@ -66,17 +64,30 @@ def check_requirements():
             return False
     
     print("✅ Все модули бота найдены")
-    
-    # Проверяем python-telegram-bot
-    try:
-        import telegram
-        print(f"✅ python-telegram-bot установлен (версия {telegram.__version__})")
-    except ImportError:
-        print("❌ python-telegram-bot не установлен")
-        print("💡 Установите: pip install python-telegram-bot")
-        return False
-    
     return True
+
+def check_token_specifically():
+    """Отдельная проверка токена (для --check команды)"""
+    print("\n🔑 Проверка токена...")
+    
+    try:
+        from telegram_bot.secure_config import SecureConfig
+        config = SecureConfig()
+        
+        # Проверяем только файл, не запрашиваем интерактивно
+        token = config._load_token_from_file()
+        
+        if token:
+            print(f"✅ Токен найден в config/bot_secrets.json: {token[:10]}...{token[-5:]}")
+            return True
+        else:
+            print("⚠️ Токен не найден в config/bot_secrets.json")
+            print("💡 При запуске бота система запросит токен интерактивно")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Ошибка проверки токена: {e}")
+        return False
 
 def show_bot_info():
     """Показать информацию о боте"""
@@ -135,9 +146,9 @@ async def main():
     # Показываем информацию
     show_bot_info()
     
-    # Проверяем требования
-    if not check_requirements():
-        print("\n💥 Не все требования выполнены!")
+    # Проверяем базовые требования
+    if not check_basic_requirements():
+        print("\n💥 Не все базовые требования выполнены!")
         return
     
     # Проверяем систему
@@ -146,12 +157,22 @@ async def main():
         return
     
     print("\n🚀 Запуск Telegram Bot...")
+    print("🔑 Токен будет запрошен безопасным способом...")
     
     try:
         # Импортируем и запускаем бота
         from telegram_bot.bot_main import KUBTelegramBot
+        from telegram_bot.secure_config import SecureConfig
         
-        token = os.getenv('TELEGRAM_BOT_TOKEN')
+        # Получаем токен безопасным способом (интерактивно если нужно)
+        config = SecureConfig()
+        token = config.get_bot_token()
+        
+        if not token:
+            print("❌ Не удалось получить токен бота")
+            print("💡 Проверьте настройки или создайте нового бота у @BotFather")
+            return
+        
         bot = KUBTelegramBot(token)
         
         print("✅ Бот создан, начинаем работу...")
@@ -199,14 +220,29 @@ if __name__ == "__main__":
             install_requirements()
             sys.exit(0)
         elif sys.argv[1] == "--check":
-            check_requirements()
-            check_system_health()
+            print("🔍 ПОЛНАЯ ПРОВЕРКА СИСТЕМЫ")
+            print("=" * 40)
+            
+            # Проверяем всё включая токен
+            basic_ok = check_basic_requirements()
+            token_ok = check_token_specifically()
+            system_ok = check_system_health()
+            
+            if basic_ok and system_ok:
+                print("\n✅ Система готова к запуску!")
+                if token_ok:
+                    print("🔑 Токен настроен корректно")
+                else:
+                    print("⚠️ Токен будет запрошен при запуске")
+            else:
+                print("\n❌ Система не готова")
             sys.exit(0)
+            
         elif sys.argv[1] == "--help":
             print("\nИспользование:")
             print("  python start_bot.py           # Запуск бота")
             print("  python start_bot.py --install # Установка зависимостей")
-            print("  python start_bot.py --check   # Проверка системы")
+            print("  python start_bot.py --check   # Полная проверка системы")
             print("  python start_bot.py --help    # Эта справка")
             sys.exit(0)
     

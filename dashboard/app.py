@@ -1,6 +1,6 @@
 """
 Streamlit Dashboard для КУБ-1063
-Визуализация данных с контроллера в стиле Grafana (БЕЗ ГРАФИКОВ)
+Визуализация данных с контроллера в стиле Grafana
 """
 
 import sys
@@ -10,25 +10,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import streamlit as st
 import time
+import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime, timedelta
+import pandas as pd
 
 # Импорт функции чтения данных
-try:
-    from dashboard.dashboard_reader import read_all, get_statistics
-    DEVICE_AVAILABLE = True
-except ImportError:
-    try:
-        from .dashboard_reader import read_all, get_statistics
-        DEVICE_AVAILABLE = True
-    except ImportError:
-        st.error("❌ Не удалось импортировать dashboard_reader")
-        DEVICE_AVAILABLE = False
-        
-        def read_all():
-            return {'temp_inside': 25.0, 'humidity': 60.0, 'co2': 400, 'connection_status': 'demo'}
-        
-        def get_statistics():
-            return {'success_count': 0, 'error_count': 0, 'success_rate': 0, 'is_running': False}
+from modbus.dashboard_reader import read_all, get_statistics
+DEVICE_AVAILABLE = True
 
 # Настройка страницы
 st.set_page_config(
@@ -40,11 +29,13 @@ st.set_page_config(
 # Стили в стиле Grafana
 st.markdown("""
     <style>
+    /* Основная тема */
     .stApp {
         background-color: #0d1117;
         color: #e6edf3;
     }
     
+    /* Метрики */
     .stMetric {
         background-color: #21262d;
         border: 1px solid #30363d;
@@ -57,22 +48,81 @@ st.markdown("""
         background-color: transparent !important;
     }
     
+    /* Заголовки */
     h1, h2, h3 {
         color: #58a6ff !important;
     }
     
+    /* Контейнеры */
     .element-container {
         background-color: #21262d;
         border-radius: 6px;
         margin: 8px 0;
     }
+    
+    /* Боковая панель */
+    .css-1d391kg {
+        background-color: #0d1117;
+    }
     </style>
 """, unsafe_allow_html=True)
 
+# Инициализация session state для истории данных
+if 'data_history' not in st.session_state:
+    st.session_state.data_history = []
+
+# Инициализация кэша для сглаживания
+if 'data_cache' not in st.session_state:
+    st.session_state.data_cache = {}
+    st.session_state.cache_timestamp = None
+
+def smooth_data(data, cache_window=5):
+    """Сглаживает данные, используя скользящее среднее"""
+    if not data:
+        return data
+    
+    current_time = datetime.now()
+    
+    # Добавляем текущие данные в кэш
+    if 'data_cache' not in st.session_state:
+        st.session_state.data_cache = {}
+    
+    # Очищаем старые данные (старше 30 секунд)
+    if st.session_state.cache_timestamp:
+        if (current_time - st.session_state.cache_timestamp).total_seconds() > 30:
+            st.session_state.data_cache = {}
+    
+    # Добавляем текущие данные
+    for key, value in data.items():
+        if key not in ['timestamp', 'connection_status', 'success_rate', 'error']:
+            if key not in st.session_state.data_cache:
+                st.session_state.data_cache[key] = []
+            
+            if value is not None:
+                st.session_state.data_cache[key].append(value)
+                
+                # Ограничиваем размер кэша
+                if len(st.session_state.data_cache[key]) > cache_window:
+                    st.session_state.data_cache[key] = st.session_state.data_cache[key][-cache_window:]
+    
+    st.session_state.cache_timestamp = current_time
+    
+    # Вычисляем сглаженные значения
+    smoothed_data = data.copy()
+    for key, values in st.session_state.data_cache.items():
+        if values and len(values) > 0:
+            # Используем медиану для устойчивости к выбросам
+            import statistics
+            try:
+                smoothed_value = statistics.median(values)
+                smoothed_data[key] = smoothed_value
+            except:
+                smoothed_data[key] = values[-1]  # Последнее значение если медиана не работает
+    
+    return smoothed_data
+
 def get_status_color(value, min_val, max_val):
     """Определяет цвет статуса на основе значения"""
-    if value is None:
-        return "#6c757d"
     if min_val <= value <= max_val:
         return "#28a745"  # Зеленый
     elif abs(value - min_val) < abs(value - max_val):
@@ -83,54 +133,84 @@ def get_status_color(value, min_val, max_val):
 def main():
     st.title("📊 Панель мониторинга КУБ-1063")
     
+    # Создаем placeholder для автообновления
+    placeholder = st.empty()
+    
     # Боковая панель с настройками
     with st.sidebar:
         st.header("⚙️ Настройки")
         auto_refresh = st.checkbox("Автообновление", value=True)
         refresh_interval = st.slider("Интервал обновления (сек)", 1, 60, 5)
         
-        st.header("🔌 Статус системы")
-        if DEVICE_AVAILABLE:
-            st.success("✅ Dashboard Reader подключен")
-        else:
-            st.error("❌ Dashboard Reader недоступен")
+        # Настройки сглаживания
+        st.header("🔧 Сглаживание данных")
+        smoothing_enabled = st.checkbox("Включить сглаживание", value=True)
+        cache_window = st.slider("Окно сглаживания", 1, 10, 3)
         
-        if st.button("🔄 Принудительное обновление"):
-            st.rerun()
-    
-    # Создаем placeholder для автообновления
-    placeholder = st.empty()
+        # Индикатор качества данных
+        if 'data_cache' in st.session_state and st.session_state.data_cache:
+            st.header("📊 Качество данных")
+            cache_size = sum(len(values) for values in st.session_state.data_cache.values())
+            if cache_size > 0:
+                st.success(f"✅ Данные стабильны ({cache_size} измерений)")
+            else:
+                st.warning("⚠️ Данные нестабильны")
+        
+        st.header("📈 История данных")
+        history_hours = st.slider("Показать за часов", 1, 24, 6)
+        
+        if st.button("🗑 Очистить историю"):
+            st.session_state.data_history = []
+            st.session_state.data_cache = {}
+            st.success("История очищена!")
     
     # Основной цикл обновления
     while True:
         with placeholder.container():
             # Получаем данные
             try:
-                data = read_all()
-                if not data:
+                raw_data = read_all()
+                if raw_data:
+                    # Добавляем timestamp если его нет
+                    if 'timestamp' not in raw_data:
+                        raw_data['timestamp'] = datetime.now()
+                    
+                    # Сглаживаем данные
+                    if smoothing_enabled:
+                        data = smooth_data(raw_data, cache_window=cache_window)
+                    else:
+                        data = raw_data
+                    
+                    # Сохраняем в историю
+                    st.session_state.data_history.append(data.copy())
+                    
+                    # Ограничиваем размер истории
+                    max_history = history_hours * 3600 // refresh_interval
+                    if len(st.session_state.data_history) > max_history:
+                        st.session_state.data_history = st.session_state.data_history[-max_history:]
+                else:
                     st.error("❌ Нет данных с контроллера")
                     data = {}
             except Exception as e:
                 st.error(f"❌ Ошибка чтения данных: {e}")
                 data = {}
             
-            # Показываем статус подключения
-            connection_status = data.get('connection_status', 'unknown')
-            if connection_status == 'connected':
-                st.success("🟢 Подключение к КУБ-1063 активно")
-            elif connection_status == 'demo':
-                st.info("🔵 Демо режим (нет подключения к устройству)")
-            else:
-                st.warning(f"⚠️ Статус подключения: {connection_status}")
-            
             # Основные метрики
             st.subheader("🎯 Основные параметры")
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                temp_inside = data.get('temp_inside', 0) or 0
-                temp_target = data.get('temp_target', 25) or 25
+                temp_inside = data.get('temp_inside', 0)
+                temp_target = data.get('temp_target', 25)
+                
+                # Проверяем, что значения не None
+                if temp_inside is None:
+                    temp_inside = 0
+                if temp_target is None:
+                    temp_target = 25
+                    
                 temp_color = get_status_color(temp_inside, temp_target - 2, temp_target + 2)
+                
                 temp_inside_str = f"{temp_inside:.1f}°C" if temp_inside is not None else "N/A"
                 temp_target_str = f"{temp_target:.1f}°C" if temp_target is not None else "N/A"
                 
@@ -143,7 +223,9 @@ def main():
                 """, unsafe_allow_html=True)
             
             with col2:
-                humidity = data.get('humidity', 0) or 0
+                humidity = data.get('humidity', 0)
+                if humidity is None:
+                    humidity = 0
                 humidity_color = get_status_color(humidity, 40, 70)
                 humidity_str = f"{humidity:.1f}%" if humidity is not None else "N/A"
                 
@@ -156,8 +238,10 @@ def main():
                 """, unsafe_allow_html=True)
             
             with col3:
-                co2 = data.get('co2', 0) or 0
-                co2_color = get_status_color(co2, 400, 3000)
+                co2 = data.get('co2', 0)
+                if co2 is None:
+                    co2 = 0
+                co2_color = get_status_color(co2, 400, 800)
                 co2_str = f"{co2} ppm" if co2 is not None else "N/A"
                 
                 st.markdown(f"""
@@ -169,7 +253,9 @@ def main():
                 """, unsafe_allow_html=True)
             
             with col4:
-                ventilation = data.get('ventilation_level', 0) or 0
+                ventilation = data.get('ventilation_level', 0)
+                if ventilation is None:
+                    ventilation = 0
                 vent_color = "#58a6ff"
                 ventilation_str = f"{ventilation}%" if ventilation is not None else "N/A"
                 
@@ -188,31 +274,37 @@ def main():
             with col5:
                 pressure = data.get('pressure', 0)
                 pressure_str = f"{pressure:.1f} Па" if pressure is not None else "N/A"
-                st.markdown('<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">🌪️ Давление</div>', unsafe_allow_html=True)
-                st.metric(label="Давление", value=pressure_str, help="Отрицательное давление", label_visibility="collapsed")
+                st.markdown(
+                    '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">🌪️ Давление</div>',
+                    unsafe_allow_html=True
+                )
+                st.metric(label="", value=pressure_str, help="Отрицательное давление", label_visibility="collapsed")
             
             with col6:
                 nh3 = data.get('nh3', 0)
                 nh3_str = f"{nh3:.1f} ppm" if nh3 is not None else "N/A"
-                st.markdown('<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">💨 NH₃</div>', unsafe_allow_html=True)
-                st.metric(label="NH3", value=nh3_str, help="Концентрация аммиака", label_visibility="collapsed")
+                st.markdown(
+                    '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">💨 NH₃</div>',
+                    unsafe_allow_html=True
+                )
+                st.metric(label="", value=nh3_str, help="Концентрация аммиака", label_visibility="collapsed")
             
             with col7:
-                st.markdown('<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">💻 Версия ПО</div>', unsafe_allow_html=True)
-                st.metric(label="Версия ПО", value=data.get('software_version', '–'), help="Версия прошивки контроллера", label_visibility="collapsed")
+                st.markdown(
+                    '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">💻 Версия ПО</div>',
+                    unsafe_allow_html=True
+                )
+                st.metric(label="", value=data.get('software_version', '–'), help="Версия прошивки контроллера", label_visibility="collapsed")
             
             with col8:
                 last_update = data.get('timestamp', datetime.now())
-                if isinstance(last_update, str):
-                    try:
-                        last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
-                    except:
-                        last_update = datetime.now()
-                
-                st.markdown('<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">🕐 Обновлено</div>', unsafe_allow_html=True)
-                st.metric(label="Время", value=last_update.strftime("%H:%M:%S"), help="Время последнего обновления", label_visibility="collapsed")
+                st.markdown(
+                    '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">🕐 Обновлено</div>',
+                    unsafe_allow_html=True
+                )
+                st.metric(label="", value=last_update.strftime("%H:%M:%S"), help="Время последнего обновления", label_visibility="collapsed")
             
-            # Статистика работы
+            # Статистика работы (если доступна)
             if DEVICE_AVAILABLE:
                 try:
                     stats = get_statistics()
@@ -221,29 +313,138 @@ def main():
                         col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
                         
                         with col_stats1:
-                            st.markdown('<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">✅ Успешных</div>', unsafe_allow_html=True)
-                            st.metric(label="Успешных", value=stats.get('success_count', 0), label_visibility="collapsed")
+                            st.markdown(
+                                '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">✅ Успешных</div>',
+                                unsafe_allow_html=True
+                            )
+                            st.metric(label="", value=stats.get('success_count', 0), label_visibility="collapsed")
                         
                         with col_stats2:
-                            st.markdown('<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">❌ Ошибок</div>', unsafe_allow_html=True)
-                            st.metric(label="Ошибок", value=stats.get('error_count', 0), label_visibility="collapsed")
+                            st.markdown(
+                                '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">❌ Ошибок</div>',
+                                unsafe_allow_html=True
+                            )
+                            st.metric(label="", value=stats.get('error_count', 0), label_visibility="collapsed")
                         
                         with col_stats3:
                             success_rate = stats.get('success_rate', 0) * 100
-                            st.markdown('<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">📊 Успешность</div>', unsafe_allow_html=True)
-                            st.metric(label="Успешность", value=f"{success_rate:.1f}%", label_visibility="collapsed")
+                            st.markdown(
+                                '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">📊 Успешность</div>',
+                                unsafe_allow_html=True
+                            )
+                            st.metric(label="", value=f"{success_rate:.1f}%", label_visibility="collapsed")
                         
                         with col_stats4:
                             is_running = stats.get('is_running', False)
                             status = "🟢 Работает" if is_running else "🔴 Остановлен"
-                            st.markdown('<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">🔄 Статус</div>', unsafe_allow_html=True)
-                            st.metric(label="Статус", value=status, label_visibility="collapsed")
+                            st.markdown(
+                                '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">🔄 Статус</div>',
+                                unsafe_allow_html=True
+                            )
+                            st.metric(label="", value=status, label_visibility="collapsed")
                 except Exception as e:
                     st.warning(f"⚠️ Не удалось получить статистику: {e}")
             
-            # Заметка о графиках
-            st.subheader("📈 Графики")
-            st.info("📊 Графики временно отключены. Планируется реализация на базе SQL с историей данных.")
+            # Графики
+            if len(st.session_state.data_history) > 1:
+                st.subheader("📈 Графики за последние часы")
+                
+                # Преобразуем историю в DataFrame
+                df = pd.DataFrame(st.session_state.data_history)
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                
+                # График температуры
+                col_temp, col_hum = st.columns(2)
+                
+                with col_temp:
+                    fig_temp = go.Figure()
+                    fig_temp.add_trace(go.Scatter(
+                        x=df['timestamp'], 
+                        y=df['temp_inside'],
+                        mode='lines+markers',
+                        name='Текущая',
+                        line=dict(color='#58a6ff', width=2)
+                    ))
+                    if 'temp_target' in df.columns:
+                        fig_temp.add_trace(go.Scatter(
+                            x=df['timestamp'], 
+                            y=df['temp_target'],
+                            mode='lines',
+                            name='Целевая',
+                            line=dict(color='#f85149', width=1, dash='dash')
+                        ))
+                    
+                    fig_temp.update_layout(
+                        title="🌡️ Температура",
+                        xaxis_title="Время",
+                        yaxis_title="°C",
+                        template="plotly_dark",
+                        height=300
+                    )
+                    st.plotly_chart(fig_temp, use_container_width=True)
+                
+                with col_hum:
+                    fig_hum = go.Figure()
+                    fig_hum.add_trace(go.Scatter(
+                        x=df['timestamp'], 
+                        y=df['humidity'],
+                        mode='lines+markers',
+                        name='Влажность',
+                        line=dict(color='#7c3aed', width=2)
+                    ))
+                    
+                    fig_hum.update_layout(
+                        title="💧 Влажность",
+                        xaxis_title="Время",
+                        yaxis_title="%",
+                        template="plotly_dark",
+                        height=300
+                    )
+                    st.plotly_chart(fig_hum, use_container_width=True)
+                
+                # График CO2 и вентиляции
+                col_co2, col_vent = st.columns(2)
+                
+                with col_co2:
+                    fig_co2 = go.Figure()
+                    fig_co2.add_trace(go.Scatter(
+                        x=df['timestamp'], 
+                        y=df['co2'],
+                        mode='lines+markers',
+                        name='CO₂',
+                        line=dict(color='#f85149', width=2)
+                    ))
+                    
+                    fig_co2.update_layout(
+                        title="🫁 Концентрация CO₂",
+                        xaxis_title="Время",
+                        yaxis_title="ppm",
+                        template="plotly_dark",
+                        height=300
+                    )
+                    st.plotly_chart(fig_co2, use_container_width=True)
+                
+                with col_vent:
+                    if 'ventilation_level' in df.columns:
+                        fig_vent = go.Figure()
+                        fig_vent.add_trace(go.Scatter(
+                            x=df['timestamp'], 
+                            y=df['ventilation_level'],
+                            mode='lines+markers',
+                            name='Вентиляция',
+                            line=dict(color='#56d364', width=2)
+                        ))
+                        
+                        fig_vent.update_layout(
+                            title="🌀 Уровень вентиляции",
+                            xaxis_title="Время",
+                            yaxis_title="%",
+                            template="plotly_dark",
+                            height=300
+                        )
+                        st.plotly_chart(fig_vent, use_container_width=True)
+                    else:
+                        st.info("📊 График вентиляции недоступен (данные не записываются в БД)")
         
         # Проверяем нужно ли автообновление
         if not auto_refresh:

@@ -1,13 +1,8 @@
-#!/usr/bin/env python3
-"""
-Тест облачного Modbus TCP - ИСПРАВЛЕННАЯ ВЕРСИЯ
-"""
-
 import socket
 import struct
 import time
 
-# Регистры КУБ-1063
+# Оригинальные регистры КУБ-1063 (из документации)
 REGISTER_MAP = [
     (0x00D5, 'Текущая температура', 'temperature'),
     (0x00D4, 'Целевая температура', 'temperature'),
@@ -15,9 +10,9 @@ REGISTER_MAP = [
     (0x0085, 'Концентрация CO2', 'co2'),
     (0x0086, 'Концентрация NH3', 'nh3'),
     (0x0083, 'Отрицательное давление', 'pressure'),
-    (0x00D0, 'Целевой уровень вентиляции', 'ventilation'),
-    (0x00D1, 'Фактический уровень вентиляции', 'ventilation'),
-    (0x00D2, 'Активная схема вентиляции', 'scheme'),
+    (0x00D0, 'Целевой уровень вентиляции', 'raw'),
+    (0x00D1, 'Фактический уровень вентиляции', 'raw'),
+    (0x00D2, 'Активная схема вентиляции', 'raw'),
     (0x0301, 'Версия ПО', 'version'),
 ]
 
@@ -38,14 +33,13 @@ def format_value(value, unit_type):
     elif unit_type == 'nh3':
         return f"{value / 10:.1f} ppm"
     elif unit_type == 'ventilation':
-        return f"{value / 10:.1f}%"
+        return f"{value}%"
     elif unit_type == 'scheme':
         schemes = {0: "Базовая", 1: "Туннельная"}
         return schemes.get(value, f"Неизвестно ({value})")
-    elif unit_type == 'version':
-        return f"{value // 100}.{value % 100:02d}"
     else:
         return f"{value}"
+
 
 def test_modbus():
     print("🔍 ТЕСТИРОВАНИЕ MODBUS TCP")
@@ -54,6 +48,7 @@ def test_modbus():
     print("🌐 Сервер: tcp.cloudpub.ru:16212")
     print("=" * 60)
     
+    global results
     results = {}
     
     try:
@@ -66,7 +61,6 @@ def test_modbus():
         # Группируем чтение по 10 регистров подряд
         addresses = [addr for addr, _, _ in REGISTER_MAP]
         addresses = sorted(set(addresses))
-        
         i = 0
         while i < len(addresses):
             start_addr = addresses[i]
@@ -77,17 +71,14 @@ def test_modbus():
                     quantity += 1
                 else:
                     break
-                    
             transaction_id = (start_addr & 0xFFFF)
             request = struct.pack('>HHHBBHH',
                 transaction_id, 0x0000, 0x0006, 0x01, 0x04, start_addr, quantity
             )
-            
             print(f"\n📤 Чтение регистров {hex(start_addr)} - {hex(start_addr+quantity-1)}...")
             sock.send(request)
             response = sock.recv(1024)
             print(f"📥 Ответ: {response.hex()}")
-            
             if len(response) >= 9:
                 function_code = response[7]
                 if function_code == 0x04:
@@ -104,7 +95,6 @@ def test_modbus():
                                 formatted_value = format_value(reg_value, unit_type)
                                 print(f"   ✅ {desc}: {formatted_value} (0x{reg_value:04X})")
                                 results[desc] = formatted_value
-                                
                 elif function_code == 0x84:
                     # Ошибка чтения регистров
                     error_code = response[8] if len(response) > 8 else 0
@@ -118,59 +108,29 @@ def test_modbus():
                     print(f"   ❌ Ошибка чтения регистров {hex(start_addr)}: {error_msg}")
                 else:
                     print(f"   ⚠️ Неожиданный код функции: 0x{function_code:02X}")
-                    
             i += quantity
             time.sleep(0.2)
-            
         sock.close()
         print("✅ Соединение закрыто")
         
-        # Выводим подробную сводку
+        # Выводим сводку
         if results:
             print("\n" + "=" * 60)
             print("📋 СВОДКА ПОКАЗАНИЙ КУБ-1063")
             print("=" * 60)
             
-            # ИСПРАВЛЕННЫЕ категории с правильными названиями
+            # Группируем по категориям
             categories = {
-                "🌡️ ТЕМПЕРАТУРА": [
-                    "Текущая температура",
-                    "Целевая температура"
-                ],
-                "💧 ВЛАЖНОСТЬ И ДАВЛЕНИЕ": [
-                    "Относительная влажность",  # ИСПРАВЛЕНО
-                    "Отрицательное давление"
-                ],
-                "🌬️ ГАЗЫ": [
-                    "Концентрация CO2",  # ИСПРАВЛЕНО
-                    "Концентрация NH3"
-                ],
-                "⚙️ ВЕНТИЛЯЦИЯ": [
-                    "Целевой уровень вентиляции",
-                    "Фактический уровень вентиляции", 
-                    "Активная схема вентиляции"
-                ],
-                "🔧 СИСТЕМА": [
-                    "Версия ПО"
-                ]
+                "🌡️ ТЕМПЕРАТУРА": ["Текущая температура"],
+                "💧 ВЛАЖНОСТЬ": ["Влажность"],
+                "🌬️ CO2": ["CO2"]
             }
             
             for category, items in categories.items():
                 print(f"\n{category}:")
-                category_has_data = False
                 for item in items:
                     if item in results:
                         print(f"   • {item}: {results[item]}")
-                        category_has_data = True
-                
-                if not category_has_data:
-                    print("   • Нет данных")
-            
-            # Дополнительная информация
-            print(f"\n📊 СТАТИСТИКА:")
-            print(f"   • Всего параметров: {len(REGISTER_MAP)}")
-            print(f"   • Получено данных: {len(results)}")
-            print(f"   • Успешность: {len(results)/len(REGISTER_MAP)*100:.1f}%")
             
             print("\n" + "=" * 60)
             print("✅ Тест завершен успешно!")

@@ -7,6 +7,9 @@
 from datetime import datetime
 from typing import Dict, Any
 
+# --- ДОБАВЛЕНО: Импорт для меню ---
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
 # Эмодзи для различных состояний
 EMOJI = {
     'temperature': '🌡️',
@@ -89,6 +92,20 @@ def format_sensor_data(data: Dict[str, Any]) -> str:
     
     return text
 
+
+def build_main_menu(access_level: str = "user") -> InlineKeyboardMarkup:
+    """Возвращает главное меню с inline-кнопками по уровню доступа"""
+    buttons = [
+        [InlineKeyboardButton("📊 Показания", callback_data="show_stats")],
+        [InlineKeyboardButton("📈 Статистика", callback_data="show_history")],
+    ]
+    if access_level in ("operator", "admin"):
+        buttons.append([InlineKeyboardButton("🔄 Сброс аварий", callback_data="reset_alarms")])
+    if access_level == "admin":
+        buttons.append([InlineKeyboardButton("⚙️ Настройки", callback_data="settings")])
+    buttons.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="show_help")])
+    return InlineKeyboardMarkup(buttons)    
+
 def format_system_stats(stats: Dict[str, Any]) -> str:
     """Форматирование статистики системы"""
     
@@ -133,6 +150,22 @@ def format_system_stats(stats: Dict[str, Any]) -> str:
     text += f"• В очереди: `{writer_stats.get('commands_pending', 0)}`\n"
     
     return text
+
+# --- UX ДОПОЛНЕНИЯ ---
+
+async def send_typing_action(update, context):
+    """Отправляет в чат анимацию 'печатает...' для UX"""
+    if hasattr(update, "message") and update.message:
+        await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+    elif hasattr(update, "callback_query") and update.callback_query:
+        await context.bot.send_chat_action(chat_id=update.callback_query.message.chat_id, action="typing")
+
+def error_message(text: str) -> str:
+    """Форматированное сообщение об ошибке для пользователя"""
+    return f"{EMOJI['error']} <b>Ошибка</b>:\n{text}"
+
+# --- /UX ДОПОЛНЕНИЯ ---
+
 
 def _get_temperature_status(temp: float) -> str:
     """Статус температуры по значению"""

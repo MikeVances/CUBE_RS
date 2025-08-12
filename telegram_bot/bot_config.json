@@ -1,0 +1,157 @@
+{
+    "bot_info": {
+      "name": "КУБ-1063 Control Bot",
+      "description": "Бот для управления системой климат-контроля КУБ-1063",
+      "version": "1.0.0"
+    },
+    
+    "permissions": {
+      "allowed_users": [],
+      "admin_users": [],
+      "default_access_level": "user",
+      "auto_register": true
+    },
+    
+    "commands": {
+      "command_timeout": 30,
+      "max_message_length": 4000,
+      "enable_inline_keyboards": true,
+      "enable_callbacks": true
+    },
+    
+    "rate_limiting": {
+      "enabled": true,
+      "default_commands_per_hour": 10,
+      "check_interval_minutes": 5
+    },
+    
+    "data_refresh": {
+      "auto_refresh_interval": 30,
+      "cache_timeout": 60,
+      "show_timestamps": true
+    },
+    
+    "formatting": {
+      "use_emojis": true,
+      "decimal_places": 1,
+      "temperature_unit": "°C",
+      "pressure_unit": "Па",
+      "show_status_icons": true
+    },
+    
+    "notifications": {
+      "enable_alarms": true,
+      "enable_warnings": true,
+      "notify_admins_on_errors": true,
+      "alarm_notification_cooldown": 300
+    },
+    
+    "security": {
+      "log_all_commands": true,
+      "log_failed_attempts": true,
+      "ban_after_failed_attempts": 5,
+      "ban_duration_hours": 24
+    },
+    
+    "system_integration": {
+      "unified_system_config": "config.json",
+      "database_file": "kub_commands.db",
+      "log_file": "telegram_bot.log",
+      "enable_health_checks": true
+    },
+    
+    "register_groups": {
+      "alarms": {
+        "title": "🚨 Управление авариями",
+        "registers": {
+          "0x0020": {
+            "name": "reset_alarms",
+            "title": "Сброс аварий",
+            "emoji": "🔄",
+            "description": "Сброс всех зарегистрированных аварий и предупреждений",
+            "confirmation_required": true,
+            "access_level": "operator"
+          }
+        }
+      },
+      
+      "settings": {
+        "title": "⚙️ Настройки системы",
+        "registers": {
+          "0x003F": {
+            "name": "timezone",
+            "title": "Часовой пояс",
+            "emoji": "🕐",
+            "description": "Установка часового пояса в минутах от UTC",
+            "unit": "мин",
+            "min_value": -720,
+            "max_value": 720,
+            "default_value": 180,
+            "access_level": "admin"
+          }
+        }
+      },
+      
+      "ventilation": {
+        "title": "💨 Система вентиляции",
+        "registers": {
+          "relay_gnv": {
+            "range": "0x0100-0x010F",
+            "title": "Реле ГНВ",
+            "emoji": "🔌",
+            "description": "Управление реле группы непрерывной вентиляции",
+            "min_value": 0,
+            "max_value": 255,
+            "access_level": "engineer"
+          },
+          
+          "control_grv": {
+            "range": "0x0110-0x0117", 
+            "title": "Управление ГРВ",
+            "emoji": "🌬️",
+            "description": "Управление группой регулируемой вентиляции и нагревателями",
+            "values": {
+              "0": "ВЫКЛ",
+              "1": "ВКЛ"
+            },
+            "access_level": "operator"
+          }
+        }
+      }
+    },
+    
+    "help_messages": {
+      "start": "Добро пожаловать в систему управления КУБ-1063! Этот бот позволяет контролировать климатическое оборудование.",
+      
+      "commands": {
+        "/start": "Регистрация и главное меню",
+        "/status": "Текущие показания датчиков",
+        "/stats": "Статистика работы системы", 
+        "/reset": "Сброс аварий (для операторов)",
+        "/help": "Справка по командам",
+        "/permissions": "Информация о ваших правах доступа"
+      },
+      
+      "access_levels": {
+        "user": "👀 Только чтение показаний датчиков",
+        "operator": "🔧 Чтение + сброс аварий + базовое управление",
+        "admin": "⚙️ Управление + изменение настроек системы",
+        "engineer": "🛠️ Полный доступ ко всем функциям"
+      }
+    },
+    
+    "error_messages": {
+      "no_permissions": "❌ У вас нет прав для выполнения этой операции",
+      "rate_limit": "⏰ Превышен лимит команд. Попробуйте позже",
+      "system_error": "🔧 Ошибка системы. Обратитесь к администратору",
+      "invalid_command": "❓ Неизвестная команда. Используйте /help",
+      "user_banned": "🚫 Ваш доступ заблокирован. Обратитесь к администратору"
+    },
+    
+    "success_messages": {
+      "command_executed": "✅ Команда выполнена успешно",
+      "alarm_reset": "🔄 Аварии сброшены",
+      "settings_updated": "⚙️ Настройки обновлены",
+      "user_registered": "👤 Пользователь зарегистрирован"
+    }
+  }

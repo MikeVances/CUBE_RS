@@ -22,3 +22,27 @@ Thumbs.db
 
 # Backup
 backup_*/
+
+# 🔒 СЕКРЕТЫ И ТОКЕНЫ (КРИТИЧНО!)
+config/bot_secrets.json
+config/*_secrets.json
+*.token
+*.key
+.env*
+
+# 📊 БАЗЫ ДАННЫХ  
+*.db
+*.sqlite*
+
+# 📝 ЛОГИ
+*.log
+
+# 🐍 PYTHON
+__pycache__/
+*.pyc
+venv/
+
+# ✅ НЕ исключаем:
+# telegram_bot/bot_config.json  - конфиг бота
+# config/config.json            - настройки системы
+

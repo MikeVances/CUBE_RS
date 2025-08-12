@@ -1,5 +1,5 @@
 """
-Gateway 2 - ИСПРАВЛЕННЫЙ для поддержки FC=03 и FC=04
+Gateway 2 - поддержка FC=03 и FC=04 с конфигурируемыми портами
 Записывает данные И в Holding Registers (FC=03) И в Input Registers (FC=04)
 """
 
@@ -8,6 +8,9 @@ import os
 import time
 import threading
 import logging
+import json
+import argparse
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -49,6 +52,53 @@ DB_TO_REGISTER_MAP = {
     "ventilation_scheme": 0x00D2,
     "day_counter": 0x00D3,
 }
+
+def load_config():
+    """Загрузка конфигурации из config.json"""
+    config_file = Path(__file__).parent.parent / "config.json"
+    
+    if config_file.exists():
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.warning(f"⚠️ Ошибка загрузки config.json: {e}")
+    
+    # Дефолтная конфигурация если файл не найден
+    return {
+        "services": {
+            "gateway2": {"port": 5022}
+        }
+    }
+
+def get_port_config():
+    """Получение порта из разных источников с приоритетами"""
+    # Приоритет: CLI args > config.json > default
+    
+    # 1. Аргументы командной строки (высший приоритет)
+    parser = argparse.ArgumentParser(description="Gateway 2 для КУБ-1063 - FC=03 + FC=04")
+    parser.add_argument("--port", type=int, help="Modbus TCP port (default: config.json or 5022)")
+    parser.add_argument("--config", default="config.json", help="Путь к файлу конфигурации")
+    args, _ = parser.parse_known_args()
+    
+    if args.port:
+        logging.info(f"🔧 Используем порт из аргументов: {args.port}")
+        return args.port
+    
+    # 2. Файл конфигурации
+    try:
+        config = load_config()
+        config_port = config.get("services", {}).get("gateway2", {}).get("port")
+        if config_port:
+            logging.info(f"📄 Используем порт из config.json: {config_port}")
+            return config_port
+    except Exception as e:
+        logging.warning(f"⚠️ Ошибка чтения конфигурации: {e}")
+    
+    # 3. Дефолтное значение
+    default_port = 5022
+    logging.info(f"🔧 Используем дефолтный порт: {default_port}")
+    return default_port
 
 def create_modbus_datastore():
     """Создаёт блоки для ОБОИХ типов регистров"""
@@ -139,17 +189,21 @@ def update_registers_from_database(store):
         logging.error(f"❌ Ошибка чтения данных из БД: {e}")
         return 0
 
-def run_modbus_server(context):
-    """Запускает Modbus TCP сервер на порту 5022"""
+def run_modbus_server(context, port):
+    """Запускает Modbus TCP сервер на указанном порту"""
     try:
-        logging.info("🧲 Запуск Modbus TCP сервера на порту 5022...")
+        logging.info(f"🧲 Запуск Modbus TCP сервера на порту {port}...")
         logging.info("🔧 Поддерживает FC=03 (Holding) и FC=04 (Input) регистры")
-        StartTcpServer(context=context, address=("0.0.0.0", 5022))
+        StartTcpServer(context=context, address=("0.0.0.0", port))
     except Exception as e:
         logging.error(f"❌ Ошибка TCP сервера: {e}")
 
 def main():
+    # Получаем порт из конфигурации
+    tcp_port = get_port_config()
+    
     logging.info("🚀 Запуск ИСПРАВЛЕННОГО Gateway 2 (FC=03 + FC=04)")
+    logging.info(f"🔌 Modbus TCP порт: {tcp_port}")
 
     try:
         # Создаём контекст с ОБОИМИ типами регистров
@@ -184,9 +238,9 @@ def main():
                 logging.error(f"❌ Ошибка в цикле обновления: {e}")
                 time.sleep(3)
 
-    # Стартуем фоновый поток и TCP сервер
+    # Стартуем фоновый поток и TCP сервер с конфигурируемым портом
     threading.Thread(target=update_loop, daemon=True).start()
-    run_modbus_server(context)
+    run_modbus_server(context, tcp_port)  # Передаем порт в функцию
 
 if __name__ == "__main__":
     main()

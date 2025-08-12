@@ -1,0 +1,133 @@
+{
+    "services": {
+      "gateway1": {
+        "name": "Gateway 1 (Modbus TCP + DB)",
+        "command": "python -m modbus.gateway",
+        "port": 5021,
+        "enabled": true,
+        "required": true,
+        "startup_delay": 3.0,
+        "description": "Основной шлюз: RS485 → SQLite → Modbus TCP"
+      },
+      "gateway2": {
+        "name": "Gateway 2 (Modbus TCP 5022)",
+        "command": "python -m modbus.gateway2", 
+        "port": 5022,
+        "enabled": true,
+        "required": true,
+        "startup_delay": 2.0,
+        "description": "Дубликат шлюз: SQLite → Modbus TCP (FC=03 + FC=04)"
+      },
+      "dashboard": {
+        "name": "Dashboard (Streamlit)",
+        "command": "streamlit run dashboard/app.py",
+        "port": 8501,
+        "enabled": true,
+        "required": true,
+        "startup_delay": 5.0,
+        "description": "Веб-интерфейс для мониторинга"
+      },
+      "websocket": {
+        "name": "WebSocket Server",
+        "command": "python publish/websocket_server.py",
+        "port": 8765,
+        "enabled": false,
+        "required": false,
+        "startup_delay": 1.0,
+        "description": "WebSocket API для real-time данных"
+      },
+      "telegram": {
+        "name": "Telegram Bot",
+        "command": "python publish/telegram_bot.py",
+        "port": null,
+        "enabled": false,
+        "required": false,
+        "startup_delay": 1.0,
+        "description": "Telegram бот для мониторинга"
+      },
+      "mqtt": {
+        "name": "MQTT Publisher", 
+        "command": "python publish/mqtt.py",
+        "port": null,
+        "enabled": false,
+        "required": false,
+        "startup_delay": 0.5,
+        "description": "Публикация данных через MQTT"
+      }
+    },
+    
+    "system": {
+      "python_executable": "python",
+      "working_directory": ".",
+      "log_level": "INFO",
+      "startup_timeout": 60,
+      "shutdown_timeout": 15
+    },
+    
+    "rs485": {
+      "port": "/dev/tty.usbserial-210",
+      "baudrate": 9600,
+      "parity": "N",
+      "databits": 8,
+      "stopbits": 1,
+      "timeout": 2.0,
+      "slave_id": 1,
+      "window_duration": 5,
+      "cooldown_duration": 10
+    },
+    
+    "modbus_registers": {
+      "software_version": "0x0301",
+      "digital_outputs_1": "0x0081",
+      "digital_outputs_2": "0x0082", 
+      "digital_outputs_3": "0x00A2",
+      "pressure": "0x0083",
+      "humidity": "0x0084",
+      "co2": "0x0085",
+      "nh3": "0x0086",
+      "grv_base": "0x0087",
+      "grv_tunnel": "0x0088",
+      "damper": "0x0089",
+      "active_alarms": "0x00C3",
+      "registered_alarms": "0x00C7",
+      "active_warnings": "0x00CB",
+      "registered_warnings": "0x00CF",
+      "ventilation_target": "0x00D0",
+      "ventilation_level": "0x00D1",
+      "ventilation_scheme": "0x00D2",
+      "day_counter": "0x00D3",
+      "temp_target": "0x00D4",
+      "temp_inside": "0x00D5",
+      "temp_vent_activation": "0x00D6"
+    },
+    
+    "database": {
+      "file": "kub_data.db",
+      "timeout": 5,
+      "journal_mode": "WAL",
+      "synchronous": "NORMAL"
+    },
+    
+    "timeouts": {
+      "gateway_startup": 10,
+      "dashboard_startup": 15,
+      "service_shutdown": 10,
+      "health_check": 5,
+      "rs485_read": 2.0,
+      "modbus_tcp_connect": 3.0
+    },
+    
+    "logging": {
+      "level": "INFO",
+      "format": "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+      "files": {
+        "gateway1": "gateway1.log",
+        "gateway2": "gateway2.log", 
+        "dashboard": "dashboard.log",
+        "telegram": "telegram_bot.log",
+        "websocket": "websocket.log",
+        "mqtt": "mqtt.log",
+        "service_manager": "service_manager.log"
+      }
+    }
+  }

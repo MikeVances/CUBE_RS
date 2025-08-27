@@ -65,7 +65,7 @@
     },
     
     "rs485": {
-      "port": "/dev/tty.usbserial-210",
+      "port": "/dev/tty.usbserial-21230",
       "baudrate": 9600,
       "parity": "N",
       "databits": 8,

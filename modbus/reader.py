@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, Optional, Any
 
 # Настройки подключения
-PORT = "/dev/tty.usbserial-210"  # Исправлен порт
+PORT = "/dev/tty.usbserial-21230"  # Исправлен порт
 BAUDRATE = 9600
 SLAVE_ID = 1
 TIMEOUT = 2.0

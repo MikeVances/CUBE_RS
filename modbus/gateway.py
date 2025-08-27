@@ -82,7 +82,7 @@ REGISTERS_TO_READ = [
 ]
 
 MODBUS_TCP_PORT = 5021  # Порт для Modbus TCP
-SERIAL_PORT = "/dev/tty.usbserial-210"  # Порт RS485
+SERIAL_PORT = "/dev/tty.tty.usbserial-21230"  # Порт RS485
 
 
 def create_modbus_datastore():

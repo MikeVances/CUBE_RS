@@ -349,6 +349,66 @@ class TelegramBotDB:
             logger.error(f"❌ Ошибка очистки истории: {e}")
             return 0
 
+def find_user_by_username(self, username: str):
+    """Поиск пользователя по username"""
+    try:
+        with sqlite3.connect(self.db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM telegram_users WHERE username = ?
+            """, (username,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"❌ Ошибка поиска пользователя {username}: {e}")
+        return None
+
+def get_all_users(self):
+    """Получение всех пользователей"""
+    try:
+        with sqlite3.connect(self.db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT telegram_id, username, first_name, access_level, is_active, created_at
+                FROM telegram_users ORDER BY created_at DESC
+            """)
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения списка пользователей: {e}")
+        return []
+
+
+
+def find_user_by_username(self, username: str):
+    """Поиск пользователя по username"""
+    try:
+        import sqlite3
+        with sqlite3.connect(self.db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM telegram_users WHERE username = ?", (username,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        import logging
+        logging.error(f"Ошибка поиска пользователя: {e}")
+        return None
+
+def get_all_users(self):
+    """Получение всех пользователей"""
+    try:
+        import sqlite3
+        with sqlite3.connect(self.db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM telegram_users ORDER BY created_at DESC")
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+    except Exception as e:
+        import logging
+        logging.error(f"Ошибка получения пользователей: {e}")
+        return []
+
+
 # =============================================================================
 # ТЕСТИРОВАНИЕ МОДУЛЯ
 # =============================================================================

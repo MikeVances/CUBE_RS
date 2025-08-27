@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Bot для управления системой КУБ-1063
-ВКЛЮЧЕНЫ ВСЕ UX УЛУЧШЕНИЯ ПОЛЬЗОВАТЕЛЯ!
-- Эмуляция печатания
-- Кнопки возврата в главное меню  
-- Подтверждения действий
-- Улучшенная навигация
+ИСПРАВЛЕННАЯ ВЕРСИЯ - БЕЗ КОНФЛИКТОВ RS485
 """
 
 import os
@@ -24,7 +20,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Наши модули
-from modbus.unified_system import UnifiedKUBSystem
 from bot_database import TelegramBotDB
 from bot_permissions import check_user_permission, check_command_rate_limit, get_user_access_level
 from bot_utils import (
@@ -47,13 +42,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class KUBTelegramBot:
-    """Telegram Bot для управления КУБ-1063 с улучшенным UX"""
+    """Telegram Bot для управления КУБ-1063 БЕЗ конфликтов RS485"""
     
     def __init__(self, token: str, config_file: str = "config/telegram_bot.json"):
         self.token = token
         self.config = self._load_config(config_file)
         
-        # Компоненты системы
+        # НЕ создаем UnifiedKUBSystem - работаем через базы данных
         self.kub_system = None
         self.bot_db = TelegramBotDB()
         
@@ -62,33 +57,107 @@ class KUBTelegramBot:
         
         logger.info("🤖 KUBTelegramBot с UX улучшениями инициализирован")
     
-    def _load_config(self, config_file: str) -> Dict[str, Any]:
+    def _load_config(self, config_file: str = "config/telegram_bot.json") -> Dict[str, Any]:
         """Загрузка конфигурации бота"""
+        config = {
+            "admin_users": [],
+            "allowed_users": [],
+            "default_access_level": "user",
+            "max_message_length": 4000
+        }
+        
         try:
+            # Пробуем загрузить основной конфиг
             with open(config_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                main_config = json.load(f)
+                config.update(main_config)
         except FileNotFoundError:
-            logger.warning(f"⚠️ Конфиг {config_file} не найден, используем defaults")
-            return {
-                "allowed_users": [],
-                "admin_users": [],
-                "default_access_level": "user",
-                "command_timeout": 30,
-                "max_message_length": 4000
-            }
-    
-    async def initialize_system(self):
-        """Инициализация UnifiedKUBSystem"""
+            logger.warning(f"⚠️ Конфиг {config_file} не найден")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга {config_file}: {e}")
+        
         try:
-            logger.info("🚀 Инициализация UnifiedKUBSystem...")
-            self.kub_system = UnifiedKUBSystem()
-            self.kub_system.start()
-            logger.info("✅ UnifiedKUBSystem запущен")
-            return True
+            # Загружаем секреты из bot_secrets.json
+            secrets_file = "config/bot_secrets.json"
+            with open(secrets_file, 'r', encoding='utf-8') as f:
+                secrets = json.load(f)
+                
+            # Извлекаем admin_users из секретов
+            if "telegram" in secrets:
+                telegram_config = secrets["telegram"]
+                if "admin_users" in telegram_config:
+                    config["admin_users"] = telegram_config["admin_users"]
+                    logger.info(f"✅ Загружено {len(config['admin_users'])} администраторов")
+            
+        except FileNotFoundError:
+            logger.warning("⚠️ Файл config/bot_secrets.json не найден")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга bot_secrets.json: {e}")
         except Exception as e:
-            logger.error(f"❌ Ошибка инициализации системы: {e}")
-            return False
+            logger.error(f"❌ Ошибка загрузки секретов: {e}")
+        
+        return config
+
+    # =======================================================================
+    # РАБОТА С ДАННЫМИ ЧЕРЕЗ SQLite (вместо прямого RS485)
+    # =======================================================================
     
+    def get_current_data_from_db(self):
+        """Читаем текущие данные из SQLite (заполняется основной системой)"""
+        try:
+            import sqlite3
+            with sqlite3.connect("kub_data.db") as conn:
+                cursor = conn.execute("""
+                    SELECT temp_inside, temp_target, humidity, co2, nh3, pressure,
+                           ventilation_level, ventilation_target, active_alarms,
+                           active_warnings, updated_at 
+                    FROM latest_data WHERE id=1
+                """)
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'temp_inside': row[0] / 10.0 if row[0] else 0,  # Конвертируем из десятых
+                        'temp_target': row[1] / 10.0 if row[1] else 0,
+                        'humidity': row[2] / 10.0 if row[2] else 0,
+                        'co2': row[3] if row[3] else 0,
+                        'nh3': row[4] / 10.0 if row[4] else 0,
+                        'pressure': row[5] / 10.0 if row[5] else 0,
+                        'ventilation_level': row[6] / 10.0 if row[6] else 0,
+                        'ventilation_target': row[7] / 10.0 if row[7] else 0,
+                        'active_alarms': row[8] if row[8] else 0,
+                        'active_warnings': row[9] if row[9] else 0,
+                        'updated_at': row[10],
+                        'connection_status': 'connected' if row[10] else 'disconnected'
+                    }
+                return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения данных из БД: {e}")
+            return None
+
+    def add_write_command_to_db(self, register: int, value: int, user_info: str):
+        """Добавляем команду записи в очередь (выполнит основная система)"""
+        try:
+            import sqlite3
+            import uuid
+            from datetime import datetime
+            
+            command_id = str(uuid.uuid4())[:8]
+            
+            with sqlite3.connect("kub_commands.db") as conn:
+                conn.execute("""
+                    INSERT INTO write_commands 
+                    (id, register, value, user_info, created_at, status, priority)
+                    VALUES (?, ?, ?, ?, ?, 'pending', 1)
+                """, (command_id, register, value, user_info, datetime.now().isoformat()))
+                conn.commit()
+            
+            logger.info(f"📝 Команда записи добавлена: reg=0x{register:04X}, val={value}, id={command_id}")
+            return True, command_id
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления команды: {e}")
+            return False, str(e)
+
     # =======================================================================
     # ОБРАБОТЧИКИ КОМАНД
     # =======================================================================
@@ -97,7 +166,7 @@ class KUBTelegramBot:
         """Команда /start - регистрация и главное меню"""
         user = update.effective_user
         
-        # 🎯 UX: Показываем печатание
+        # Показываем печатание
         await send_typing_action(update, context)
         
         # Регистрируем пользователя
@@ -138,48 +207,24 @@ class KUBTelegramBot:
             )
             return
 
-        # Проверяем лимит команд
-        allowed, message = check_command_rate_limit(user.id, self.bot_db)
-        if not allowed:
-            access_level = self.bot_db.get_user_access_level(user.id)
-            back_menu = build_back_menu(access_level)
-            await update.message.reply_text(
-                error_message(f"Превышен лимит команд\n{message}"),
-                reply_markup=back_menu,
-                parse_mode="Markdown"
-            )
-            return
-
         try:
-            # 🎯 UX: Показываем печатание
             await send_typing_action(update, context)
             
-            if not self.kub_system:
-                access_level = self.bot_db.get_user_access_level(user.id)
-                back_menu = build_back_menu(access_level)
-                await update.message.reply_text(
-                    error_message("Система КУБ-1063 не инициализирована"),
-                    reply_markup=back_menu,
-                    parse_mode="Markdown"
-                )
-                return
+            # Читаем данные из SQLite
+            data = self.get_current_data_from_db()
             
-            data = self.kub_system.get_current_data()
-            if not data:
-                access_level = self.bot_db.get_user_access_level(user.id)
-                back_menu = build_back_menu(access_level)
-                await update.message.reply_text(
-                    error_message("Нет данных от КУБ-1063"),
-                    reply_markup=back_menu,
-                    parse_mode="Markdown"
+            if data:
+                status_text = format_sensor_data(data)
+            else:
+                status_text = error_message(
+                    "Нет данных от КУБ-1063\n\n"
+                    "Запустите основную систему:\n"
+                    "`python tools/start_all_services.py`"
                 )
-                return
             
-            status_text = format_sensor_data(data)
             access_level = self.bot_db.get_user_access_level(user.id)
             menu = build_main_menu(access_level)
             
-            # 🎯 UX: Обрезаем текст если слишком длинный
             status_text = truncate_text(status_text, 4000)
             
             await update.message.reply_text(
@@ -199,47 +244,46 @@ class KUBTelegramBot:
                 reply_markup=back_menu,
                 parse_mode="Markdown"
             )
-            self.bot_db.log_user_command(user.id, "read", None, False)
-    
+
     async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /stats - статистика системы"""
         user = update.effective_user
 
         if not check_user_permission(user.id, "read", self.bot_db):
-            access_level = self.bot_db.get_user_access_level(user.id)
-            back_menu = build_back_menu(access_level)
             await update.message.reply_text(
                 error_message("У вас нет прав для чтения статистики"),
-                reply_markup=back_menu,
                 parse_mode="Markdown"
             )
             return
 
         try:
-            # 🎯 UX: Показываем печатание
             await send_typing_action(update, context)
             
-            if not self.kub_system:
-                system_stats = {"error": "Система не инициализирована"}
+            # Простая статистика без UnifiedKUBSystem
+            stats_text = "📈 **СТАТИСТИКА СИСТЕМЫ КУБ-1063**\n\n"
+            
+            # Получаем информацию из базы
+            data = self.get_current_data_from_db()
+            if data:
+                stats_text += f"🔄 **Последнее обновление:** `{data.get('updated_at', 'неизвестно')}`\n"
+                stats_text += f"🌡️ **Текущая температура:** `{data.get('temp_inside', 0):.1f}°C`\n"
+                stats_text += f"💧 **Влажность:** `{data.get('humidity', 0):.1f}%`\n"
+                stats_text += f"🚨 **Активные аварии:** `{data.get('active_alarms', 0)}`\n"
             else:
-                system_stats = self.kub_system.get_system_statistics()
+                stats_text += "❌ Нет данных от основной системы\n"
             
             # Получаем статистику пользователя
             user_stats = self.bot_db.get_user_stats(user.id)
             
-            stats_text = format_system_stats(system_stats)
-            
             if user_stats:
                 stats_text += f"\n**👤 ВАША СТАТИСТИКА:**\n"
-                stats_text += f"• Всего команд: `{user_stats['total_commands']}`\n"
-                stats_text += f"• За сегодня: `{user_stats['commands_today']}`\n"
-                stats_text += f"• Успешность: `{user_stats['success_rate']:.1f}%`\n"
+                stats_text += f"• Всего команд: `{user_stats.get('total_commands', 0)}`\n"
+                stats_text += f"• За сегодня: `{user_stats.get('commands_today', 0)}`\n"
+                stats_text += f"• Успешность: `{user_stats.get('success_rate', 0):.1f}%`\n"
             
-            # 🎯 UX: Специальное меню для статистики
             access_level = self.bot_db.get_user_access_level(user.id)
             menu = build_stats_menu(access_level)
             
-            # 🎯 UX: Обрезаем текст если слишком длинный
             stats_text = truncate_text(stats_text, 4000)
             
             await update.message.reply_text(
@@ -252,44 +296,112 @@ class KUBTelegramBot:
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
-            access_level = self.bot_db.get_user_access_level(user.id)
-            back_menu = build_back_menu(access_level)
             await update.message.reply_text(
                 error_message(f"Ошибка получения статистики: {str(e)}"),
-                reply_markup=back_menu,
                 parse_mode="Markdown"
             )
-            self.bot_db.log_user_command(user.id, "stats", None, False)
+
+    # =======================================================================
+    # УПРАВЛЕНИЕ РОЛЯМИ ПОЛЬЗОВАТЕЛЕЙ
+    # =======================================================================
     
-    async def cmd_reset_alarms(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда /reset - сброс аварий"""
+    async def cmd_promote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /promote - повышение пользователя (только админы)"""
         user = update.effective_user
-
-        # Проверяем права доступа
-        if not check_user_permission(user.id, "reset_alarms", self.bot_db):
-            access_level = self.bot_db.get_user_access_level(user.id)
-            back_menu = build_back_menu(access_level)
-            await update.message.reply_text(
-                error_message("У вас нет прав для сброса аварий"),
-                reply_markup=back_menu,
-                parse_mode="Markdown"
-            )
-            return
-
-        # 🎯 UX: Показываем подтверждение с кнопками
-        confirmation_menu = build_confirmation_menu("reset_alarms_confirmed", "main_menu")
         
-        await update.message.reply_text(
-            warning_message("Вы уверены, что хотите сбросить все аварии?\n\nЭто действие нельзя отменить!"),
-            reply_markup=confirmation_menu,
-            parse_mode="Markdown"
-        )
-    
+        # Проверяем права админа
+        if user.id not in self.config.get("admin_users", []):
+            await update.message.reply_text("❌ У вас нет прав администратора")
+            return
+        
+        try:
+            args = context.args
+            if len(args) < 2:
+                await update.message.reply_text(
+                    "📖 Использование: `/promote @username уровень`\n\n"
+                    "Доступные уровни:\n"
+                    "• `user` - только чтение\n"
+                    "• `operator` - чтение + сброс аварий\n"
+                    "• `admin` - полный доступ\n"
+                    "• `engineer` - максимальный доступ",
+                    parse_mode="Markdown"
+                )
+                return
+            
+            username = args[0].replace('@', '')
+            new_level = args[1].lower()
+            
+            if new_level not in ['user', 'operator', 'admin', 'engineer']:
+                await update.message.reply_text("❌ Неверный уровень доступа")
+                return
+            
+            # Ищем пользователя по username
+            target_user = self.bot_db.find_user_by_username(username)
+            if not target_user:
+                await update.message.reply_text(f"❌ Пользователь @{username} не найден")
+                return
+            
+            # Обновляем уровень доступа
+            success = self.bot_db.set_user_access_level(target_user['telegram_id'], new_level)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ Пользователь @{username} повышен до уровня `{new_level}`",
+                    parse_mode="Markdown"
+                )
+                logger.info(f"🔝 Админ {user.id} повысил @{username} до {new_level}")
+            else:
+                await update.message.reply_text("❌ Ошибка обновления прав доступа")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка команды promote: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+    async def cmd_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /users - список пользователей (только админы)"""
+        user = update.effective_user
+        
+        if user.id not in self.config.get("admin_users", []):
+            await update.message.reply_text("❌ У вас нет прав администратора")
+            return
+        
+        try:
+            users = self.bot_db.get_all_users()
+            
+            if not users:
+                await update.message.reply_text("📋 Пользователи не найдены")
+                return
+            
+            text = "👥 **СПИСОК ПОЛЬЗОВАТЕЛЕЙ:**\n\n"
+            
+            for user_data in users:
+                username = user_data.get('username', 'нет')
+                first_name = user_data.get('first_name', '')
+                access_level = user_data.get('access_level', 'user')
+                is_active = user_data.get('is_active', True)
+                
+                status = "✅" if is_active else "❌"
+                
+                text += f"{status} **{first_name}** (@{username})\n"
+                text += f"   ID: `{user_data['telegram_id']}`\n"
+                text += f"   Доступ: `{access_level}`\n\n"
+            
+            # Разбиваем длинное сообщение на части
+            if len(text) > 4000:
+                parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+                for part in parts:
+                    await update.message.reply_text(part, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(text, parse_mode="Markdown")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка команды users: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /help - справка"""
         user = update.effective_user
         
-        # 🎯 UX: Показываем печатание
         await send_typing_action(update, context)
         
         access_level = self.bot_db.get_user_access_level(user.id)
@@ -301,26 +413,16 @@ class KUBTelegramBot:
             "• `/status` — показания датчиков\n"
             "• `/stats` — статистика системы\n"
             "• `/help` — эта справка\n\n"
-            "**🔘 КНОПКИ МЕНЮ:**\n"
-            "• 📊 Показания — текущие данные\n"
-            "• 🔄 Обновить — свежие данные\n"
-            "• 📈 Статистика — история и статистика\n"
-            "• 🏠 Главное меню — возврат в главное меню\n"
         )
         
-        if access_level in ("operator", "admin", "engineer"):
-            help_text += "• 🚨 Сброс аварий — сброс активных аварий\n"
+        if user.id in self.config.get("admin_users", []):
+            help_text += (
+                "**👑 КОМАНДЫ АДМИНИСТРАТОРА:**\n"
+                "• `/promote @user уровень` — изменить права\n"
+                "• `/users` — список всех пользователей\n\n"
+            )
         
-        if access_level in ("admin", "engineer"):
-            help_text += "• ⚙️ Настройки — управление системой\n"
-        
-        help_text += f"\n**🔐 ВАШ УРОВЕНЬ ДОСТУПА:** `{access_level}`\n"
-        
-        permissions = self.bot_db.get_access_permissions(access_level)
-        if permissions:
-            help_text += f"• Лимит команд: `{permissions.get('commands_per_hour', 5)}/час`\n"
-        
-        help_text += "\n💡 **Совет:** Используйте кнопки для быстрой навигации!"
+        help_text += f"**🔐 ВАШ УРОВЕНЬ ДОСТУПА:** `{access_level}`\n"
         
         menu = build_main_menu(access_level)
         
@@ -329,22 +431,19 @@ class KUBTelegramBot:
             reply_markup=menu,
             parse_mode="Markdown"
         )
-        
-        self.bot_db.log_user_command(user.id, "help", None, True)
-    
+
     # =======================================================================
     # ОБРАБОТЧИКИ CALLBACK QUERY (INLINE КНОПКИ)
     # =======================================================================
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """🎯 UX: Обработчик inline кнопок с улучшенной навигацией"""
+        """Обработчик inline кнопок"""
         query = update.callback_query
-        await query.answer()  # Убираем "часики" на кнопке
+        await query.answer()
         
         data = query.data
         
         try:
-            # 🎯 UX: Показываем печатание для всех действий
             await send_typing_action(query, context)
             
             if data == "show_status":
@@ -381,7 +480,7 @@ class KUBTelegramBot:
             )
 
     async def _handle_main_menu(self, query, context):
-        """🎯 UX: Показать главное меню"""
+        """Показать главное меню"""
         user = query.from_user
         access_level = self.bot_db.get_user_access_level(user.id)
         menu = build_main_menu(access_level)
@@ -397,7 +496,7 @@ class KUBTelegramBot:
         await self._handle_refresh_status(query, context)
 
     async def _handle_refresh_status(self, query, context):
-        """🎯 UX: Обновление статуса с улучшенной обработкой"""
+        """Обновление статуса из SQLite базы"""
         user = query.from_user
         
         if not check_user_permission(user.id, "read", self.bot_db):
@@ -411,23 +510,23 @@ class KUBTelegramBot:
             return
         
         try:
-            if not self.kub_system:
-                access_level = self.bot_db.get_user_access_level(user.id)
-                back_menu = build_back_menu(access_level)
-                await query.edit_message_text(
-                    error_message("Система КУБ-1063 не инициализирована"),
-                    reply_markup=back_menu,
-                    parse_mode="Markdown"
-                )
-                return
+            # Читаем данные из SQLite
+            data = self.get_current_data_from_db()
             
-            data = self.kub_system.get_current_data()
-            status_text = format_sensor_data(data) if data else error_message("Нет данных")
+            if data:
+                status_text = format_sensor_data(data)
+            else:
+                status_text = error_message(
+                    "Нет данных от КУБ-1063\n\n"
+                    "Возможные причины:\n"
+                    "• Основная система не запущена\n"
+                    "• Нет связи с контроллером\n\n"
+                    "Запустите: `python tools/start_all_services.py`"
+                )
             
             access_level = self.bot_db.get_user_access_level(user.id)
             menu = build_main_menu(access_level)
             
-            # 🎯 UX: Обрезаем текст если слишком длинный
             status_text = truncate_text(status_text, 4000)
             
             await query.edit_message_text(
@@ -436,7 +535,7 @@ class KUBTelegramBot:
                 parse_mode="Markdown"
             )
             
-            self.bot_db.log_user_command(user.id, "read", None, True)
+            self.bot_db.log_user_command(user.id, "read", None, data is not None)
             
         except Exception as e:
             logger.error(f"❌ Ошибка обновления статуса: {e}")
@@ -453,7 +552,7 @@ class KUBTelegramBot:
         await self._handle_refresh_stats(query, context)
 
     async def _handle_refresh_stats(self, query, context):
-        """🎯 UX: Обновление статистики с специальным меню"""
+        """Обновление статистики"""
         user = query.from_user
         
         if not check_user_permission(user.id, "read", self.bot_db):
@@ -467,26 +566,25 @@ class KUBTelegramBot:
             return
         
         try:
-            if not self.kub_system:
-                system_stats = {"error": "Система не инициализирована"}
+            # Простая статистика
+            stats_text = "📈 **СТАТИСТИКА СИСТЕМЫ КУБ-1063**\n\n"
+            
+            data = self.get_current_data_from_db()
+            if data:
+                stats_text += f"🔄 **Последнее обновление:** `{data.get('updated_at', 'неизвестно')}`\n"
+                stats_text += f"🌡️ **Температура:** `{data.get('temp_inside', 0):.1f}°C`\n"
+                stats_text += f"💧 **Влажность:** `{data.get('humidity', 0):.1f}%`\n"
             else:
-                system_stats = self.kub_system.get_system_statistics()
+                stats_text += "❌ Нет данных от основной системы\n"
             
             user_stats = self.bot_db.get_user_stats(user.id)
-            
-            stats_text = format_system_stats(system_stats)
-            
             if user_stats:
                 stats_text += f"\n**👤 ВАША СТАТИСТИКА:**\n"
-                stats_text += f"• Всего команд: `{user_stats['total_commands']}`\n"
-                stats_text += f"• За сегодня: `{user_stats['commands_today']}`\n"
-                stats_text += f"• Успешность: `{user_stats['success_rate']:.1f}%`\n"
+                stats_text += f"• Всего команд: `{user_stats.get('total_commands', 0)}`\n"
             
-            # 🎯 UX: Специальное меню для статистики
             access_level = self.bot_db.get_user_access_level(user.id)
             menu = build_stats_menu(access_level)
             
-            # 🎯 UX: Обрезаем текст если слишком длинный
             stats_text = truncate_text(stats_text, 4000)
             
             await query.edit_message_text(
@@ -508,7 +606,7 @@ class KUBTelegramBot:
             )
 
     async def _handle_reset_alarms(self, query, context):
-        """🎯 UX: Запрос подтверждения сброса аварий с кнопками"""
+        """Запрос подтверждения сброса аварий"""
         user = query.from_user
         
         if not check_user_permission(user.id, "reset_alarms", self.bot_db):
@@ -521,7 +619,6 @@ class KUBTelegramBot:
             )
             return
         
-        # 🎯 UX: Используем специальное меню подтверждения
         confirmation_menu = build_confirmation_menu("reset_alarms_confirmed", "main_menu")
         
         await query.edit_message_text(
@@ -531,7 +628,7 @@ class KUBTelegramBot:
         )
 
     async def _handle_confirm_reset_alarms(self, query, context):
-        """🎯 UX: Подтвержденный сброс аварий с обратной связью"""
+        """Подтвержденный сброс аварий через систему команд"""
         user = query.from_user
         
         if not check_user_permission(user.id, "reset_alarms", self.bot_db):
@@ -545,38 +642,29 @@ class KUBTelegramBot:
             return
         
         try:
-            if not self.kub_system:
-                access_level = self.bot_db.get_user_access_level(user.id)
-                back_menu = build_back_menu(access_level)
-                await query.edit_message_text(
-                    error_message("Система КУБ-1063 не инициализирована"),
-                    reply_markup=back_menu,
-                    parse_mode="Markdown"
-                )
-                return
-            
-            # 🎯 UX: Показываем процесс выполнения
+            # Показываем процесс выполнения
             await query.edit_message_text(
                 loading_message("Выполняется сброс аварий..."),
                 parse_mode="Markdown"
             )
             
-            # Выполняем сброс аварий через систему
-            result = self.kub_system.reset_alarms()
+            # Добавляем команду сброса в очередь (регистр 0x0020, значение 1)
+            user_info = f"telegram_user_{user.id}_{user.username or user.first_name}"
+            success, result = self.add_write_command_to_db(0x0020, 1, user_info)
             
             access_level = self.bot_db.get_user_access_level(user.id)
             menu = build_main_menu(access_level)
             
-            if result:
+            if success:
                 await query.edit_message_text(
-                    success_message("🔄 Все аварии были успешно сброшены!"),
+                    success_message(f"🔄 Команда сброса аварий отправлена!\n\nID команды: `{result}`\n\nВыполнение может занять несколько секунд."),
                     reply_markup=menu,
                     parse_mode="Markdown"
                 )
                 self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", True)
             else:
                 await query.edit_message_text(
-                    error_message("Ошибка выполнения сброса аварий\n\nПопробуйте еще раз или обратитесь к администратору."),
+                    error_message(f"Ошибка отправки команды:\n{result}"),
                     reply_markup=menu,
                     parse_mode="Markdown"
                 )
@@ -587,14 +675,13 @@ class KUBTelegramBot:
             access_level = self.bot_db.get_user_access_level(user.id)
             back_menu = build_back_menu(access_level)
             await query.edit_message_text(
-                error_message(f"Ошибка: {str(e)}\n\nОбратитесь к администратору."),
+                error_message(f"Ошибка: {str(e)}"),
                 reply_markup=back_menu,
                 parse_mode="Markdown"
             )
-            self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", False)
 
     async def _handle_show_help(self, query, context):
-        """🎯 UX: Показать справку через callback"""
+        """Показать справку через callback"""
         user = query.from_user
         access_level = self.bot_db.get_user_access_level(user.id)
         
@@ -625,7 +712,7 @@ class KUBTelegramBot:
         )
 
     async def _handle_settings(self, query, context):
-        """🎯 UX: Настройки (для админов) с обратной связью"""
+        """Настройки (для админов)"""
         user = query.from_user
         
         if not check_user_permission(user.id, "write", self.bot_db):
@@ -646,100 +733,101 @@ class KUBTelegramBot:
             reply_markup=menu,
             parse_mode="Markdown"
         )
-    
+
     # =======================================================================
-    # ЗАПУСК И ОСТАНОВКА БОТА
+    # ЗАПУСК БЕЗ КОНФЛИКТОВ
     # =======================================================================
 
     async def start_bot(self):
-        """Запуск Telegram Bot"""
+        """Исправленный запуск бота БЕЗ создания собственной системы RS485"""
         try:
-            # Инициализируем систему
-            if not await self.initialize_system():
-                logger.error("❌ Не удалось инициализировать систему")
-                return False
-
-            # Создаём Telegram Application
+            logger.info("🚀 Инициализация Telegram Bot (без RS485)...")
+            
+            # Инициализируем только базы данных
+            from modbus.modbus_storage import init_db
+            init_db()
+            
+            # Создаём приложение Telegram
             self.application = Application.builder().token(self.token).build()
 
             # Регистрируем обработчики команд
             self.application.add_handler(CommandHandler("start", self.cmd_start))
             self.application.add_handler(CommandHandler("status", self.cmd_status))
             self.application.add_handler(CommandHandler("stats", self.cmd_stats))
-            self.application.add_handler(CommandHandler("reset", self.cmd_reset_alarms))
             self.application.add_handler(CommandHandler("help", self.cmd_help))
-
-            # Обработчик inline кнопок
+            
+            # УПРАВЛЕНИЕ РОЛЯМИ
+            self.application.add_handler(CommandHandler("promote", self.cmd_promote))
+            self.application.add_handler(CommandHandler("users", self.cmd_users))
+            
+            # Обработчик кнопок
             self.application.add_handler(CallbackQueryHandler(self.handle_callback))
 
-            logger.info("🚀 Запуск Telegram Bot с UX улучшениями...")
+            logger.info("🚀 Запуск Telegram Bot...")
 
-            # Инициализируем приложение
-            await self.application.initialize()
-            await self.application.start()
-
-            # Запускаем polling
-            await self.application.updater.start_polling(drop_pending_updates=True)
-
-            # Ждём остановки
-            await self.application.updater.idle()
-
+            # Запускаем только polling, без других систем
+            await self.application.run_polling(drop_pending_updates=True)
+            
         except Exception as e:
             logger.error(f"❌ Ошибка запуска бота: {e}")
             raise
-
-    async def stop_bot(self):
-        """Остановка бота"""
-        try:
-            logger.info("🛑 Остановка Telegram Bot...")
-
-            if self.application:
-                if hasattr(self.application, 'updater') and self.application.updater.running:
-                    await self.application.updater.stop()
-                await self.application.stop()
-                await self.application.shutdown()
-
-            if self.kub_system:
-                self.kub_system.stop()
-
-            logger.info("🛑 Telegram Bot остановлен")
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка остановки: {e}")
 
 # =============================================================================
 # ОСНОВНАЯ ФУНКЦИЯ
 # =============================================================================
 
-async def main():
+def main():
     """Основная функция запуска"""
-    # Получаем токен бота
+    print("🤖 TELEGRAM BOT ДЛЯ КУБ-1063 (ИСПРАВЛЕННЫЙ)")
+    print("=" * 50)
+    
+    # Получаем токен из bot_secrets.json или переменной окружения
+    token = None
+    
     try:
-        from secure_config import SecureConfig
-        config = SecureConfig()
-        token = config.get_bot_token()
-    except ImportError:
-        # Fallback если secure_config недоступен
+        # Сначала пробуем bot_secrets.json
+        with open("config/bot_secrets.json", 'r', encoding='utf-8') as f:
+            secrets = json.load(f)
+            if "telegram" in secrets and "bot_token" in secrets["telegram"]:
+                token = secrets["telegram"]["bot_token"]
+                logger.info("✅ Токен загружен из bot_secrets.json")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось загрузить токен из bot_secrets.json: {e}")
+    
+    # Если не удалось из файла, пробуем переменную окружения
+    if not token:
         token = os.getenv('TELEGRAM_BOT_TOKEN')
+        if token:
+            logger.info("✅ Токен загружен из переменной окружения")
+    
+    # Если не удалось из secure_config.py
+    if not token:
+        try:
+            from telegram_bot.secure_config import SecureConfig
+            config = SecureConfig()
+            token = config.get_bot_token()
+            if token:
+                logger.info("✅ Токен загружен из secure_config.py")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось загрузить из secure_config.py: {e}")
 
     if not token:
         print("❌ Не найден TELEGRAM_BOT_TOKEN")
-        print("💡 Установите токен: export TELEGRAM_BOT_TOKEN='your_token_here'")
+        print("💡 Добавьте токен в config/bot_secrets.json:")
+        print('{"telegram": {"bot_token": "your_token", "admin_users": [your_id]}}')
         return
 
-    # Создаём и запускаем бота
+    # Создаём бота
     bot = KUBTelegramBot(token)
 
     try:
-        await bot.start_bot()
+        import asyncio
+        asyncio.run(bot.start_bot())
+        
     except KeyboardInterrupt:
         print("\n🛑 Получен сигнал остановки...")
-        await bot.stop_bot()
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
-        await bot.stop_bot()
 
 if __name__ == "__main__":
-    print("🤖 TELEGRAM BOT ДЛЯ КУБ-1063 (Enhanced UX)")
-    print("=" * 50)
-    asyncio.run(main())
+    main()

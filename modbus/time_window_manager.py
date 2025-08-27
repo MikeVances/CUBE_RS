@@ -192,7 +192,7 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="TimeWindowManager for RS485 access")
-    parser.add_argument("--port", dest="port", default="/dev/tty.usbserial-210", help="Serial port path, e.g. /dev/tty.usbserial-210")
+    parser.add_argument("--port", dest="port", default="/dev/tty.usbserial-210", help="Serial port path, e.g. /dev/tty.usbserial-21230")
     parser.add_argument("--window", dest="window", type=int, default=5, help="Access window duration (sec)")
     parser.add_argument("--cooldown", dest="cooldown", type=int, default=10, help="Cooldown between windows (sec)")
     args = parser.parse_args()

@@ -81,8 +81,8 @@ REGISTERS_TO_READ = [
     0x00D6,  # Температура активации вентиляции
 ]
 
-MODBUS_TCP_PORT = 5021  # Порт для Modbus TCP
-SERIAL_PORT = "/dev/tty.tty.usbserial-21230"  # Порт RS485
+MODBUS_TCP_PORT = 5023  # Порт для Modbus TCP
+SERIAL_PORT = "/dev/tty.usbserial-21230"  # Порт RS485
 
 
 def create_modbus_datastore():
@@ -183,6 +183,16 @@ def main():
                 def data_callback(data):
                     logging.info(f"🔔 Callback вызван с данными: {data}")
                     data_result[0] = data
+                    
+                    # Сохраняем данные в SQLite сразу в callback
+                    try:
+                        logging.info(f"🔍 Попытка сохранения данных: {list(data.keys())}")
+                        update_data(**data)
+                        logging.info("💾 Данные сохранены в БД")
+                    except Exception as e:
+                        logging.error(f"❌ Ошибка сохранения в БД: {e}")
+                        import traceback
+                        logging.error(traceback.format_exc())
 
                 logging.info("📤 Отправка запроса в TimeWindowManager…")
                 request_rs485_read_all(data_callback)
@@ -202,17 +212,10 @@ def main():
                         logging.info(f"📡 Ретранслировано {updated_count} регистров")
                     except Exception as e:
                         logging.error(f"❌ Ошибка ретрансляции: {e}")
-
-                    # Сохраняем данные в SQLite для дашборда
-                    try:
-                        update_data(**data)
-                        logging.info("💾 Данные сохранены в БД")
-                    except Exception as e:
-                        logging.error(f"❌ Ошибка сохранения в БД: {e}")
                 else:
                     logging.warning("⚠️ Нет связи с КУБ‑1063 или нет данных")
 
-                time.sleep(10)  # Интервал опроса
+                time.sleep(30)  # Увеличенный интервал опроса для записи данных
                 
             except Exception as e:
                 logging.error(f"❌ Ошибка в цикле ретрансляции: {e}")

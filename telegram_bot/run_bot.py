@@ -14,11 +14,8 @@ from telegram_bot.bot_main import KUBTelegramBot
 import json
 import logging
 
-def main():
-    print("🤖 TELEGRAM BOT - ИЗОЛИРОВАННЫЙ ЗАПУСК")
-    print("=" * 40)
-    
-    # Получаем токен
+async def run_bot_async():
+    """Асинхронная функция для запуска бота"""
     try:
         with open("config/bot_secrets.json", 'r') as f:
             secrets = json.load(f)
@@ -27,26 +24,38 @@ def main():
         print(f"❌ Ошибка загрузки токена: {e}")
         return
     
-    # Создаем и запускаем бота в изолированном event loop
     bot = KUBTelegramBot(token)
+    await bot.start_bot()
+
+def main():
+    print("🤖 TELEGRAM BOT - ИЗОЛИРОВАННЫЙ ЗАПУСК")
+    print("=" * 40)
     
-    # Принудительно закрываем любые существующие event loops
     try:
+        # Проверяем наличие активного event loop
         loop = asyncio.get_running_loop()
-        loop.close()
-    except:
-        pass
-    
-    # Создаем новый event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        loop.run_until_complete(bot.start_bot())
-    except KeyboardInterrupt:
-        print("\n🛑 Остановка...")
-    finally:
-        loop.close()
+        print("⚠️  Обнаружен активный event loop, используем subprocess")
+        
+        # Запускаем в отдельном процессе
+        import subprocess
+        import sys
+        result = subprocess.run([
+            sys.executable, __file__, "--subprocess"
+        ], capture_output=False)
+        return result.returncode
+        
+    except RuntimeError:
+        # Нет активного loop - можем использовать asyncio.run
+        try:
+            asyncio.run(run_bot_async())
+        except KeyboardInterrupt:
+            print("\n🛑 Остановка...")
+            return 0
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--subprocess":
+        # Запущены в subprocess - используем asyncio.run напрямую  
+        asyncio.run(run_bot_async())
+    else:
+        main()

@@ -3,7 +3,7 @@
       "gateway1": {
         "name": "Gateway 1 (Modbus TCP + DB)",
         "command": "python -m modbus.gateway",
-        "port": 5021,
+        "port": 5023,
         "enabled": true,
         "required": true,
         "startup_delay": 3.0,
@@ -38,9 +38,9 @@
       },
       "telegram": {
         "name": "Telegram Bot",
-        "command": "python publish/telegram_bot.py",
+        "command": "python telegram_bot/run_bot.py",
         "port": null,
-        "enabled": false,
+        "enabled": true,
         "required": false,
         "startup_delay": 1.0,
         "description": "Telegram бот для мониторинга"

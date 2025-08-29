@@ -17,8 +17,16 @@ try:
 except Exception:
     from .reader import KUB1063Reader
 
+class ModbusConnectionError(Exception):
+    """Ошибка подключения к Modbus устройству"""
+    pass
+
+class ModbusTimeoutError(Exception):
+    """Таймаут ожидания ответа от Modbus устройства"""
+    pass
+
 class TimeWindowManager:
-    def __init__(self, window_duration=5, cooldown_duration=10, serial_port="/dev/tty.usbserial-210", **reader_kwargs):
+    def __init__(self, window_duration=5, cooldown_duration=10, serial_port="/dev/tty.usbserial-21230", **reader_kwargs):
         """
         Инициализация менеджера временных окон
         
@@ -37,6 +45,21 @@ class TimeWindowManager:
         self.last_window_end = 0
         self.request_queue = queue.Queue()
         self.running = True
+        
+        # Единственное переиспользуемое соединение
+        self.shared_reader = None
+        self.connection_lock = threading.Lock()
+        self.connection_errors = 0
+        self.max_connection_retries = 3
+        
+        # Статистика для оптимизации
+        self.stats = {
+            'windows_opened': 0,
+            'requests_processed': 0,
+            'connection_errors': 0,
+            'avg_request_time_ms': 0,
+            'last_error': None
+        }
         
         # Запускаем поток обработки запросов
         self.worker_thread = threading.Thread(target=self._worker, daemon=True)
@@ -62,8 +85,10 @@ class TimeWindowManager:
                     
                     logging.info(f"🪟 Открыто окно доступа к RS485 (до {self.window_duration}с)")
                     
-                    # Обрабатываем все запросы в окне
+                    # Обрабатываем все запросы в окне с оптимизацией
                     window_start = current_time
+                    requests_in_window = 0
+                    
                     while (time.time() - window_start < self.window_duration and 
                            self.running):
                         
@@ -71,15 +96,22 @@ class TimeWindowManager:
                             # Получаем запрос из очереди (неблокирующий)
                             request = self.request_queue.get_nowait()
                             self._process_request(request)
+                            requests_in_window += 1
                         except queue.Empty:
-                            time.sleep(0.1)
+                            # Если нет запросов, проверяем реже для экономии CPU
+                            time.sleep(0.05 if requests_in_window > 0 else 0.1)
+                    
+                    # Закрываем соединение после окна для экономии ресурсов
+                    if requests_in_window > 0:
+                        self._close_reader()
                     
                     # Закрываем окно
                     with self.lock:
                         self.current_window = None
                         self.last_window_end = time.time()
+                        self.stats['windows_opened'] += 1
                     
-                    logging.info(f"🔒 Окно доступа к RS485 закрыто (cooldown {self.cooldown_duration}с)")
+                    logging.info(f"🔒 Окно доступа к RS485 закрыто (обработано {requests_in_window} запросов, cooldown {self.cooldown_duration}с)")
                 
                 time.sleep(0.1)
                 
@@ -87,26 +119,76 @@ class TimeWindowManager:
                 logging.error(f"❌ Ошибка в менеджере временных окон: {e}")
                 time.sleep(1)
     
+    def _get_or_create_reader(self):
+        """Получить или создать переиспользуемое соединение"""
+        with self.connection_lock:
+            if self.shared_reader is None:
+                try:
+                    self.shared_reader = KUB1063Reader(port=self.serial_port, **self.reader_kwargs)
+                    if not self.shared_reader.connect():
+                        raise ModbusConnectionError(f"Не удалось подключиться к {self.serial_port}")
+                    logging.info(f"✅ Создано переиспользуемое соединение к {self.serial_port}")
+                    self.connection_errors = 0
+                except Exception as e:
+                    self.connection_errors += 1
+                    self.stats['connection_errors'] += 1
+                    self.stats['last_error'] = str(e)
+                    raise ModbusConnectionError(f"Ошибка создания соединения: {e}")
+            return self.shared_reader
+    
+    def _close_reader(self):
+        """Закрыть переиспользуемое соединение"""
+        with self.connection_lock:
+            if self.shared_reader:
+                try:
+                    self.shared_reader.disconnect()
+                    logging.debug("🔒 Переиспользуемое соединение закрыто")
+                except Exception as e:
+                    logging.warning(f"⚠️ Ошибка закрытия соединения: {e}")
+                finally:
+                    self.shared_reader = None
+    
     def _process_request(self, request):
-        """Обработка запроса к RS485"""
+        """Обработка запроса к RS485 с переиспользуемым соединением"""
+        start_time = time.time()
+        
         try:
-            reader = KUB1063Reader(port=self.serial_port, **self.reader_kwargs)
+            # Получаем переиспользуемое соединение
+            reader = self._get_or_create_reader()
             
             if request['type'] == 'read_all':
-                # Чтение всех данных
-                data = reader.read_all()
+                # Чтение всех данных БЕЗ закрытия соединения
+                data = reader.read_all_keep_connection()
                 request['callback'](data)
                 
             elif request['type'] == 'read_register':
-                # Чтение конкретного регистра
+                # Чтение конкретного регистра БЕЗ закрытия соединения
                 value = reader.read_register(request['register'])
                 request['callback'](value)
             
-            # KUB1063Reader автоматически закрывает соединение в read_all()
-            # reader.close() не нужен
+            elif request['type'] == 'write_register':
+                # Запись регистра
+                success = reader.write_register(request['register'], request['value'])
+                request['callback'](success)
+            
+            # Обновляем статистику
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            self.stats['requests_processed'] += 1
+            
+            # Скользящее среднее времени выполнения
+            current_avg = self.stats['avg_request_time_ms']
+            total_requests = self.stats['requests_processed']
+            self.stats['avg_request_time_ms'] = ((current_avg * (total_requests - 1)) + execution_time_ms) / total_requests
+            
+        except (ModbusConnectionError, ModbusTimeoutError) as e:
+            logging.error(f"❌ Ошибка Modbus: {e}")
+            # Закрываем соединение при ошибках для пересоздания
+            self._close_reader()
+            request['callback'](None)
             
         except Exception as e:
-            logging.error(f"❌ Ошибка обработки запроса: {e}")
+            logging.error(f"❌ Неожиданная ошибка обработки запроса: {e}")
+            self.stats['last_error'] = str(e)
             request['callback'](None)
     
     def request_read_all(self, callback):
@@ -130,6 +212,18 @@ class TimeWindowManager:
         self.request_queue.put(request)
         logging.info(f"📋 Запрос на чтение регистра 0x{register:04X} добавлен в очередь")
     
+    def request_write_register(self, register, value, callback):
+        """Запрос на запись регистра"""
+        request = {
+            'type': 'write_register',
+            'register': register,
+            'value': value,
+            'callback': callback,
+            'timestamp': time.time()
+        }
+        self.request_queue.put(request)
+        logging.info(f"📋 Запрос на запись регистра 0x{register:04X}={value} добавлен в очередь")
+    
     def get_window_status(self):
         """Получение статуса текущего окна"""
         with self.lock:
@@ -148,9 +242,31 @@ class TimeWindowManager:
                     'cooldown_remaining': max(0, self.cooldown_duration - time_since_last)
                 }
     
+    def get_statistics(self):
+        """Получение статистики менеджера"""
+        with self.lock:
+            current_status = self.get_window_status()
+            return {
+                **self.stats,
+                'queue_size': self.request_queue.qsize(),
+                'window_status': current_status,
+                'connection_active': self.shared_reader is not None,
+                'running': self.running
+            }
+    
     def stop(self):
         """Остановка менеджера"""
+        logging.info("🛑 Остановка TimeWindowManager...")
         self.running = False
+        
+        # Закрываем соединение
+        self._close_reader()
+        
+        # Ожидаем завершения рабочего потока
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=5)
+        
+        logging.info("✅ TimeWindowManager остановлен")
 
 # Глобальный экземпляр менеджера
 _time_window_manager = None
@@ -163,7 +279,7 @@ def get_time_window_manager(serial_port=None, **reader_kwargs):
     global _time_window_manager
     with _manager_lock:
         if _time_window_manager is None:
-            _time_window_manager = TimeWindowManager(serial_port=serial_port or "/dev/tty.usbserial-210", **reader_kwargs)
+            _time_window_manager = TimeWindowManager(serial_port=serial_port or "/dev/tty.usbserial-21230", **reader_kwargs)
         return _time_window_manager
 
 def request_rs485_read_all(callback):
@@ -175,6 +291,16 @@ def request_rs485_read_register(register, callback):
     """Запрос на чтение регистра через временные окна"""
     manager = get_time_window_manager()
     manager.request_read_register(register, callback)
+
+def request_rs485_write_register(register, value, callback):
+    """Запрос на запись регистра через временные окна"""
+    manager = get_time_window_manager()
+    manager.request_write_register(register, value, callback)
+
+def get_rs485_statistics():
+    """Получение статистики работы RS485"""
+    manager = get_time_window_manager()
+    return manager.get_statistics()
 
 def get_rs485_window_status():
     """Получение статуса временных окон"""
@@ -192,7 +318,7 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="TimeWindowManager for RS485 access")
-    parser.add_argument("--port", dest="port", default="/dev/tty.usbserial-210", help="Serial port path, e.g. /dev/tty.usbserial-21230")
+    parser.add_argument("--port", dest="port", default="/dev/tty.usbserial-21230", help="Serial port path, e.g. /dev/tty.usbserial-21230")
     parser.add_argument("--window", dest="window", type=int, default=5, help="Access window duration (sec)")
     parser.add_argument("--cooldown", dest="cooldown", type=int, default=10, help="Cooldown between windows (sec)")
     args = parser.parse_args()

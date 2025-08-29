@@ -290,6 +290,11 @@ class KUB1063Reader:
             self.serial_connection.close()
             logger.info("🔒 Соединение закрыто")
     
+    def is_connected(self) -> bool:
+        """Проверка состояния соединения"""
+        return (self.serial_connection is not None and 
+                self.serial_connection.is_open)
+    
     def read_register(self, register: int, function_code: int = 0x04) -> Optional[int]:
         """Чтение одного регистра"""
         if not self.serial_connection or not self.serial_connection.is_open:
@@ -429,6 +434,114 @@ class KUB1063Reader:
             self.disconnect()
         
         return data
+    
+    def read_all_keep_connection(self) -> Dict[str, Any]:
+        """Чтение всех регистров БЕЗ закрытия соединения (для TimeWindowManager)"""
+        if not self.is_connected():
+            if not self.connect():
+                return {}
+        
+        data = {
+            'timestamp': datetime.now(),
+            'connection_status': 'connected'
+        }
+        
+        success_count = 0
+        total_count = len(REGISTER_MAP)
+        
+        try:
+            for name, register in REGISTER_MAP.items():
+                raw_value = self.read_register(register)
+                parsed_value = self.parse_value(raw_value, name)
+                data[name] = parsed_value
+                
+                if parsed_value is not None:
+                    success_count += 1
+                    logger.debug(f"✅ {name}: {parsed_value}")
+                else:
+                    logger.debug(f"❌ {name}: нет данных")
+                
+                # Небольшая пауза между запросами
+                time.sleep(0.05)  # Уменьшенная пауза для производительности
+            
+            data['success_rate'] = success_count / total_count
+            logger.debug(f"📊 Успешно прочитано {success_count}/{total_count} регистров")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка при чтении данных: {e}")
+            data['connection_status'] = 'error'
+            data['error'] = str(e)
+        
+        # НЕ закрываем соединение - оставляем для переиспользования
+        
+        return data
+    
+    def write_register(self, register: int, value: int) -> bool:
+        """Запись значения в регистр (для TimeWindowManager)"""
+        if not self.is_connected():
+            if not self.connect():
+                return False
+        
+        try:
+            # Создание Modbus RTU запроса записи (FC=06)
+            request = bytearray([
+                self.slave_id,
+                0x06,  # Function Code: Write Single Register
+                (register >> 8) & 0xFF,
+                register & 0xFF,
+                (value >> 8) & 0xFF,
+                value & 0xFF
+            ])
+            
+            # Добавляем CRC
+            crc = crc16(request)
+            request.append(crc & 0xFF)
+            request.append((crc >> 8) & 0xFF)
+            
+            # Очистка буферов
+            self.serial.flushInput()
+            self.serial.flushOutput()
+            
+            # Отправка запроса
+            self.serial.write(request)
+            self.serial.flush()
+            
+            # Ожидание ответа
+            time.sleep(0.2)
+            
+            if self.serial.in_waiting > 0:
+                response = self.serial.read(self.serial.in_waiting)
+                
+                # Проверка ответа
+                if len(response) >= 8 and response[0] == self.slave_id and response[1] == 0x06:
+                    # Проверка CRC
+                    received_crc = (response[-1] << 8) | response[-2]
+                    calculated_crc = crc16(response[:-2])
+                    
+                    if received_crc == calculated_crc:
+                        # Проверка что записанное значение совпадает
+                        returned_register = (response[2] << 8) | response[3]
+                        returned_value = (response[4] << 8) | response[5]
+                        
+                        if returned_register == register and returned_value == value:
+                            logger.debug(f"✅ Запись успешна: 0x{register:04X}={value}")
+                            return True
+                        else:
+                            logger.warning(f"❌ Неверный ответ: регистр=0x{returned_register:04X}, значение={returned_value}")
+                            return False
+                    else:
+                        logger.warning("❌ Ошибка CRC в ответе записи")
+                        return False
+                else:
+                    logger.warning("❌ Неверный формат ответа записи")
+                    return False
+            else:
+                logger.warning("❌ Нет ответа от устройства при записи")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка записи регистра 0x{register:04X}: {e}")
+            return False
 
 # Глобальный экземпляр читателя
 _reader = KUB1063Reader()

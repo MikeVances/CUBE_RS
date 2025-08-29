@@ -49,7 +49,7 @@ def format_sensor_data(data: Dict[str, Any]) -> str:
     nh3 = data.get('nh3')
     
     # Время обновления
-    timestamp = data.get('timestamp')
+    timestamp = data.get('updated_at') or data.get('timestamp')
     if timestamp:
         try:
             if isinstance(timestamp, str):

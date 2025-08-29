@@ -116,14 +116,14 @@ class KUBTelegramBot:
                 row = cursor.fetchone()
                 if row:
                     return {
-                        'temp_inside': row[0] / 10.0 if row[0] else 0,  # Конвертируем из десятых
-                        'temp_target': row[1] / 10.0 if row[1] else 0,
-                        'humidity': row[2] / 10.0 if row[2] else 0,
+                        'temp_inside': row[0] if row[0] else 0,  # Данные уже конвертированы Gateway
+                        'temp_target': row[1] if row[1] else 0,
+                        'humidity': row[2] if row[2] else 0,
                         'co2': row[3] if row[3] else 0,
-                        'nh3': row[4] / 10.0 if row[4] else 0,
-                        'pressure': row[5] / 10.0 if row[5] else 0,
-                        'ventilation_level': row[6] / 10.0 if row[6] else 0,
-                        'ventilation_target': row[7] / 10.0 if row[7] else 0,
+                        'nh3': row[4] if row[4] else 0,
+                        'pressure': row[5] if row[5] else 0,
+                        'ventilation_level': row[6] if row[6] else 0,
+                        'ventilation_target': row[7] if row[7] else 0,
                         'active_alarms': row[8] if row[8] else 0,
                         'active_warnings': row[9] if row[9] else 0,
                         'updated_at': row[10],
@@ -765,8 +765,25 @@ class KUBTelegramBot:
 
             logger.info("🚀 Запуск Telegram Bot...")
 
-            # Запускаем только polling, без других систем
-            await self.application.run_polling(drop_pending_updates=True)
+            # Инициализируем приложение
+            await self.application.initialize()
+            await self.application.start()
+            
+            # Запускаем polling вручную для лучшего контроля
+            await self.application.updater.start_polling(drop_pending_updates=True)
+            
+            logger.info("🤖 Бот запущен и ждет сообщения...")
+            
+            try:
+                # Ждем бесконечно
+                await asyncio.sleep(float('inf'))
+            except KeyboardInterrupt:
+                logger.info("🛑 Получен сигнал остановки...")
+            finally:
+                # Корректная остановка
+                await self.application.updater.stop()
+                await self.application.stop()
+                await self.application.shutdown()
             
         except Exception as e:
             logger.error(f"❌ Ошибка запуска бота: {e}")

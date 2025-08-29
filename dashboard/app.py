@@ -353,18 +353,23 @@ def main():
                 df = pd.DataFrame(st.session_state.data_history)
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 
-                # График температуры
-                col_temp, col_hum = st.columns(2)
-                
-                with col_temp:
-                    fig_temp = go.Figure()
-                    fig_temp.add_trace(go.Scatter(
-                        x=df['timestamp'], 
-                        y=df['temp_inside'],
-                        mode='lines+markers',
-                        name='Текущая',
-                        line=dict(color='#58a6ff', width=2)
-                    ))
+                # Проверяем наличие нужных колонок
+                if 'temp_inside' not in df.columns:
+                    st.warning("⚠️ Недостаточно данных для построения графиков. Ожидайте обновления...")
+                    st.info("💡 Нажмите 'Очистить историю' для сброса данных")
+                else:
+                    # График температуры
+                    col_temp, col_hum = st.columns(2)
+                    
+                    with col_temp:
+                        fig_temp = go.Figure()
+                        fig_temp.add_trace(go.Scatter(
+                            x=df['timestamp'], 
+                            y=df['temp_inside'],
+                            mode='lines+markers',
+                            name='Текущая',
+                            line=dict(color='#58a6ff', width=2)
+                        ))
                     if 'temp_target' in df.columns:
                         fig_temp.add_trace(go.Scatter(
                             x=df['timestamp'], 
@@ -383,46 +388,52 @@ def main():
                     )
                     st.plotly_chart(fig_temp, use_container_width=True)
                 
-                with col_hum:
-                    fig_hum = go.Figure()
-                    fig_hum.add_trace(go.Scatter(
-                        x=df['timestamp'], 
-                        y=df['humidity'],
-                        mode='lines+markers',
-                        name='Влажность',
-                        line=dict(color='#7c3aed', width=2)
-                    ))
-                    
-                    fig_hum.update_layout(
-                        title="💧 Влажность",
-                        xaxis_title="Время",
-                        yaxis_title="%",
-                        template="plotly_dark",
-                        height=300
-                    )
-                    st.plotly_chart(fig_hum, use_container_width=True)
+                    with col_hum:
+                        if 'humidity' in df.columns:
+                            fig_hum = go.Figure()
+                            fig_hum.add_trace(go.Scatter(
+                                x=df['timestamp'], 
+                                y=df['humidity'],
+                                mode='lines+markers',
+                                name='Влажность',
+                                line=dict(color='#7c3aed', width=2)
+                            ))
+                            
+                            fig_hum.update_layout(
+                                title="💧 Влажность",
+                                xaxis_title="Время",
+                                yaxis_title="%",
+                                template="plotly_dark",
+                                height=300
+                            )
+                            st.plotly_chart(fig_hum, use_container_width=True)
+                        else:
+                            st.info("📊 График влажности недоступен")
                 
                 # График CO2 и вентиляции
                 col_co2, col_vent = st.columns(2)
                 
                 with col_co2:
-                    fig_co2 = go.Figure()
-                    fig_co2.add_trace(go.Scatter(
-                        x=df['timestamp'], 
-                        y=df['co2'],
-                        mode='lines+markers',
-                        name='CO₂',
-                        line=dict(color='#f85149', width=2)
-                    ))
-                    
-                    fig_co2.update_layout(
-                        title="🫁 Концентрация CO₂",
-                        xaxis_title="Время",
-                        yaxis_title="ppm",
-                        template="plotly_dark",
-                        height=300
-                    )
-                    st.plotly_chart(fig_co2, use_container_width=True)
+                    if 'co2' in df.columns:
+                        fig_co2 = go.Figure()
+                        fig_co2.add_trace(go.Scatter(
+                            x=df['timestamp'], 
+                            y=df['co2'],
+                            mode='lines+markers',
+                            name='CO₂',
+                            line=dict(color='#f85149', width=2)
+                        ))
+                        
+                        fig_co2.update_layout(
+                            title="🫁 Концентрация CO₂",
+                            xaxis_title="Время",
+                            yaxis_title="ppm",
+                            template="plotly_dark",
+                            height=300
+                        )
+                        st.plotly_chart(fig_co2, use_container_width=True)
+                    else:
+                        st.info("📊 График CO₂ недоступен")
                 
                 with col_vent:
                     if 'ventilation_level' in df.columns:

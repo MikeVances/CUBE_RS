@@ -272,8 +272,8 @@ class AuditLogger:
 
 class KUB1063Writer:
     """
-    Система записи команд в КУБ-1063
-    Напарник для KUB1063Reader
+    Оптимизированная система записи команд в КУБ-1063
+    Интегрированная с TimeWindowManager для координации доступа к RS485
     """
     
     # Доступные для записи регистры (из документации КУБ-1063)
@@ -314,11 +314,13 @@ class KUB1063Writer:
         }
     }
     
-    def __init__(self, port: str = "/dev/tty.usbserial-210", 
-                 baudrate: int = 9600, slave_id: int = 1):
+    def __init__(self, port: str = "/dev/tty.usbserial-21230", 
+                 baudrate: int = 9600, slave_id: int = 1, 
+                 use_time_window_manager: bool = True):
         self.port = port
         self.baudrate = baudrate
         self.slave_id = slave_id
+        self.use_time_window_manager = use_time_window_manager
         self.serial_connection = None
         
         # Компоненты системы
@@ -339,7 +341,8 @@ class KUB1063Writer:
         self.is_running = False
         self.processing_thread = None
         
-        logger.info("✅ KUB1063Writer инициализирован")
+        mode = "TimeWindowManager" if self.use_time_window_manager else "прямое соединение"
+        logger.info(f"✅ KUB1063Writer инициализирован (режим: {mode})")
     
     def validate_command(self, register: int, value: int) -> tuple[bool, str]:
         """Валидация команды записи"""
@@ -419,7 +422,7 @@ class KUB1063Writer:
         return bytes(request)
     
     def execute_write_command(self, command: WriteCommand) -> tuple[bool, str, int]:
-        """Выполнение команды записи через RS485"""
+        """Оптимизированное выполнение команды записи"""
         start_time = time.time()
         
         try:
@@ -427,6 +430,54 @@ class KUB1063Writer:
             self.audit_logger.log_command_executing(command)
             self.command_storage.update_command_status(command.id, CommandStatus.EXECUTING)
             
+            if self.use_time_window_manager:
+                # Используем TimeWindowManager для координации
+                return self._execute_via_time_window_manager(command, start_time)
+            else:
+                # Прямое соединение (старый способ)
+                return self._execute_direct_connection(command, start_time)
+                
+        except Exception as e:
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            error_msg = f"Критическая ошибка выполнения команды: {e}"
+            return False, error_msg, execution_time_ms
+    
+    def _execute_via_time_window_manager(self, command: WriteCommand, start_time: float) -> tuple[bool, str, int]:
+        """Выполнение через TimeWindowManager"""
+        try:
+            from .time_window_manager import request_rs485_write_register
+            
+            result_container = [None]
+            
+            def write_callback(success):
+                result_container[0] = success
+            
+            # Отправляем запрос через TimeWindowManager
+            request_rs485_write_register(command.register, command.value, write_callback)
+            
+            # Ожидаем результат
+            timeout = 20  # секунд
+            elapsed = 0
+            while result_container[0] is None and elapsed < timeout:
+                time.sleep(0.1)
+                elapsed = time.time() - start_time
+            
+            execution_time_ms = int(elapsed * 1000)
+            
+            if result_container[0] is None:
+                return False, "Таймаут выполнения команды", execution_time_ms
+            elif result_container[0]:
+                return True, "Команда выполнена через TimeWindowManager", execution_time_ms
+            else:
+                return False, "Ошибка выполнения через TimeWindowManager", execution_time_ms
+                
+        except Exception as e:
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            return False, f"Ошибка TimeWindowManager: {e}", execution_time_ms
+    
+    def _execute_direct_connection(self, command: WriteCommand, start_time: float) -> tuple[bool, str, int]:
+        """Прямое выполнение (старый способ)"""
+        try:
             # Подключение к устройству
             if not self._connect():
                 error_msg = "Не удалось подключиться к устройству"
@@ -475,11 +526,6 @@ class KUB1063Writer:
                 execution_time_ms = int((time.time() - start_time) * 1000)
                 return False, "Нет ответа от устройства", execution_time_ms
                 
-        except Exception as e:
-            execution_time_ms = int((time.time() - start_time) * 1000)
-            error_msg = f"Ошибка выполнения команды: {e}"
-            return False, error_msg, execution_time_ms
-        
         finally:
             self._disconnect()
     
@@ -606,7 +652,8 @@ class KUB1063Writer:
             **self.stats,
             'success_rate': success_rate,
             'is_running': self.is_running,
-            'writable_registers_count': len(self.WRITABLE_REGISTERS)
+            'writable_registers_count': len(self.WRITABLE_REGISTERS),
+            'using_time_window_manager': self.use_time_window_manager
         }
 
 # Пример использования

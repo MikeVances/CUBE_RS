@@ -12,9 +12,15 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 
 # Импорты наших компонентов
-from .reader import KUB1063Reader
 from .writer import KUB1063Writer, WriteCommand, CommandStatus
-from .time_window_manager import get_time_window_manager
+from .time_window_manager import (
+    get_time_window_manager, 
+    request_rs485_read_all, 
+    request_rs485_read_register,
+    request_rs485_write_register,
+    get_rs485_window_status,
+    get_rs485_statistics
+)
 from .modbus_storage import init_db, read_data, update_data
 
 logger = logging.getLogger(__name__)
@@ -34,8 +40,7 @@ class UnifiedKUBSystem:
     def __init__(self, config_file: str = "config.json"):
         self.config = self._load_config(config_file)
         
-        # Компоненты системы
-        self.reader = None
+        # Компоненты системы (убрали дублированный Reader)
         self.writer = None
         self.time_window_manager = None
         
@@ -71,7 +76,7 @@ class UnifiedKUBSystem:
         # Дефолтная конфигурация
         return {
             "rs485": {
-                "port": "/dev/tty.usbserial-210",
+                "port": "/dev/tty.usbserial-21230",
                 "baudrate": 9600,
                 "timeout": 2.0,
                 "slave_id": 1,
@@ -103,32 +108,22 @@ class UnifiedKUBSystem:
         rs485_config = self.config.get("rs485", {})
         
         try:
-            # 1. TimeWindowManager - координатор доступа к RS485
-            logger.info("🔧 Инициализация TimeWindowManager...")
+            # 1. TimeWindowManager - единственный координатор доступа к RS485
+            logger.info("🔧 Инициализация TimeWindowManager (единая точка доступа)...")
             self.time_window_manager = get_time_window_manager(
-                serial_port=rs485_config.get("port", "/dev/tty.usbserial-210"),
+                serial_port=rs485_config.get("port", "/dev/tty.usbserial-21230"),
                 window_duration=rs485_config.get("window_duration", 5),
                 cooldown_duration=rs485_config.get("cooldown_duration", 10),
                 baudrate=rs485_config.get("baudrate", 9600),
                 slave_id=rs485_config.get("slave_id", 1)
             )
+            logger.info("✅ Все чтение и запись будет происходить через TimeWindowManager")
             
-            # 2. Reader - система чтения
-            if self.config.get("reader", {}).get("enabled", True):
-                logger.info("📖 Инициализация Reader...")
-                self.reader = KUB1063Reader(
-                    port=rs485_config.get("port"),
-                    baudrate=rs485_config.get("baudrate", 9600),
-                    slave_id=rs485_config.get("slave_id", 1)
-                )
-            
-            # 3. Writer - система записи
+            # 2. Writer - система записи (интегрированная с TimeWindowManager)
             if self.config.get("writer", {}).get("enabled", True):
-                logger.info("✍️ Инициализация Writer...")
+                logger.info("✍️ Инициализация Writer (через TimeWindowManager)...")
                 self.writer = KUB1063Writer(
-                    port=rs485_config.get("port"),
-                    baudrate=rs485_config.get("baudrate", 9600),
-                    slave_id=rs485_config.get("slave_id", 1)
+                    use_time_window_manager=True  # Используем TimeWindowManager для записи
                 )
             
             # 4. База данных
@@ -158,15 +153,15 @@ class UnifiedKUBSystem:
                 self.writer.start()
                 logger.info("✍️ Writer запущен")
             
-            # Запуск Reader цикла
-            if self.reader:
+            # Запуск Reader цикла (через TimeWindowManager)
+            if self.config.get("reader", {}).get("enabled", True):
                 self.is_running = True
                 self.system_stats['start_time'] = datetime.now()
                 
-                # Поток чтения данных
+                # Поток чтения данных через TimeWindowManager
                 self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
                 self.reader_thread.start()
-                logger.info("📖 Reader запущен")
+                logger.info("📖 Reader запущен (через TimeWindowManager)")
                 
                 # Поток обновления статистики
                 self.stats_update_thread = threading.Thread(target=self._stats_update_loop, daemon=True)
@@ -180,51 +175,72 @@ class UnifiedKUBSystem:
             raise
     
     def _reader_loop(self):
-        """Цикл чтения данных"""
+        """Оптимизированный цикл чтения данных через TimeWindowManager"""
         read_interval = self.config.get("reader", {}).get("read_interval", 10)
         max_retries = self.config.get("reader", {}).get("max_retries", 3)
+        consecutive_errors = 0
         
         while self.is_running:
             try:
-                # Читаем данные через TimeWindowManager
+                # Читаем данные через оптимизированный TimeWindowManager
                 data_result = [None]
+                error_result = [None]
                 
                 def read_callback(data):
-                    data_result[0] = data
+                    if data is None:
+                        error_result[0] = "Timeout or connection error"
+                    else:
+                        data_result[0] = data
                 
                 # Запрос чтения через временные окна
-                from .time_window_manager import request_rs485_read_all
                 request_rs485_read_all(read_callback)
                 
-                # Ожидание результата
+                # Ожидание результата с таймаутом
                 start_time = time.time()
-                while data_result[0] is None and time.time() - start_time < 20:
+                timeout = 15  # Сократили таймаут
+                while data_result[0] is None and error_result[0] is None and time.time() - start_time < timeout:
                     time.sleep(0.1)
                 
-                data = data_result[0]
-                
-                if data and data.get("connection_status") == "connected":
-                    # Успешное чтение
-                    self.system_stats['reader_cycles'] += 1
-                    self.system_stats['last_successful_read'] = datetime.now()
+                if data_result[0]:
+                    data = data_result[0]
                     
-                    # Сохранение в базу данных
-                    try:
-                        update_data(**data)
-                        logger.debug("💾 Данные сохранены в базу")
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка сохранения данных: {e}")
-                    
-                    logger.info(f"📊 Цикл чтения завершен: temp={data.get('temp_inside')}°C, humidity={data.get('humidity')}%")
-                    
+                    if data.get("connection_status") == "connected":
+                        # Успешное чтение
+                        self.system_stats['reader_cycles'] += 1
+                        self.system_stats['last_successful_read'] = datetime.now()
+                        consecutive_errors = 0
+                        
+                        # Сохранение в базу данных
+                        try:
+                            update_data(**data)
+                            logger.debug("💾 Данные сохранены в базу")
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка сохранения данных: {e}")
+                        
+                        # Логируем только ключевые параметры для производительности
+                        temp = data.get('temp_inside', 'N/A')
+                        humidity = data.get('humidity', 'N/A')
+                        co2 = data.get('co2', 'N/A')
+                        logger.info(f"📊 Данные: T={temp}°C, H={humidity}%, CO2={co2}ppm")
+                    else:
+                        consecutive_errors += 1
+                        logger.warning(f"⚠️ Нет соединения с КУБ-1063 (ошибка {consecutive_errors}/{max_retries})")
                 else:
-                    logger.warning("⚠️ Нет данных от КУБ-1063")
+                    consecutive_errors += 1
+                    logger.warning(f"⚠️ Таймаут чтения данных (ошибка {consecutive_errors}/{max_retries})")
                 
-                # Пауза до следующего цикла
-                time.sleep(read_interval)
+                # Если слишком много ошибок подряд, увеличиваем интервал
+                if consecutive_errors >= max_retries:
+                    error_interval = min(read_interval * 2, 60)  # Максимум 60 сек
+                    logger.error(f"❌ Слишком много ошибок подряд, увеличиваем интервал до {error_interval}с")
+                    time.sleep(error_interval)
+                    consecutive_errors = 0  # Сбрасываем после паузы
+                else:
+                    time.sleep(read_interval)
                 
             except Exception as e:
-                logger.error(f"❌ Ошибка в цикле чтения: {e}")
+                consecutive_errors += 1
+                logger.error(f"❌ Критическая ошибка в цикле чтения: {e}")
                 time.sleep(5)
     
     def _stats_update_loop(self):
@@ -262,6 +278,11 @@ class UnifiedKUBSystem:
             self.writer.stop()
             logger.info("✍️ Writer остановлен")
         
+        # Остановка TimeWindowManager (единая точка доступа)
+        if self.time_window_manager:
+            self.time_window_manager.stop()
+            logger.info("🔄 TimeWindowManager остановлен")
+        
         # Ожидание завершения потоков
         if self.reader_thread and self.reader_thread.is_alive():
             self.reader_thread.join(timeout=5)
@@ -274,10 +295,16 @@ class UnifiedKUBSystem:
     def add_write_command(self, register: int, value: int, 
                          source_ip: str = None, user_info: str = None, 
                          priority: int = 0) -> tuple[bool, str]:
-        """Добавление команды записи через Writer"""
+        """Добавление команды записи через Writer (интегрированный с TimeWindowManager)"""
         if not self.writer:
             return False, "Writer не инициализирован"
         
+        # Валидация через Writer
+        is_valid, error_msg = self.writer.validate_command(register, value)
+        if not is_valid:
+            return False, error_msg
+        
+        # Добавляем команду через Writer (который использует TimeWindowManager)
         return self.writer.add_write_command(
             register=register,
             value=value,
@@ -299,12 +326,14 @@ class UnifiedKUBSystem:
         stats = {
             "system": self.system_stats.copy(),
             "reader": {
-                "enabled": self.reader is not None,
+                "enabled": self.config.get("reader", {}).get("enabled", True),
                 "last_read": self.system_stats.get('last_successful_read'),
-                "total_cycles": self.system_stats.get('reader_cycles', 0)
+                "total_cycles": self.system_stats.get('reader_cycles', 0),
+                "using_time_window_manager": True
             },
             "writer": {
-                "enabled": self.writer is not None
+                "enabled": self.writer is not None,
+                "using_time_window_manager": True
             }
         }
         
@@ -312,6 +341,13 @@ class UnifiedKUBSystem:
         if self.writer:
             writer_stats = self.writer.get_statistics()
             stats["writer"].update(writer_stats)
+        
+        # Добавляем статистику TimeWindowManager
+        try:
+            twm_stats = get_rs485_statistics()
+            stats["time_window_manager"] = twm_stats
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось получить статистику TimeWindowManager: {e}")
         
         return stats
     

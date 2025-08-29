@@ -96,7 +96,7 @@ def main():
     print(f"📂 Рабочая директория: {ROOT_DIR}")
     
     # Проверяем доступность ключевых портов
-    ports_to_check = [5021, 5022, 8501]
+    ports_to_check = [5023, 5022, 8501]
     for port in ports_to_check:
         if not check_port_available(port):
             logging.error(f"❌ Порт {port} уже занят!")
@@ -154,7 +154,7 @@ def main():
         
         # Проверяем готовность ключевых сервисов
         service_checks = [
-            ("Gateway 1", 5021),
+            ("Gateway 1", 5023),
             ("Gateway 2", 5022),
             ("Dashboard", 8501)
         ]
@@ -167,13 +167,13 @@ def main():
         print("✅ Система КУБ-1063 запущена!")
         print("=" * 60)
         print("📊 Дашборд:          http://localhost:8501")
-        print("🔧 Modbus TCP 1:       localhost:5021 (основной)")
+        print("🔧 Modbus TCP 1:       localhost:5023 (основной)")
         print("🔧 Modbus TCP 2:       localhost:5022 (дубликат)")
         print("📡 Оба порта содержат одинаковые регистры КУБ-1063")
         print("🤖 Telegram Bot:     активен (если запущен)")
         print("=" * 60)
         print("📋 Логи сервисов:")
-        print("   gateway1.log  - основной шлюз (RS485→БД→Modbus TCP 5021)")
+        print("   gateway1.log  - основной шлюз (RS485→БД→Modbus TCP 5023)")
         print("   gateway2.log  - дубликат шлюза (БД→Modbus TCP 5022)")
         print("   start_services.log - этот скрипт")
         print("=" * 60)

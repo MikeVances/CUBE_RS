@@ -232,6 +232,165 @@ def build_stats_menu(access_level: str = "user") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
     ])
 
+def build_settings_menu(access_level: str = "user") -> InlineKeyboardMarkup:
+    """
+    ⚙️ МЕНЮ НАСТРОЕК СИСТЕМЫ
+    """
+    buttons = []
+    
+    # Основные настройки для всех пользователей с правами записи
+    if access_level in ['operator', 'engineer', 'admin']:
+        buttons.append([InlineKeyboardButton("👥 Управление пользователями", callback_data="manage_users")])
+        buttons.append([InlineKeyboardButton("🔄 Переключение уровня", callback_data="switch_level_menu")])
+    
+    # Расширенные настройки для инженеров и админов
+    if access_level in ['engineer', 'admin']:
+        buttons.append([InlineKeyboardButton("🔧 Настройки системы", callback_data="system_config")])
+        buttons.append([InlineKeyboardButton("📋 Логи системы", callback_data="system_logs")])
+    
+    # Настройки только для администраторов
+    if access_level == 'admin':
+        buttons.append([InlineKeyboardButton("🔐 Управление правами", callback_data="permissions_config")])
+        buttons.append([InlineKeyboardButton("💾 Резервные копии", callback_data="backup_config")])
+    
+    # Кнопка возврата
+    buttons.append([InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")])
+    
+    return InlineKeyboardMarkup(buttons)
+
+def build_user_management_menu(access_level: str = "user") -> InlineKeyboardMarkup:
+    """
+    👥 МЕНЮ УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ
+    """
+    buttons = [
+        [InlineKeyboardButton("👤 Список пользователей", callback_data="list_users")],
+        [InlineKeyboardButton("➕ Пригласить пользователя", callback_data="invite_user")],
+    ]
+    
+    if access_level in ['engineer', 'admin']:
+        buttons.append([InlineKeyboardButton("🔒 Заблокировать пользователя", callback_data="block_user")])
+        buttons.append([InlineKeyboardButton("✅ Разблокировать пользователя", callback_data="unblock_user")])
+    
+    if access_level == 'admin':
+        buttons.append([InlineKeyboardButton("👑 Изменить права", callback_data="change_permissions")])
+    
+    buttons.extend([
+        [InlineKeyboardButton("📊 Статистика пользователей", callback_data="user_stats")],
+        [InlineKeyboardButton("⚙️ Назад к настройкам", callback_data="settings")],
+        [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+    ])
+    
+    return InlineKeyboardMarkup(buttons)
+
+def build_switch_level_menu(access_level: str = "user") -> InlineKeyboardMarkup:
+    """
+    🔄 МЕНЮ ПЕРЕКЛЮЧЕНИЯ УРОВНЯ ДОСТУПА
+    """
+    buttons = []
+    
+    # Показываем доступные уровни для переключения
+    available_levels = {
+        'user': '👤 Пользователь',
+        'operator': '👷 Оператор', 
+        'engineer': '🔧 Инженер',
+        'admin': '👑 Администратор'
+    }
+    
+    # Добавляем кнопки для переключения на разные уровни
+    for level, name in available_levels.items():
+        if level != access_level:  # Не показываем текущий уровень
+            buttons.append([InlineKeyboardButton(name, callback_data=f"temp_level_{level}")])
+    
+    buttons.extend([
+        [InlineKeyboardButton("🔄 Восстановить оригинальный", callback_data="restore_level")],
+        [InlineKeyboardButton("ℹ️ Информация об уровне", callback_data="level_info_menu")],
+        [InlineKeyboardButton("⚙️ Назад к настройкам", callback_data="settings")],
+        [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+    ])
+    
+    return InlineKeyboardMarkup(buttons)
+
+def build_user_list_menu(users: list, action: str, access_level: str = "user") -> InlineKeyboardMarkup:
+    """
+    👥 ИНТЕРАКТИВНОЕ МЕНЮ СПИСКА ПОЛЬЗОВАТЕЛЕЙ С КНОПКАМИ
+    action: 'promote', 'block', 'unblock', 'view'
+    """
+    buttons = []
+    
+    # Добавляем кнопки для каждого пользователя (максимум 8 для удобства)
+    for user_data in users[:8]:
+        username = user_data.get('username') or 'Без username'
+        first_name = user_data.get('first_name') or 'Без имени'
+        user_access_level = user_data.get('access_level', 'user')
+        user_id = user_data.get('telegram_id')
+        is_active = user_data.get('is_active', True)
+        
+        # Выбираем emoji в зависимости от статуса и уровня
+        status_emoji = "✅" if is_active else "❌"
+        level_emoji = {"user": "👤", "operator": "👷", "engineer": "🔧", "admin": "👑"}.get(user_access_level, "❓")
+        
+        # Формируем текст кнопки
+        if action == 'block' and not is_active:
+            continue  # Пропускаем уже заблокированных для блокировки
+        if action == 'unblock' and is_active:
+            continue  # Пропускаем активных для разблокировки
+            
+        button_text = f"{status_emoji} {level_emoji} {first_name} (@{username})"
+        callback_data = f"{action}_user_{user_id}"
+        
+        buttons.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+    
+    # Если пользователей больше 8, добавляем кнопку "Показать еще"
+    if len(users) > 8:
+        buttons.append([InlineKeyboardButton(f"📄 Показать еще ({len(users)-8})", callback_data=f"{action}_more_users")])
+    
+    # Кнопки навигации
+    buttons.append([InlineKeyboardButton("👥 Назад к управлению", callback_data="manage_users")])
+    buttons.append([InlineKeyboardButton("⚙️ К настройкам", callback_data="settings")])
+    buttons.append([InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")])
+    
+    return InlineKeyboardMarkup(buttons)
+
+def build_level_selection_menu(user_id: int, current_level: str) -> InlineKeyboardMarkup:
+    """
+    🔄 МЕНЮ ВЫБОРА НОВОГО УРОВНЯ ДОСТУПА ДЛЯ ПОЛЬЗОВАТЕЛЯ
+    """
+    buttons = []
+    
+    # Доступные уровни доступа
+    levels = {
+        'user': '👤 Пользователь',
+        'operator': '👷 Оператор', 
+        'engineer': '🔧 Инженер',
+        'admin': '👑 Администратор'
+    }
+    
+    # Добавляем кнопку для каждого уровня, кроме текущего
+    for level, name in levels.items():
+        if level != current_level:
+            buttons.append([InlineKeyboardButton(name, callback_data=f"set_level_{user_id}_{level}")])
+    
+    # Кнопки отмены
+    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="promote_users")])
+    buttons.append([InlineKeyboardButton("👥 К управлению", callback_data="manage_users")])
+    
+    return InlineKeyboardMarkup(buttons)
+
+def build_invitation_level_menu() -> InlineKeyboardMarkup:
+    """
+    🎫 МЕНЮ ВЫБОРА УРОВНЯ ДЛЯ ПРИГЛАШЕНИЯ
+    """
+    buttons = [
+        [InlineKeyboardButton("👤 Пользователь", callback_data="invite_level_user")],
+        [InlineKeyboardButton("👷 Оператор", callback_data="invite_level_operator")],
+        [InlineKeyboardButton("🔧 Инженер", callback_data="invite_level_engineer")],
+        [InlineKeyboardButton("👑 Администратор", callback_data="invite_level_admin")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="manage_users")],
+        [InlineKeyboardButton("👥 К управлению", callback_data="manage_users")]
+    ]
+    
+    return InlineKeyboardMarkup(buttons)
+
 def format_system_stats(stats: Dict[str, Any]) -> str:
     """Форматирование статистики системы"""
     
@@ -433,6 +592,47 @@ def test_bot_utils():
     print("   • Кнопки главного меню")
     print("   • Меню подтверждений")
     print("   • Улучшенное форматирование")
+
+def build_invitation_level_menu() -> InlineKeyboardMarkup:
+    """Создание меню выбора уровня доступа для приглашения"""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    
+    keyboard = [
+        [InlineKeyboardButton("👤 User", callback_data="invite_level_user")],
+        [InlineKeyboardButton("⚙️ Operator", callback_data="invite_level_operator")],
+        [InlineKeyboardButton("🔧 Engineer", callback_data="invite_level_engineer")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="manage_users")]
+    ]
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def build_invitation_confirmation_menu(level: str) -> InlineKeyboardMarkup:
+    """Создание меню подтверждения создания приглашения"""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Создать ссылку", callback_data=f"confirm_invite_{level}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="invite_user")],
+    ]
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def build_invitation_share_menu(invite_link: str, access_level: str) -> InlineKeyboardMarkup:
+    """Создание меню для отправки ссылки-приглашения"""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from urllib.parse import quote
+    
+    # Текст для отправки
+    share_text = f"🎉 Приглашение в КУБ-1063 Control Bot!\n\n🔗 Перейди по ссылке для регистрации:\n{invite_link}"
+    encoded_text = quote(share_text)
+    
+    keyboard = [
+        [InlineKeyboardButton("📤 Поделиться", url=f"https://t.me/share/url?url={quote(invite_link)}&text={quote('🎉 Приглашение в КУБ-1063 Control Bot!')}")],
+        [InlineKeyboardButton("📋 Копировать", callback_data=f"copy_link_{invite_link}")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="manage_users")]
+    ]
+    
+    return InlineKeyboardMarkup(keyboard)
 
 if __name__ == "__main__":
     test_bot_utils()

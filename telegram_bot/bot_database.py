@@ -408,6 +408,259 @@ def get_all_users(self):
         logging.error(f"Ошибка получения пользователей: {e}")
         return []
 
+    def update_user_access_level(self, telegram_id: int, access_level: str) -> bool:
+        """Обновление уровня доступа пользователя"""
+        try:
+            # Проверяем валидность уровня доступа
+            valid_levels = ['user', 'operator', 'engineer', 'admin']
+            if access_level not in valid_levels:
+                logger.error(f"❌ Неверный уровень доступа: {access_level}")
+                return False
+            
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.execute("""
+                    UPDATE telegram_users 
+                    SET access_level = ?, last_active = CURRENT_TIMESTAMP
+                    WHERE telegram_id = ?
+                """, (access_level, telegram_id))
+                
+                success = cursor.rowcount > 0
+                if success:
+                    logger.info(f"🔐 Уровень доступа пользователя {telegram_id} изменен на '{access_level}'")
+                
+                return success
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления уровня доступа {telegram_id}: {e}")
+            return False
+
+    def set_user_temporary_level(self, telegram_id: int, temp_level: str, duration_hours: int = 24) -> bool:
+        """Установка временного уровня доступа пользователя"""
+        try:
+            # Получаем текущий уровень доступа
+            current_level = self.get_user_access_level(telegram_id)
+            if not current_level:
+                logger.error(f"❌ Пользователь {telegram_id} не найден")
+                return False
+            
+            # Сохраняем оригинальный уровень и устанавливаем временный
+            with sqlite3.connect(self.db_file) as conn:
+                # Сначала сохраняем оригинальный уровень, если его еще нет
+                conn.execute("""
+                    UPDATE telegram_users 
+                    SET original_access_level = COALESCE(original_access_level, access_level),
+                        access_level = ?,
+                        temp_level_expires = datetime('now', '+{} hours'),
+                        last_active = CURRENT_TIMESTAMP
+                    WHERE telegram_id = ?
+                """.format(duration_hours), (temp_level, telegram_id))
+                
+                logger.info(f"🕐 Временный уровень '{temp_level}' установлен для пользователя {telegram_id} на {duration_hours}ч")
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки временного уровня {telegram_id}: {e}")
+            return False
+
+    def restore_user_original_level(self, telegram_id: int) -> bool:
+        """Восстановление оригинального уровня доступа пользователя"""
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.execute("""
+                    UPDATE telegram_users 
+                    SET access_level = COALESCE(original_access_level, access_level),
+                        original_access_level = NULL,
+                        temp_level_expires = NULL,
+                        last_active = CURRENT_TIMESTAMP
+                    WHERE telegram_id = ?
+                """, (telegram_id,))
+                
+                success = cursor.rowcount > 0
+                if success:
+                    logger.info(f"🔄 Восстановлен оригинальный уровень доступа для пользователя {telegram_id}")
+                
+                return success
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка восстановления уровня доступа {telegram_id}: {e}")
+            return False
+
+    def check_and_restore_expired_levels(self) -> int:
+        """Проверка и восстановление истекших временных уровней доступа"""
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                # Находим пользователей с истекшими временными уровнями
+                cursor = conn.execute("""
+                    SELECT telegram_id, username, access_level, original_access_level
+                    FROM telegram_users 
+                    WHERE temp_level_expires IS NOT NULL 
+                    AND temp_level_expires < datetime('now')
+                """)
+                
+                expired_users = cursor.fetchall()
+                
+                if expired_users:
+                    # Восстанавливаем оригинальные уровни
+                    conn.execute("""
+                        UPDATE telegram_users 
+                        SET access_level = COALESCE(original_access_level, access_level),
+                            original_access_level = NULL,
+                            temp_level_expires = NULL,
+                            last_active = CURRENT_TIMESTAMP
+                        WHERE temp_level_expires IS NOT NULL 
+                        AND temp_level_expires < datetime('now')
+                    """)
+                    
+                    for user in expired_users:
+                        logger.info(f"⏰ Восстановлен уровень доступа для пользователя {user[0]} ({user[1]}): {user[2]} -> {user[3] or user[2]}")
+                
+                return len(expired_users)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки истекших уровней: {e}")
+            return 0
+
+    def get_user_level_info(self, telegram_id: int) -> Optional[Dict[str, Any]]:
+        """Получение информации об уровне доступа пользователя"""
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("""
+                    SELECT access_level, original_access_level, temp_level_expires
+                    FROM telegram_users 
+                    WHERE telegram_id = ?
+                """, (telegram_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'current_level': row['access_level'],
+                        'original_level': row['original_access_level'],
+                        'temp_expires': row['temp_level_expires'],
+                        'is_temporary': row['original_access_level'] is not None
+                    }
+                
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения информации об уровне {telegram_id}: {e}")
+            return None
+
+    def create_invitation(self, invited_by: int, access_level: str, hours_valid: int = 24) -> str:
+        """Создание приглашения с уникальным кодом"""
+        try:
+            import uuid
+            import datetime
+            
+            # Генерируем уникальный код приглашения
+            invitation_code = str(uuid.uuid4())[:8].upper()
+            expires_at = datetime.datetime.now() + datetime.timedelta(hours=hours_valid)
+            
+            with sqlite3.connect(self.db_file) as conn:
+                conn.execute("""
+                    INSERT INTO user_invitations 
+                    (invitation_code, invited_by, access_level, expires_at)
+                    VALUES (?, ?, ?, ?)
+                """, (invitation_code, invited_by, access_level, expires_at))
+                
+                logger.info(f"🔗 Создано приглашение {invitation_code} пользователем {invited_by}")
+                return invitation_code
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания приглашения: {e}")
+            return None
+
+    def get_invitation(self, invitation_code: str) -> dict:
+        """Получение информации о приглашении"""
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("""
+                    SELECT i.*, u.username as invited_by_username, u.first_name as invited_by_name
+                    FROM user_invitations i
+                    LEFT JOIN telegram_users u ON i.invited_by = u.telegram_id
+                    WHERE i.invitation_code = ?
+                """, (invitation_code,))
+                
+                row = cursor.fetchone()
+                return dict(row) if row else None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения приглашения {invitation_code}: {e}")
+            return None
+
+    def use_invitation(self, invitation_code: str, user_id: int) -> bool:
+        """Использование приглашения для регистрации"""
+        try:
+            import datetime
+            
+            with sqlite3.connect(self.db_file) as conn:
+                # Проверяем, что приглашение активно и не истекло
+                cursor = conn.execute("""
+                    SELECT * FROM user_invitations 
+                    WHERE invitation_code = ? 
+                    AND is_active = 1 
+                    AND used_by IS NULL 
+                    AND expires_at > datetime('now')
+                """, (invitation_code,))
+                
+                invitation = cursor.fetchone()
+                if not invitation:
+                    return False
+                
+                # Отмечаем приглашение как использованное
+                conn.execute("""
+                    UPDATE user_invitations 
+                    SET used_by = ?, used_at = CURRENT_TIMESTAMP, is_active = 0
+                    WHERE invitation_code = ?
+                """, (user_id, invitation_code))
+                
+                logger.info(f"✅ Приглашение {invitation_code} использовано пользователем {user_id}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка использования приглашения {invitation_code}: {e}")
+            return False
+
+    def get_user_invitations(self, user_id: int) -> list:
+        """Получение списка приглашений, созданных пользователем"""
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("""
+                    SELECT i.*, u.username as used_by_username, u.first_name as used_by_name
+                    FROM user_invitations i
+                    LEFT JOIN telegram_users u ON i.used_by = u.telegram_id
+                    WHERE i.invited_by = ?
+                    ORDER BY i.created_at DESC
+                """, (user_id,))
+                
+                return [dict(row) for row in cursor.fetchall()]
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения приглашений пользователя {user_id}: {e}")
+            return []
+
+    def cleanup_expired_invitations(self) -> int:
+        """Очистка истекших приглашений"""
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.execute("""
+                    UPDATE user_invitations 
+                    SET is_active = 0 
+                    WHERE expires_at < datetime('now') AND is_active = 1
+                """)
+                
+                count = cursor.rowcount
+                if count > 0:
+                    logger.info(f"🗑️ Деактивировано {count} истекших приглашений")
+                
+                return count
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка очистки истекших приглашений: {e}")
+            return 0
+
 
 # =============================================================================
 # ТЕСТИРОВАНИЕ МОДУЛЯ

@@ -1,7 +1,9 @@
 """
 Modbus TCP‑шлюз для КУБ‑1063 (ШЛЮЗ 1)
-Читает данные через TimeWindowManager (RS485) и ретранслирует их в Modbus TCP (порт 5021).
+Читает данные через TimeWindowManager (RS485) и ретранслирует их в Modbus TCP.
 Сохраняет данные в SQLite для дашборда.
+
+Использует централизованный конфиг-менеджер для всех настроек.
 """
 
 import sys
@@ -16,6 +18,14 @@ import logging
 from pymodbus.server import StartTcpServer
 from pymodbus.datastore import ModbusSlaveContext, ModbusServerContext
 from pymodbus.datastore import ModbusSequentialDataBlock
+
+# Импорт централизованного конфиг-менеджера
+try:
+    from core.config_manager import get_config
+    config = get_config()
+except ImportError:
+    logging.error("❌ Не удалось импортировать ConfigManager. Убедитесь что установлен PyYAML.")
+    sys.exit(1)
 
 # Безопасные импорты локальных модулей
 try:
@@ -43,46 +53,40 @@ except ImportError:
         request_rs485_read_register = time_window_manager.request_rs485_read_register
         get_time_window_manager = time_window_manager.get_time_window_manager
 
+# Настройка логирования из конфига
+log_file = config.config_dir / "logs" / "gateway1.log"
+log_file.parent.mkdir(exist_ok=True)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.system.log_level),
     format="%(asctime)s %(levelname)s [GATEWAY1] %(message)s",
     handlers=[
-        logging.FileHandler("gateway1.log", encoding="utf-8"),
+        logging.FileHandler(log_file, encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
 
+logger = logging.getLogger(__name__)
+
 # Глобальная блокировка для потокобезопасной работы с хранилищем регистров
 store_lock = threading.Lock()
 
-# Набор адресов, которые читаем с контроллера и кладём в Holding Registers
-REGISTERS_TO_READ = [
-    0x0301,  # Версия ПО
-    0x0081,  # Состояние цифровых выходов (1)
-    0x0082,  # Состояние цифровых выходов (2)
-    0x00A2,  # Состояние цифровых выходов (3)
-    0x0083,  # Отрицательное давление
-    0x0084,  # Относительная влажность
-    0x0085,  # Концентрация CO2
-    0x0086,  # Концентрация NH3
-    0x0087,  # Выход ГРВ базовой вентиляции
-    0x0088,  # Выход ГРВ туннельной вентиляции
-    0x0089,  # Выход демпфера
-    0x00C3,  # Активные аварии
-    0x00C7,  # Зарегистрированные аварии
-    0x00CB,  # Активные предупреждения
-    0x00CF,  # Зарегистрированные предупреждения
-    0x00D0,  # Целевой уровень вентиляции
-    0x00D1,  # Фактический уровень вентиляции
-    0x00D2,  # Активная схема вентиляции
-    0x00D3,  # Счетчик дней
-    0x00D4,  # Целевая температура
-    0x00D5,  # Текущая температура
-    0x00D6,  # Температура активации вентиляции
-]
+# Получаем список регистров для чтения из конфига
+REGISTERS_TO_READ = []
+for reg_name, reg_addr in config.get_all_modbus_registers().items():
+    # Конвертируем строковый адрес в int
+    if isinstance(reg_addr, str):
+        if reg_addr.startswith('0x'):
+            addr_int = int(reg_addr, 16)
+        else:
+            addr_int = int(reg_addr)
+        REGISTERS_TO_READ.append(addr_int)
 
-MODBUS_TCP_PORT = 5023  # Порт для Modbus TCP
-SERIAL_PORT = "/dev/tty.usbserial-21230"  # Порт RS485
+logger.info(f"📋 Загружено {len(REGISTERS_TO_READ)} регистров из конфигурации")
+
+# Получаем настройки из конфиг-менеджера
+MODBUS_TCP_PORT = config.modbus_tcp.port
+SERIAL_PORT = config.rs485.port
 
 
 def create_modbus_datastore():
@@ -136,63 +140,64 @@ def read_and_retranslate_all_registers(store):
 
 
 def run_modbus_server(context):
-    """Запускает Modbus TCP‑сервер на 5021 порту."""
+    """Запускает Modbus TCP‑сервер на настроенном порту."""
     try:
-        logging.info(f"🧲 Запуск Modbus TCP‑сервера на порту {MODBUS_TCP_PORT}…")
+        logger.info(f"🧲 Запуск Modbus TCP‑сервера на порту {MODBUS_TCP_PORT}…")
         StartTcpServer(context=context, address=("0.0.0.0", MODBUS_TCP_PORT))
     except Exception as e:
-        logging.error(f"❌ Ошибка TCP сервера: {e}")
+        logger.error(f"❌ Ошибка TCP сервера: {e}")
 
 
 def main():
-    logging.info("🚀 Запуск ШЛЮЗА 1: Modbus TCP ретранслятор для КУБ‑1063")
+    logger.info("🚀 Запуск ШЛЮЗА 1: Modbus TCP ретранслятор для КУБ‑1063")
+    logger.info(f"⚙️ Конфигурация: порт {MODBUS_TCP_PORT}, RS485: {SERIAL_PORT}")
 
     # Инициализация менеджера временных окон с нужным портом
     try:
         manager = get_time_window_manager(serial_port=SERIAL_PORT)
-        logging.info(f"✅ TimeWindowManager инициализирован (порт: {SERIAL_PORT})")
+        logger.info(f"✅ TimeWindowManager инициализирован (порт: {SERIAL_PORT})")
     except Exception as e:
-        logging.error(f"❌ Ошибка инициализации TimeWindowManager: {e}")
+        logger.error(f"❌ Ошибка инициализации TimeWindowManager: {e}")
         return
 
     # Инициализация БД (SQLite) для сводных данных/дашборда
     try:
         init_db()
-        logging.info("✅ База данных инициализирована")
+        logger.info("✅ База данных инициализирована")
     except Exception as e:
-        logging.error(f"❌ Ошибка инициализации БД: {e}")
+        logger.error(f"❌ Ошибка инициализации БД: {e}")
         raise
 
     # Создание Modbus‑контекста (один slave, только Holding Registers)
     try:
         store = ModbusSlaveContext(hr=create_modbus_datastore())
         context = ModbusServerContext(slaves=store, single=True)
-        logging.info("✅ Modbus контекст создан (65536 регистров)")
+        logger.info("✅ Modbus контекст создан (65536 регистров)")
     except Exception as e:
-        logging.error(f"❌ Ошибка создания контекста: {e}")
+        logger.error(f"❌ Ошибка создания контекста: {e}")
         raise
 
     # Фоновый поток: периодически запрашиваем RS485 и обновляем datastore + БД
     def update_loop():
-        logging.info("🔄 Запуск цикла ретрансляции данных")
+        logger.info("🔄 Запуск цикла ретрансляции данных")
         
         while True:
             try:
                 data_result = [None]
 
                 def data_callback(data):
-                    logging.info(f"🔔 Callback вызван с данными: {data}")
+                    logger.info(f"🔔 Callback вызван с данными: {data}")
                     data_result[0] = data
                     
                     # Сохраняем данные в SQLite сразу в callback
                     try:
-                        logging.info(f"🔍 Попытка сохранения данных: {list(data.keys())}")
+                        logger.info(f"🔍 Попытка сохранения данных: {list(data.keys())}")
                         update_data(**data)
-                        logging.info("💾 Данные сохранены в БД")
+                        logger.info("💾 Данные сохранены в БД")
                     except Exception as e:
-                        logging.error(f"❌ Ошибка сохранения в БД: {e}")
+                        logger.error(f"❌ Ошибка сохранения в БД: {e}")
                         import traceback
-                        logging.error(traceback.format_exc())
+                        logger.error(traceback.format_exc())
 
                 logging.info("📤 Отправка запроса в TimeWindowManager…")
                 request_rs485_read_all(data_callback)

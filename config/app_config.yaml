@@ -1,0 +1,95 @@
+# Основная конфигурация системы КУБ-1063
+# Централизованные настройки всех модулей
+
+system:
+  environment: production  # development, production, testing
+  log_level: WARNING
+  startup_timeout: 60
+  shutdown_timeout: 15
+
+# Настройки RS485 подключения
+rs485:
+  port: /dev/tty.usbserial-21230
+  baudrate: 9600
+  parity: N
+  databits: 8
+  stopbits: 1
+  timeout: 2.0
+  slave_id: 1
+  window_duration: 5
+  cooldown_duration: 10
+
+# Настройки Modbus TCP сервера
+modbus_tcp:
+  port: 5023
+  timeout: 3.0
+  max_connections: 10
+
+# Настройки базы данных
+database:
+  file: kub_data.db
+  commands_db: kub_commands.db
+  timeout: 5
+  journal_mode: WAL
+  synchronous: NORMAL
+
+# Включение/отключение сервисов
+services:
+  gateway_enabled: true
+  dashboard_enabled: true
+  telegram_enabled: true
+  websocket_enabled: false
+  mqtt_enabled: false
+  
+  # Порты веб-сервисов
+  dashboard_port: 8501
+  websocket_port: 8765
+
+# Карта Modbus регистров КУБ-1063
+modbus_registers:
+  # Системная информация
+  software_version: "0x0301"
+  
+  # Цифровые выходы
+  digital_outputs_1: "0x0081"
+  digital_outputs_2: "0x0082"
+  digital_outputs_3: "0x00A2"
+  
+  # Датчики
+  pressure: "0x0083"
+  humidity: "0x0084"
+  co2: "0x0085"
+  nh3: "0x0086"
+  grv_base: "0x0087"
+  grv_tunnel: "0x0088"
+  damper: "0x0089"
+  
+  # Аварии и предупреждения
+  active_alarms: "0x00C3"
+  registered_alarms: "0x00C7"
+  active_warnings: "0x00CB"
+  registered_warnings: "0x00CF"
+  
+  # Система вентиляции
+  ventilation_target: "0x00D0"
+  ventilation_level: "0x00D1"
+  ventilation_scheme: "0x00D2"
+  day_counter: "0x00D3"
+  
+  # Температурная система
+  temp_target: "0x00D4"
+  temp_inside: "0x00D5"
+  temp_vent_activation: "0x00D6"
+
+# Настройки логирования
+logging:
+  level: INFO
+  format: "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+  files:
+    gateway1: logs/gateway1.log
+    gateway2: logs/gateway2.log
+    dashboard: logs/dashboard.log
+    telegram: logs/telegram.log
+    websocket: logs/websocket.log
+    mqtt: logs/mqtt.log
+    system: logs/system.log

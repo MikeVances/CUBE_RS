@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Bot для управления системой КУБ-1063
-ИСПРАВЛЕННАЯ ВЕРСИЯ - БЕЗ КОНФЛИКТОВ RS485
+Использует централизованный конфиг-менеджер для всех настроек.
 """
 
 import os
@@ -15,6 +15,23 @@ from datetime import datetime
 
 # Добавляем корень проекта в путь
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+# Импорт централизованного конфиг-менеджера и безопасности
+try:
+    from core.config_manager import get_config
+    from core.security_manager import log_security_event
+    from core.log_filter import setup_secure_logging
+    config = get_config()
+    SECURITY_AVAILABLE = True
+except ImportError as e:
+    if "security_manager" in str(e) or "log_filter" in str(e):
+        from core.config_manager import get_config
+        config = get_config()
+        SECURITY_AVAILABLE = False
+        logging.warning("⚠️ Модули безопасности недоступны - логирование безопасности отключено")
+    else:
+        logging.error("❌ Не удалось импортировать ConfigManager. Убедитесь что установлен PyYAML.")
+        sys.exit(1)
 
 # Telegram Bot imports
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,23 +48,37 @@ from bot_utils import (
     truncate_text
 )
 
-# Настройка логирования
+# Настройка логирования из конфига
+log_file = config.config_dir / "logs" / "telegram.log"
+log_file.parent.mkdir(exist_ok=True)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.system.log_level),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('telegram_bot.log', encoding='utf-8'),
+        logging.FileHandler(log_file, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
+# КРИТИЧНО: Настройка безопасного логирования для предотвращения утечки токенов
+if SECURITY_AVAILABLE:
+    # Устанавливаем фильтр секретов для всех логгеров
+    security_filter = setup_secure_logging()
+    logger.info("🔐 Установлен фильтр безопасности для логов")
+else:
+    # Fallback: просто отключаем подробное логирование 
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+    logging.getLogger("telegram.request").setLevel(logging.WARNING)
+
 class KUBTelegramBot:
-    """Telegram Bot для управления КУБ-1063 БЕЗ конфликтов RS485"""
+    """Telegram Bot для управления КУБ-1063 с централизованной конфигурацией"""
     
-    def __init__(self, token: str, config_file: str = "config/telegram_bot.json"):
+    def __init__(self, token: str):
         self.token = token
-        self.config = self._load_config(config_file)
+        self.config = config  # Используем глобальный конфиг-менеджер
         
         # НЕ создаем UnifiedKUBSystem - работаем через базы данных
         self.kub_system = None
@@ -56,48 +87,8 @@ class KUBTelegramBot:
         # Telegram Application
         self.application = None
         
+        logger.info(f"✅ Загружено {len(self.config.telegram.admin_users)} администраторов")
         logger.info("🤖 KUBTelegramBot с UX улучшениями инициализирован")
-    
-    def _load_config(self, config_file: str = "config/telegram_bot.json") -> Dict[str, Any]:
-        """Загрузка конфигурации бота"""
-        config = {
-            "admin_users": [],
-            "allowed_users": [],
-            "default_access_level": "user",
-            "max_message_length": 4000
-        }
-        
-        try:
-            # Пробуем загрузить основной конфиг
-            with open(config_file, 'r', encoding='utf-8') as f:
-                main_config = json.load(f)
-                config.update(main_config)
-        except FileNotFoundError:
-            logger.warning(f"⚠️ Конфиг {config_file} не найден")
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Ошибка парсинга {config_file}: {e}")
-        
-        try:
-            # Загружаем секреты из bot_secrets.json
-            secrets_file = "config/bot_secrets.json"
-            with open(secrets_file, 'r', encoding='utf-8') as f:
-                secrets = json.load(f)
-                
-            # Извлекаем admin_users из секретов
-            if "telegram" in secrets:
-                telegram_config = secrets["telegram"]
-                if "admin_users" in telegram_config:
-                    config["admin_users"] = telegram_config["admin_users"]
-                    logger.info(f"✅ Загружено {len(config['admin_users'])} администраторов")
-            
-        except FileNotFoundError:
-            logger.warning("⚠️ Файл config/bot_secrets.json не найден")
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Ошибка парсинга bot_secrets.json: {e}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки секретов: {e}")
-        
-        return config
 
     # =======================================================================
     # РАБОТА С ДАННЫМИ ЧЕРЕЗ SQLite (вместо прямого RS485)
@@ -166,6 +157,14 @@ class KUBTelegramBot:
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /start - обработка приглашений и защита от незарегистрированных пользователей"""
         user = update.effective_user
+        
+        # Логирование события безопасности
+        if SECURITY_AVAILABLE:
+            log_security_event("BOT_START_ATTEMPT", user_id=user.id, details={
+                "username": user.username,
+                "first_name": user.first_name,
+                "has_args": bool(context.args)
+            })
         
         # Показываем печатание
         await send_typing_action(update, context)
@@ -444,8 +443,16 @@ class KUBTelegramBot:
         """Команда /promote - повышение пользователя (только админы)"""
         user = update.effective_user
         
+        # Логирование попытки изменения прав
+        if SECURITY_AVAILABLE:
+            log_security_event("PRIVILEGE_ESCALATION_ATTEMPT", user_id=user.id, details={
+                "username": user.username,
+                "args": context.args,
+                "is_admin": user.id in self.config.telegram.admin_users
+            }, level="WARNING" if user.id not in self.config.telegram.admin_users else "INFO")
+        
         # Проверяем права админа
-        if user.id not in self.config.get("admin_users", []):
+        if user.id not in self.config.telegram.admin_users:
             await update.message.reply_text("❌ У вас нет прав администратора")
             return
         
@@ -496,7 +503,7 @@ class KUBTelegramBot:
         """Команда /users - список пользователей (только админы)"""
         user = update.effective_user
         
-        if user.id not in self.config.get("admin_users", []):
+        if user.id not in self.config.telegram.admin_users:
             await update.message.reply_text("❌ У вас нет прав администратора")
             return
         
@@ -550,7 +557,7 @@ class KUBTelegramBot:
             "• `/help` — эта справка\n\n"
         )
         
-        if user.id in self.config.get("admin_users", []) or access_level in ['admin', 'engineer']:
+        if user.id in self.config.telegram.admin_users or access_level in ['admin', 'engineer']:
             help_text += (
                 "**👑 КОМАНДЫ АДМИНИСТРАТОРА:**\n"
                 "• `/promote @user уровень` — изменить права\n"
@@ -698,6 +705,13 @@ class KUBTelegramBot:
     async def cmd_block_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /block_user - блокировка пользователя"""
         user = update.effective_user
+        
+        # Логирование попытки блокировки пользователя
+        if SECURITY_AVAILABLE:
+            log_security_event("USER_BLOCK_ATTEMPT", user_id=user.id, details={
+                "username": user.username,
+                "args": context.args
+            }, level="WARNING")
         
         # Проверяем права доступа
         access_level = self.bot_db.get_user_access_level(user.id)
@@ -2073,45 +2087,23 @@ class KUBTelegramBot:
 
 def main():
     """Основная функция запуска"""
-    print("🤖 TELEGRAM BOT ДЛЯ КУБ-1063 (ИСПРАВЛЕННЫЙ)")
-    print("=" * 50)
+    print("🤖 TELEGRAM BOT ДЛЯ КУБ-1063 (ЦЕНТРАЛИЗОВАННАЯ КОНФИГУРАЦИЯ)")
+    print("=" * 60)
     
-    # Получаем токен из bot_secrets.json или переменной окружения
-    token = None
+    # Получаем токен через конфиг-менеджер
+    token = config.telegram.token
     
-    try:
-        # Сначала пробуем bot_secrets.json
-        with open("config/bot_secrets.json", 'r', encoding='utf-8') as f:
-            secrets = json.load(f)
-            if "telegram" in secrets and "bot_token" in secrets["telegram"]:
-                token = secrets["telegram"]["bot_token"]
-                logger.info("✅ Токен загружен из bot_secrets.json")
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось загрузить токен из bot_secrets.json: {e}")
-    
-    # Если не удалось из файла, пробуем переменную окружения
-    if not token:
-        token = os.getenv('TELEGRAM_BOT_TOKEN')
-        if token:
-            logger.info("✅ Токен загружен из переменной окружения")
-    
-    # Если не удалось из secure_config.py
-    if not token:
-        try:
-            from telegram_bot.secure_config import SecureConfig
-            config = SecureConfig()
-            token = config.get_bot_token()
-            if token:
-                logger.info("✅ Токен загружен из secure_config.py")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось загрузить из secure_config.py: {e}")
-
     if not token:
         print("❌ Не найден TELEGRAM_BOT_TOKEN")
         print("💡 Добавьте токен в config/bot_secrets.json:")
         print('{"telegram": {"bot_token": "your_token", "admin_users": [your_id]}}')
+        print("💡 Или установите переменную окружения TELEGRAM_BOT_TOKEN")
         return
 
+    logger.info(f"✅ Токен загружен через ConfigManager")
+    logger.info(f"📊 Администраторов: {len(config.telegram.admin_users)}")
+    logger.info(f"⚙️ Сервисы включены: telegram={config.services.telegram_enabled}")
+    
     # Создаём бота
     bot = KUBTelegramBot(token)
 

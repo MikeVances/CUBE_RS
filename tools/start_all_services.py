@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Запуск всех сервисов системы КУБ-1063
-Исправленная версия для корректной работы двух шлюзов
+Использует централизованный конфиг-менеджер для настроек
 """
 
 import os
@@ -11,52 +11,85 @@ import signal
 import subprocess
 import logging
 
-# Настройка логирования
+# Добавляем корень проекта в путь для импорта конфиг-менеджера
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT_DIR)
+
+# Импорт конфиг-менеджера
+try:
+    from core.config_manager import get_config
+    config = get_config()
+except ImportError:
+    print("❌ Не удалось импортировать ConfigManager. Убедитесь что установлен PyYAML.")
+    sys.exit(1)
+
+# Настройка логирования из конфига
+log_file = config.config_dir / "logs" / "start_services.log"
+log_file.parent.mkdir(exist_ok=True)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.system.log_level),
     format="%(asctime)s %(levelname)s [START] %(message)s",
     handlers=[
-        logging.FileHandler("start_services.log", encoding="utf-8"),
+        logging.FileHandler(log_file, encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
-
-# Корневая директория проекта
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+logger = logging.getLogger(__name__)
 
 BANNER = (
-    "🎯 Запуск всех сервисов системы КУБ-1063...\n" +
-    "=" * 60
+    "🎯 Запуск всех сервисов системы КУБ-1063 (централизованная конфигурация)...\n" +
+    "=" * 75
 )
 
-# Список сервисов в порядке запуска
-SERVICES = [
-    # Сначала запускаем основной шлюз (читает RS485 и пишет в БД)
-    {
-        "name": "Gateway 1 (Modbus TCP + DB)",
-        "cmd": f"{sys.executable} -m modbus.gateway",
-        "delay": 2  # Задержка после запуска
-    },
-    # Затем дополнительный шлюз (читает из БД и предоставляет Modbus TCP на 5022)
-    {
-        "name": "Gateway 2 (Modbus TCP 5022)",
-        "cmd": f"{sys.executable} -m modbus.gateway2",
-        "delay": 1
-    },
-    # Дашборд
-    {
-        "name": "Dashboard (Streamlit)",
-        "cmd": "streamlit run dashboard/app.py --server.port 8501",
-        "delay": 1
-    },
-    # Telegram бот (если есть)
-    {
-        "name": "Telegram Bot",
-        "cmd": f"{sys.executable} start_bot.py" ,
-        "delay": 0.5,
-        "optional": True  # Необязательный сервис
-    }
-]
+# Динамическое формирование списка сервисов из конфига
+def get_enabled_services():
+    """Возвращает список включенных сервисов из конфигурации"""
+    services = []
+    
+    # Gateway (основной шлюз)
+    if config.services.gateway_enabled:
+        services.append({
+            "name": f"Gateway (Modbus TCP {config.modbus_tcp.port} + DB)",
+            "cmd": f"{sys.executable} -m modbus.gateway",
+            "delay": 3
+        })
+    
+    # Dashboard (Streamlit)
+    if config.services.dashboard_enabled:
+        services.append({
+            "name": f"Dashboard (Streamlit {config.services.dashboard_port})",
+            "cmd": f"streamlit run dashboard/app.py --server.port {config.services.dashboard_port}",
+            "delay": 1
+        })
+    
+    # Telegram Bot
+    if config.services.telegram_enabled:
+        services.append({
+            "name": "Telegram Bot",
+            "cmd": f"{sys.executable} telegram_bot/run_bot.py",
+            "delay": 1
+        })
+    
+    # WebSocket Server (если включен)
+    if config.services.websocket_enabled:
+        services.append({
+            "name": f"WebSocket Server ({config.services.websocket_port})",
+            "cmd": f"{sys.executable} publish/websocket_server.py",
+            "delay": 1
+        })
+    
+    # MQTT Publisher (если включен)
+    if config.services.mqtt_enabled:
+        services.append({
+            "name": "MQTT Publisher",
+            "cmd": f"{sys.executable} publish/mqtt.py",
+            "delay": 1
+        })
+    
+    return services
+
+SERVICES = get_enabled_services()
 
 
 def check_port_available(port):
@@ -96,7 +129,14 @@ def main():
     print(f"📂 Рабочая директория: {ROOT_DIR}")
     
     # Проверяем доступность ключевых портов
-    ports_to_check = [5023, 5022, 8501]
+    # Формируем список портов для проверки из конфига
+    ports_to_check = []
+    if config.services.gateway_enabled:
+        ports_to_check.append(config.modbus_tcp.port)
+    if config.services.dashboard_enabled:
+        ports_to_check.append(config.services.dashboard_port)
+    if config.services.websocket_enabled:
+        ports_to_check.append(config.services.websocket_port)
     for port in ports_to_check:
         if not check_port_available(port):
             logging.error(f"❌ Порт {port} уже занят!")
@@ -153,29 +193,43 @@ def main():
                         raise
         
         # Проверяем готовность ключевых сервисов
-        service_checks = [
-            ("Gateway 1", 5023),
-            ("Gateway 2", 5022),
-            ("Dashboard", 8501)
-        ]
+        service_checks = []
+        if config.services.gateway_enabled:
+            service_checks.append(("Gateway", config.modbus_tcp.port))
+        if config.services.dashboard_enabled:
+            service_checks.append(("Dashboard", config.services.dashboard_port))
+        if config.services.websocket_enabled:
+            service_checks.append(("WebSocket", config.services.websocket_port))
         
         for name, port in service_checks:
             wait_for_service(name, port, timeout=15)
         
         # Выводим информацию о запущенных сервисах
-        print("\n" + "=" * 60)
-        print("✅ Система КУБ-1063 запущена!")
-        print("=" * 60)
-        print("📊 Дашборд:          http://localhost:8501")
-        print("🔧 Modbus TCP 1:       localhost:5023 (основной)")
-        print("🔧 Modbus TCP 2:       localhost:5022 (дубликат)")
-        print("📡 Оба порта содержат одинаковые регистры КУБ-1063")
-        print("🤖 Telegram Bot:     активен (если запущен)")
-        print("=" * 60)
+        print("\n" + "=" * 70)
+        print("✅ Система КУБ-1063 запущена (централизованная конфигурация)!")
+        print("=" * 70)
+        
+        if config.services.dashboard_enabled:
+            print(f"📊 Dashboard:        http://localhost:{config.services.dashboard_port}")
+        
+        if config.services.gateway_enabled:
+            print(f"🔧 Modbus TCP:       localhost:{config.modbus_tcp.port}")
+        
+        if config.services.websocket_enabled:
+            print(f"🌐 WebSocket:        ws://localhost:{config.services.websocket_port}")
+        
+        if config.services.telegram_enabled:
+            print("🤖 Telegram Bot:     активен")
+        
+        if config.services.mqtt_enabled:
+            print("📡 MQTT Publisher:   активен")
+            
+        print("=" * 70)
         print("📋 Логи сервисов:")
-        print("   gateway1.log  - основной шлюз (RS485→БД→Modbus TCP 5023)")
-        print("   gateway2.log  - дубликат шлюза (БД→Modbus TCP 5022)")
-        print("   start_services.log - этот скрипт")
+        print(f"   logs/gateway1.log      - основной шлюз (RS485→БД→Modbus TCP {config.modbus_tcp.port})")
+        print(f"   logs/dashboard.log     - веб-дашборд (порт {config.services.dashboard_port})")
+        print(f"   logs/telegram.log      - telegram bot")
+        print(f"   logs/start_services.log - этот скрипт")
         print("=" * 60)
         print("⚠️  Нажмите Ctrl+C для остановки всех сервисов")
         print("=" * 60)

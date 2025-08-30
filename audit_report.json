@@ -1,0 +1,39 @@
+{
+  "timestamp": "2025-08-30T22:19:04.940238",
+  "duration_seconds": 0.818948,
+  "checks_passed": 7,
+  "checks_total": 8,
+  "success_rate": 87.5,
+  "results": {
+    "Права доступа к файлам": true,
+    "Безопасность секретов": true,
+    "Безопасность БД": true,
+    "Конфигурация системы": false,
+    "Зависимости": true,
+    "Безопасность логов": true,
+    "Сетевая безопасность": true,
+    "Качество кода": true
+  },
+  "issues": {
+    "critical": [],
+    "high": [
+      {
+        "title": "RS485 порт недоступен",
+        "description": "Устройство /dev/tty.usbserial-21230 не найдено",
+        "file": null,
+        "timestamp": "2025-08-30T22:19:05.024020"
+      }
+    ],
+    "medium": [
+      {
+        "title": "Неоптимальный режим журнала: kub_commands.db",
+        "description": "Режим delete, рекомендуется WAL",
+        "file": null,
+        "timestamp": "2025-08-30T22:19:05.024003"
+      }
+    ],
+    "low": [],
+    "info": []
+  },
+  "production_ready": true
+}

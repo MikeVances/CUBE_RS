@@ -1,0 +1,56 @@
+database:
+  commands_db: kub_commands.db
+  file: kub_data.db
+  journal_mode: WAL
+  synchronous: NORMAL
+  timeout: 5
+modbus_registers:
+  active_alarms: '0x00C3'
+  active_warnings: '0x00CB'
+  co2: '0x0085'
+  damper: '0x0089'
+  day_counter: '0x00D3'
+  digital_outputs_1: '0x0081'
+  digital_outputs_2: '0x0082'
+  digital_outputs_3: '0x00A2'
+  grv_base: '0x0087'
+  grv_tunnel: '0x0088'
+  humidity: '0x0084'
+  nh3: '0x0086'
+  pressure: '0x0083'
+  registered_alarms: '0x00C7'
+  registered_warnings: '0x00CF'
+  software_version: '0x0301'
+  temp_inside: '0x00D5'
+  temp_target: '0x00D4'
+  temp_vent_activation: '0x00D6'
+  ventilation_level: '0x00D1'
+  ventilation_scheme: '0x00D2'
+  ventilation_target: '0x00D0'
+modbus_tcp:
+  max_connections: 10
+  port: 5023
+  timeout: 3.0
+rs485:
+  baudrate: 9600
+  cooldown_duration: 10
+  databits: 8
+  parity: N
+  port: /dev/tty.usbserial-21230
+  slave_id: 1
+  stopbits: 1
+  timeout: 2.0
+  window_duration: 5
+services:
+  dashboard_enabled: true
+  dashboard_port: 8501
+  gateway_enabled: true
+  mqtt_enabled: false
+  telegram_enabled: true
+  websocket_enabled: false
+  websocket_port: 8765
+system:
+  environment: development
+  log_level: INFO
+  shutdown_timeout: 15
+  startup_timeout: 60

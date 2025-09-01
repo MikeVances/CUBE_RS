@@ -67,7 +67,7 @@ def main():
         },
         {
             "name": "Telegram Bot", 
-            "patterns": ["telegram_bot.py", "publish/telegram_bot.py"]
+            "patterns": ["telegram_bot.py", "telegram_bot/bot_main.py", "telegram_bot/run_bot.py", "run_bot.py"]
         },
         {
             "name": "WebSocket Server",
@@ -83,7 +83,7 @@ def main():
         },
         {
             "name": "Gateway (Modbus TCP)",
-            "patterns": ["gateway.py", "modbus/gateway.py"]
+            "patterns": ["gateway.py", "modbus/gateway.py", "modbus.gateway", "-m modbus.gateway"]
         }
     ]
     

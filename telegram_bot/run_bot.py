@@ -17,9 +17,14 @@ import logging
 async def run_bot_async():
     """Асинхронная функция для запуска бота"""
     try:
-        with open("config/bot_secrets.json", 'r') as f:
-            secrets = json.load(f)
-            token = secrets["telegram"]["bot_token"]
+        # Используем централизованный конфиг-менеджер
+        from core.config_manager import get_config
+        config = get_config()
+        token = config.telegram.token
+        
+        if not token:
+            raise ValueError("Токен Telegram не найден в конфигурации")
+            
     except Exception as e:
         print(f"❌ Ошибка загрузки токена: {e}")
         return

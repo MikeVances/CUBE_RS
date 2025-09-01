@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 # Импорт функции чтения данных
-from modbus.dashboard_reader import read_all, get_statistics
+from modbus.dashboard_reader import read_all, get_statistics, get_historical_data
 DEVICE_AVAILABLE = True
 
 # Настройка страницы
@@ -67,11 +67,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Инициализация session state для истории данных
-if 'data_history' not in st.session_state:
-    st.session_state.data_history = []
-
-# Инициализация кэша для сглаживания
+# Инициализация кэша для сглаживания (сохраняем для текущих данных)
 if 'data_cache' not in st.session_state:
     st.session_state.data_cache = {}
     st.session_state.cache_timestamp = None
@@ -159,10 +155,7 @@ def main():
         st.header("📈 История данных")
         history_hours = st.slider("Показать за часов", 1, 24, 6)
         
-        if st.button("🗑 Очистить историю"):
-            st.session_state.data_history = []
-            st.session_state.data_cache = {}
-            st.success("История очищена!")
+        st.info("💾 Исторические данные загружаются из базы данных")
     
     # Основной цикл обновления
     while True:
@@ -181,13 +174,7 @@ def main():
                     else:
                         data = raw_data
                     
-                    # Сохраняем в историю
-                    st.session_state.data_history.append(data.copy())
-                    
-                    # Ограничиваем размер истории
-                    max_history = history_hours * 3600 // refresh_interval
-                    if len(st.session_state.data_history) > max_history:
-                        st.session_state.data_history = st.session_state.data_history[-max_history:]
+                    # Данные автоматически сохраняются в БД через Gateway
                 else:
                     st.error("❌ Нет данных с контроллера")
                     data = {}
@@ -345,38 +332,58 @@ def main():
                 except Exception as e:
                     st.warning(f"⚠️ Не удалось получить статистику: {e}")
             
-            # Графики
-            if len(st.session_state.data_history) > 1:
-                st.subheader("📈 Графики за последние часы")
+            # Графики с историческими данными
+            st.subheader("📈 Исторические графики")
+            
+            try:
+                # Получаем исторические данные из БД
+                historical_data = get_historical_data(hours=history_hours)
                 
-                # Преобразуем историю в DataFrame
-                df = pd.DataFrame(st.session_state.data_history)
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                
-                # Проверяем наличие нужных колонок
-                if 'temp_inside' not in df.columns:
-                    st.warning("⚠️ Недостаточно данных для построения графиков. Ожидайте обновления...")
-                    st.info("💡 Нажмите 'Очистить историю' для сброса данных")
-                else:
-                    # График температуры
-                    col_temp, col_hum = st.columns(2)
+                if historical_data and len(historical_data) > 1:
+                    # Преобразуем в DataFrame
+                    df = pd.DataFrame(historical_data)
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
                     
-                    with col_temp:
-                        fig_temp = go.Figure()
+                    st.info(f"📊 Показано {len(historical_data)} записей за последние {history_hours} часов из базы данных")
+                    
+                else:
+                    st.warning("⚠️ Недостаточно исторических данных для построения графиков.")
+                    st.info("💡 Попробуйте увеличить количество часов в боковой панели")
+                    historical_data = None
+                    
+            except Exception as e:
+                st.error(f"❌ Ошибка получения исторических данных: {e}")
+                historical_data = None
+                
+            if historical_data and len(historical_data) > 1:
+                # График температуры
+                col_temp, col_hum = st.columns(2)
+                
+                with col_temp:
+                    fig_temp = go.Figure()
+                    
+                    # Фильтруем данные температуры (убираем None)
+                    temp_data = df[df['temp_inside'].notna()].copy()
+                    if not temp_data.empty:
                         fig_temp.add_trace(go.Scatter(
-                            x=df['timestamp'], 
-                            y=df['temp_inside'],
+                            x=temp_data['timestamp'], 
+                            y=temp_data['temp_inside'],
                             mode='lines+markers',
                             name='Текущая',
-                            line=dict(color='#58a6ff', width=2)
+                            line=dict(color='#58a6ff', width=2),
+                            connectgaps=False  # Не соединяем пропуски
                         ))
-                    if 'temp_target' in df.columns:
+                    
+                    # Добавляем целевую температуру если есть данные
+                    target_data = df[df['temp_target'].notna()].copy()
+                    if not target_data.empty:
                         fig_temp.add_trace(go.Scatter(
-                            x=df['timestamp'], 
-                            y=df['temp_target'],
+                            x=target_data['timestamp'], 
+                            y=target_data['temp_target'],
                             mode='lines',
                             name='Целевая',
-                            line=dict(color='#f85149', width=1, dash='dash')
+                            line=dict(color='#f85149', width=1, dash='dash'),
+                            connectgaps=False
                         ))
                     
                     fig_temp.update_layout(
@@ -388,40 +395,46 @@ def main():
                     )
                     st.plotly_chart(fig_temp, use_container_width=True)
                 
-                    with col_hum:
-                        if 'humidity' in df.columns:
-                            fig_hum = go.Figure()
-                            fig_hum.add_trace(go.Scatter(
-                                x=df['timestamp'], 
-                                y=df['humidity'],
-                                mode='lines+markers',
-                                name='Влажность',
-                                line=dict(color='#7c3aed', width=2)
-                            ))
-                            
-                            fig_hum.update_layout(
-                                title="💧 Влажность",
-                                xaxis_title="Время",
-                                yaxis_title="%",
-                                template="plotly_dark",
-                                height=300
-                            )
-                            st.plotly_chart(fig_hum, use_container_width=True)
-                        else:
-                            st.info("📊 График влажности недоступен")
+                with col_hum:
+                    # Фильтруем данные влажности
+                    humidity_data = df[df['humidity'].notna()].copy()
+                    if not humidity_data.empty:
+                        fig_hum = go.Figure()
+                        fig_hum.add_trace(go.Scatter(
+                            x=humidity_data['timestamp'], 
+                            y=humidity_data['humidity'],
+                            mode='lines+markers',
+                            name='Влажность',
+                            line=dict(color='#7c3aed', width=2),
+                            connectgaps=False
+                        ))
+                        
+                        fig_hum.update_layout(
+                            title="💧 Влажность",
+                            xaxis_title="Время",
+                            yaxis_title="%",
+                            template="plotly_dark",
+                            height=300
+                        )
+                        st.plotly_chart(fig_hum, use_container_width=True)
+                    else:
+                        st.info("📊 График влажности недоступен (нет данных за выбранный период)")
                 
                 # График CO2 и вентиляции
                 col_co2, col_vent = st.columns(2)
                 
                 with col_co2:
-                    if 'co2' in df.columns:
+                    # Фильтруем данные CO2
+                    co2_data = df[df['co2'].notna()].copy()
+                    if not co2_data.empty:
                         fig_co2 = go.Figure()
                         fig_co2.add_trace(go.Scatter(
-                            x=df['timestamp'], 
-                            y=df['co2'],
+                            x=co2_data['timestamp'], 
+                            y=co2_data['co2'],
                             mode='lines+markers',
                             name='CO₂',
-                            line=dict(color='#f85149', width=2)
+                            line=dict(color='#f85149', width=2),
+                            connectgaps=False
                         ))
                         
                         fig_co2.update_layout(
@@ -433,17 +446,20 @@ def main():
                         )
                         st.plotly_chart(fig_co2, use_container_width=True)
                     else:
-                        st.info("📊 График CO₂ недоступен")
+                        st.info("📊 График CO₂ недоступен (нет данных за выбранный период)")
                 
                 with col_vent:
-                    if 'ventilation_level' in df.columns:
+                    # Фильтруем данные вентиляции
+                    vent_data = df[df['ventilation_level'].notna()].copy()
+                    if not vent_data.empty:
                         fig_vent = go.Figure()
                         fig_vent.add_trace(go.Scatter(
-                            x=df['timestamp'], 
-                            y=df['ventilation_level'],
+                            x=vent_data['timestamp'], 
+                            y=vent_data['ventilation_level'],
                             mode='lines+markers',
                             name='Вентиляция',
-                            line=dict(color='#56d364', width=2)
+                            line=dict(color='#56d364', width=2),
+                            connectgaps=False
                         ))
                         
                         fig_vent.update_layout(
@@ -455,7 +471,7 @@ def main():
                         )
                         st.plotly_chart(fig_vent, use_container_width=True)
                     else:
-                        st.info("📊 График вентиляции недоступен (данные не записываются в БД)")
+                        st.info("📊 График вентиляции недоступен (нет данных за выбранный период)")
         
         # Проверяем нужно ли автообновление
         if not auto_refresh:

@@ -57,20 +57,46 @@ def read_all() -> Optional[Dict[str, Any]]:
             
             # Используем значения как есть (Gateway уже обработал данные)
             result = {
-                'temp_inside': data.get('temp_inside', 0) if data.get('temp_inside') else 0,
-                'temp_target': data.get('temp_target', 25.0) if data.get('temp_target') else 25.0,
-                'humidity': data.get('humidity', 0) if data.get('humidity') else 0,
-                'co2': data.get('co2', 0) if data.get('co2') else 0,
-                'nh3': data.get('nh3', 0) if data.get('nh3') else 0,
-                'pressure': data.get('pressure', 0) if data.get('pressure') else 0,
-                'ventilation_level': data.get('ventilation_level', 0) if data.get('ventilation_level') else 0,
-                'ventilation_target': data.get('ventilation_target', 0) if data.get('ventilation_target') else 0,
-                'active_alarms': data.get('active_alarms', 0) if data.get('active_alarms') else 0,
-                'active_warnings': data.get('active_warnings', 0) if data.get('active_warnings') else 0,
+                'temp_inside': data.get('temp_inside'),
+                'temp_target': data.get('temp_target'),
+                'humidity': data.get('humidity'),
+                'co2': data.get('co2'),
+                'nh3': data.get('nh3'),
+                'pressure': data.get('pressure'),
+                'ventilation_level': data.get('ventilation_level'),
+                'ventilation_target': data.get('ventilation_target'),
+                'active_alarms': data.get('active_alarms') or 0,
+                'active_warnings': data.get('active_warnings') or 0,
+                'digital_outputs_1': data.get('digital_outputs_1'),
+                'digital_outputs_2': data.get('digital_outputs_2'),
+                'digital_outputs_3': data.get('digital_outputs_3'),
+                'pressure_status': data.get('pressure_status'),
+                'humidity_status': data.get('humidity_status'),
+                'co2_status': data.get('co2_status'),
+                'nh3_status': data.get('nh3_status'),
                 'software_version': _parse_software_version(data.get('software_version', 0)),
                 'timestamp': data['timestamp'],
                 'updated_at': data.get('updated_at', datetime.now().isoformat())
             }
+
+            # Вычисляем состояние аварийного реле, если есть конфигурация
+            try:
+                ar = getattr(config, 'alarm_relay', None)
+                if ar and getattr(ar, 'enabled', False):
+                    reg = str(getattr(ar, 'register', '0x0082')).lower()
+                    reg_to_key = {
+                        '0x0081': 'digital_outputs_1',
+                        '0x0082': 'digital_outputs_2',
+                        '0x00a2': 'digital_outputs_3',
+                    }
+                    key = reg_to_key.get(reg)
+                    bit = int(getattr(ar, 'bit', 7))
+                    val = result.get(key)
+                    if isinstance(val, int) and 0 <= bit <= 15:
+                        result['alarm_relay'] = bool((val >> bit) & 1)
+                        result['alarm_relay_label'] = getattr(ar, 'label', 'Реле аварии')
+            except Exception:
+                pass
             
             return result
             

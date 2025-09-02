@@ -33,6 +33,10 @@ crc16 = crcmod.predefined.mkPredefinedCrcFun('modbus')
 # Карта регистров КУБ-1063 (согласно документации)
 REGISTER_MAP = {
     "software_version": 0x0301,    # Версия ПО
+    # Цифровые выходы (битовые поля)
+    "digital_outputs_1": 0x0081,
+    "digital_outputs_2": 0x0082,
+    "digital_outputs_3": 0x00A2,
     "temp_inside": 0x00D5,         # Текущая температура
     "temp_target": 0x00D4,         # Целевая температура
     "humidity": 0x0084,            # Относительная влажность
@@ -43,6 +47,14 @@ REGISTER_MAP = {
     "ventilation_target": 0x00D0,  # Целевой уровень вентиляции
     "ventilation_scheme": 0x00D2,  # Активная схема вентиляции
     "day_counter": 0x00D3,         # Счетчик дней
+    # Аварии и предупреждения (битовые поля, 4 последовательных регистра по 16 бит)
+    # В документации поле описано как диапазон 0x00C0–0x00C3 (Active), 0x00C4–0x00C7 (Registered),
+    # 0x00C8–0x00CB (Warnings Active), 0x00CC–0x00CF (Warnings Registered).
+    # Мы сохраняем конечный адрес группы как маркер, а чтение делаем по всем 4 словам.
+    "active_alarms": 0x00C3,
+    "registered_alarms": 0x00C7,
+    "active_warnings": 0x00CB,
+    "registered_warnings": 0x00CF,
 }
 
 class KUB1063Reader:
@@ -385,14 +397,50 @@ class KUB1063Reader:
         elif register_name in ["co2", "day_counter"]:
             # Целые числа
             return raw_value
-        
+
         elif register_name == "ventilation_scheme":
             # 0 — базовая, 1 — туннельная
             return "базовая" if raw_value == 0 else "туннельная"
         
+        elif register_name in [
+            "active_alarms", "registered_alarms", "active_warnings", "registered_warnings"
+        ]:
+            # Возвращаем битовую маску как целое
+            return raw_value
+        
         else:
             # По умолчанию возвращаем как есть
             return raw_value
+
+    @staticmethod
+    def _sensor_status_from_raw(raw_value: Optional[int]) -> str:
+        """Определение текстового статуса сенсора по спец-значениям.
+        Возвращает одно из: ok | pending | break | error | disabled
+        """
+        if raw_value is None:
+            return "error"
+        if raw_value == 0xFFFF:
+            return "pending"
+        if raw_value == 0xFFFE:
+            return "break"
+        if raw_value == 0xFFFD:
+            return "error"
+        if raw_value == 0xFFFC:
+            return "disabled"
+        if raw_value >= 0xFFF0:
+            return "error"
+        return "ok"
+
+    def read_bitfield_64(self, base_addr: int) -> int:
+        """Читает 4 последовательных 16-битных регистра и собирает 64-битовую маску.
+        Младший адрес содержит младшие биты, младший бит в слове — младший бит поля.
+        """
+        v0 = self.read_register(base_addr)
+        v1 = self.read_register(base_addr + 1)
+        v2 = self.read_register(base_addr + 2)
+        v3 = self.read_register(base_addr + 3)
+        parts = [x if isinstance(x, int) else 0 for x in (v0, v1, v2, v3)]
+        return (parts[0] & 0xFFFF) | ((parts[1] & 0xFFFF) << 16) | ((parts[2] & 0xFFFF) << 32) | ((parts[3] & 0xFFFF) << 48)
     
     def read_all(self) -> Dict[str, Any]:
         """Чтение всех регистров"""
@@ -409,8 +457,17 @@ class KUB1063Reader:
         
         try:
             for name, register in REGISTER_MAP.items():
-                raw_value = self.read_register(register)
-                parsed_value = self.parse_value(raw_value, name)
+                # Специальная обработка битовых полей аварий/предупреждений (4 слова)
+                if name in ("active_alarms", "registered_alarms", "active_warnings", "registered_warnings"):
+                    base = register - 3  # последняя ячейка группы минус 3
+                    parsed_value = self.read_bitfield_64(base)
+                else:
+                    raw_value = self.read_register(register)
+                    # Статусы для сенсоров давления/влажности/CO2/NH3
+                    if name in ("pressure", "humidity", "co2", "nh3"):
+                        status_key = f"{name}_status"
+                        data[status_key] = self._sensor_status_from_raw(raw_value)
+                    parsed_value = self.parse_value(raw_value, name)
                 data[name] = parsed_value
                 
                 if parsed_value is not None:
@@ -451,8 +508,15 @@ class KUB1063Reader:
         
         try:
             for name, register in REGISTER_MAP.items():
-                raw_value = self.read_register(register)
-                parsed_value = self.parse_value(raw_value, name)
+                if name in ("active_alarms", "registered_alarms", "active_warnings", "registered_warnings"):
+                    base = register - 3
+                    parsed_value = self.read_bitfield_64(base)
+                else:
+                    raw_value = self.read_register(register)
+                    if name in ("pressure", "humidity", "co2", "nh3"):
+                        status_key = f"{name}_status"
+                        data[status_key] = self._sensor_status_from_raw(raw_value)
+                    parsed_value = self.parse_value(raw_value, name)
                 data[name] = parsed_value
                 
                 if parsed_value is not None:
@@ -476,72 +540,7 @@ class KUB1063Reader:
         
         return data
     
-    def write_register(self, register: int, value: int) -> bool:
-        """Запись значения в регистр (для TimeWindowManager)"""
-        if not self.is_connected():
-            if not self.connect():
-                return False
-        
-        try:
-            # Создание Modbus RTU запроса записи (FC=06)
-            request = bytearray([
-                self.slave_id,
-                0x06,  # Function Code: Write Single Register
-                (register >> 8) & 0xFF,
-                register & 0xFF,
-                (value >> 8) & 0xFF,
-                value & 0xFF
-            ])
-            
-            # Добавляем CRC
-            crc = crc16(request)
-            request.append(crc & 0xFF)
-            request.append((crc >> 8) & 0xFF)
-            
-            # Очистка буферов
-            self.serial.flushInput()
-            self.serial.flushOutput()
-            
-            # Отправка запроса
-            self.serial.write(request)
-            self.serial.flush()
-            
-            # Ожидание ответа
-            time.sleep(0.2)
-            
-            if self.serial.in_waiting > 0:
-                response = self.serial.read(self.serial.in_waiting)
-                
-                # Проверка ответа
-                if len(response) >= 8 and response[0] == self.slave_id and response[1] == 0x06:
-                    # Проверка CRC
-                    received_crc = (response[-1] << 8) | response[-2]
-                    calculated_crc = crc16(response[:-2])
-                    
-                    if received_crc == calculated_crc:
-                        # Проверка что записанное значение совпадает
-                        returned_register = (response[2] << 8) | response[3]
-                        returned_value = (response[4] << 8) | response[5]
-                        
-                        if returned_register == register and returned_value == value:
-                            logger.debug(f"✅ Запись успешна: 0x{register:04X}={value}")
-                            return True
-                        else:
-                            logger.warning(f"❌ Неверный ответ: регистр=0x{returned_register:04X}, значение={returned_value}")
-                            return False
-                    else:
-                        logger.warning("❌ Ошибка CRC в ответе записи")
-                        return False
-                else:
-                    logger.warning("❌ Неверный формат ответа записи")
-                    return False
-            else:
-                logger.warning("❌ Нет ответа от устройства при записи")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка записи регистра 0x{register:04X}: {e}")
-            return False
+    # (Удалена дублирующаяся и некорректная версия write_register; используем реализацию выше.)
 
 # Глобальный экземпляр читателя
 _reader = KUB1063Reader()

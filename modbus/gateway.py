@@ -35,6 +35,7 @@ try:
         request_rs485_read_register,
         get_time_window_manager
     )
+    from modbus.writer import KUB1063Writer
 except ImportError:
     try:
         from .modbus_storage import init_db, update_data
@@ -43,6 +44,7 @@ except ImportError:
             request_rs485_read_register,
             get_time_window_manager
         )
+        from .writer import KUB1063Writer
     except ImportError:
         # Fallback для прямого запуска
         import modbus_storage
@@ -52,6 +54,7 @@ except ImportError:
         request_rs485_read_all = time_window_manager.request_rs485_read_all
         request_rs485_read_register = time_window_manager.request_rs485_read_register
         get_time_window_manager = time_window_manager.get_time_window_manager
+        from writer import KUB1063Writer
 
 # Настройка логирования из конфига
 log_file = config.config_dir / "logs" / "gateway1.log"
@@ -176,6 +179,14 @@ def main():
     except Exception as e:
         logger.error(f"❌ Ошибка создания контекста: {e}")
         raise
+
+    # Запускаем Writer для обработки очереди команд (в том же процессе, чтобы разделять TimeWindowManager)
+    try:
+        writer = KUB1063Writer(use_time_window_manager=True)
+        writer.start()
+        logger.info("✍️ Writer запущен: обработка очереди write_commands активна")
+    except Exception as e:
+        logger.error(f"❌ Не удалось запустить Writer: {e}")
 
     # Фоновый поток: периодически запрашиваем RS485 и обновляем datastore + БД
     def update_loop():

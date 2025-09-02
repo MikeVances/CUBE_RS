@@ -8,9 +8,10 @@ import os
 import sys
 import json
 import logging
+import time
 import asyncio
 import sqlite3
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 # Добавляем корень проекта в путь
@@ -45,7 +46,7 @@ from bot_utils import (
     build_main_menu, build_confirmation_menu, build_back_menu, build_stats_menu,
     send_typing_action, send_upload_action,
     error_message, success_message, info_message, warning_message, loading_message,
-    truncate_text
+    truncate_text, decode_active_alarms
 )
 
 # Настройка логирования из конфига
@@ -87,6 +88,15 @@ class KUBTelegramBot:
         # Telegram Application
         self.application = None
         
+        # Локальное состояние для уведомлений об авариях
+        self._last_alarm_count = 0
+        self._last_warning_count = 0
+        self._last_alarm_notify_ts = 0
+        # Оптимистичный режим после сброса: не больше 35 секунд показываем реле как ВЫКЛ
+        self._optimistic_clear_until: Dict[int, float] = {}
+        # Управление звуковыми пингами
+        self._sound_ping_delete_after = 25  # сек
+        
         logger.info(f"✅ Загружено {len(self.config.telegram.admin_users)} администраторов")
         logger.info("🤖 KUBTelegramBot с UX улучшениями инициализирован")
 
@@ -102,29 +112,156 @@ class KUBTelegramBot:
                 cursor = conn.execute("""
                     SELECT temp_inside, temp_target, humidity, co2, nh3, pressure,
                            ventilation_level, ventilation_target, active_alarms,
-                           active_warnings, updated_at 
+                           active_warnings, updated_at,
+                           digital_outputs_1, digital_outputs_2, digital_outputs_3
                     FROM latest_data WHERE id=1
                 """)
                 row = cursor.fetchone()
                 if row:
-                    return {
-                        'temp_inside': row[0] if row[0] else 0,  # Данные уже конвертированы Gateway
-                        'temp_target': row[1] if row[1] else 0,
-                        'humidity': row[2] if row[2] else 0,
-                        'co2': row[3] if row[3] else 0,
-                        'nh3': row[4] if row[4] else 0,
-                        'pressure': row[5] if row[5] else 0,
-                        'ventilation_level': row[6] if row[6] else 0,
-                        'ventilation_target': row[7] if row[7] else 0,
-                        'active_alarms': row[8] if row[8] else 0,
-                        'active_warnings': row[9] if row[9] else 0,
+                    data = {
+                        'temp_inside': row[0] if row[0] is not None else None,
+                        'temp_target': row[1] if row[1] is not None else None,
+                        'humidity': row[2] if row[2] is not None else None,
+                        'co2': row[3] if row[3] is not None else None,
+                        'nh3': row[4] if row[4] is not None else None,
+                        'pressure': row[5] if row[5] is not None else None,
+                        'ventilation_level': row[6] if row[6] is not None else None,
+                        'ventilation_target': row[7] if row[7] is not None else None,
+                        'active_alarms': row[8] if row[8] is not None else 0,
+                        'active_warnings': row[9] if row[9] is not None else 0,
                         'updated_at': row[10],
+                        'digital_outputs_1': row[11] if len(row) > 11 else None,
+                        'digital_outputs_2': row[12] if len(row) > 12 else None,
+                        'digital_outputs_3': row[13] if len(row) > 13 else None,
                         'connection_status': 'connected' if row[10] else 'disconnected'
                     }
+                    # Вычисляем состояние аварийного реле по конфигурации, если включено
+                    try:
+                        ar = getattr(self.config, 'alarm_relay', None)
+                        if ar and getattr(ar, 'enabled', False):
+                            reg = str(getattr(ar, 'register', '0x0082')).lower()
+                            reg_to_key = {
+                                '0x0081': 'digital_outputs_1',
+                                '0x0082': 'digital_outputs_2',
+                                '0x00a2': 'digital_outputs_3',
+                            }
+                            key = reg_to_key.get(reg)
+                            bit = int(getattr(ar, 'bit', 7))
+                            val = data.get(key) if key else None
+                            if isinstance(val, int) and 0 <= bit <= 15:
+                                data['alarm_relay'] = bool((val >> bit) & 1)
+                                data['alarm_relay_label'] = getattr(ar, 'label', 'Реле аварии')
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка вычисления состояния аварийного реле: {e}")
+                    return data
                 return None
         except Exception as e:
             logger.error(f"❌ Ошибка чтения данных из БД: {e}")
             return None
+
+    def get_recent_sensor_recovery(self, minutes: int = 15) -> Dict[str, bool]:
+        """Проверяет за последние N минут: были ли пропадания показаний и затем восстановление.
+        Возвращает словарь по датчикам: {'co2': True/False, 'humidity': ..., 'nh3': ...}
+        """
+        result = {'co2': False, 'humidity': False, 'nh3': False}
+        try:
+            import sqlite3
+            with sqlite3.connect("kub_data.db") as conn:
+                conn.row_factory = sqlite3.Row
+                for field in ('co2', 'humidity', 'nh3'):
+                    # Берем выборку за период, смотрим был ли None и затем последние значения не None
+                    rows = conn.execute(
+                        f"SELECT {field} as v FROM sensor_data WHERE timestamp > datetime('now', ?) ORDER BY timestamp ASC",
+                        (f'-{minutes} minutes',)
+                    ).fetchall()
+                    if not rows:
+                        continue
+                    had_none = any(r['v'] is None for r in rows)
+                    last_v = next((r['v'] for r in reversed(rows) if True), None)
+                    if had_none and last_v is not None:
+                        result[field] = True
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка анализа восстановления датчиков: {e}")
+        return result
+
+    # =======================
+    # Оценка причин аварии и нейтрализации
+    # =======================
+    def compute_alarm_assessment(self, data: Dict[str, any]) -> Dict[str, any]:
+        """Возвращает оценку причин аварий и факта нейтрализации.
+        Использует БИТЫ аварий (0x00C0–0x00C3) как первичный источник истины.
+        Никаких уставок не записываем и не интерпретируем — если бит активен, причина АКТИВНА.
+        Для сенсоров без битов (CO₂/NH₃) используем их статусы break/error.
+        """
+        result = {
+            'items': [],  # [{title, neutralized(bool), details}]
+            'all_neutralized': False
+        }
+        try:
+            mask = int(data.get('active_alarms', 0) or 0)
+            humidity = data.get('humidity')
+            hum_status = data.get('humidity_status')
+            pressure_status = data.get('pressure_status')
+            co2 = data.get('co2')
+            co2_status = data.get('co2_status')
+            nh3_status = data.get('nh3_status')
+
+            # Сенсоры: обрывы/ошибки → нейтрализация, если status=ok (или было восстановление)
+            recovery = self.get_recent_sensor_recovery(minutes=15)
+
+            def add(title: str, neutralized: bool, details: str):
+                result['items'].append({'title': title, 'neutralized': bool(neutralized), 'details': details})
+
+            # Температура высокая/низкая — только по битам: если бит активен, причина активна
+            if ((mask >> 35) & 1) == 1:  # высокая внутр. температура
+                add("Высокая внутренняя температура", False, "бит аварии активен")
+            if ((mask >> 36) & 1) == 1 or ((mask >> 57) & 1) == 1:  # низкая внутр. температура
+                add("Низкая внутренняя температура", False, "бит аварии активен")
+
+            # Влажность высокая
+            if ((mask >> 37) & 1) == 1:
+                add("Высокая влажность", False, f"статус={hum_status}, H={humidity}")
+
+            # Давление высокое/низкое
+            if ((mask >> 38) & 1) == 1:
+                add("Высокое отрицательное давление", False, f"статус={pressure_status}")
+            if ((mask >> 39) & 1) == 1:
+                add("Низкое отрицательное давление", False, f"статус={pressure_status}")
+
+            # Обрывы датчиков
+            if ((mask >> 40) & 1) == 1:
+                ok = (hum_status == 'ok') or recovery.get('humidity', False)
+                add("Обрыв датчика влажности", ok, f"статус={hum_status}")
+            if ((mask >> 41) & 1) == 1:
+                ok = (pressure_status == 'ok') or recovery.get('pressure', False)
+                add("Обрыв датчика отрицательного давления", ok, f"статус={pressure_status}")
+            # Температуры T1/T2/Tнаруж — нет отдельных статусов, считаем по исчезновению бита (здесь proxy=False)
+            if ((mask >> 42) & 1) == 1:
+                add("Обрыв датчика внутренней температуры 1", False, "Оценка по показаниям датчика недоступна")
+            if ((mask >> 43) & 1) == 1:
+                add("Обрыв датчика внутренней температуры 2", False, "Оценка по показаниям датчика недоступна")
+            if ((mask >> 44) & 1) == 1:
+                add("Обрыв датчика наружной температуры", False, "Оценка по показаниям датчика недоступна")
+
+            # Сенсоры без битов — CO₂/NH₃: используем статусы
+            if co2_status in ('break', 'error'):
+                ok = (co2_status == 'ok') or recovery.get('co2', False)
+                add("Ошибка/обрыв датчика CO₂", ok, f"статус={co2_status}")
+            if nh3_status in ('break', 'error'):
+                ok = (nh3_status == 'ok') or recovery.get('nh3', False)
+                add("Ошибка/обрыв датчика NH₃", ok, f"статус={nh3_status}")
+
+            # Итог: если список пуст (битов активных нет), но аварийное реле ВКЛ — можно предложить сброс
+            if not result['items'] and (data.get('alarm_relay') is True):
+                result['items'].append({'title': 'Аварийное реле активно', 'neutralized': False, 'details': 'Причина не определена по данным'})
+
+            # Считаем нейтрализовано по битам: если маска == 0 И нет сенсорных ошибок CO₂/NH₃
+            sensor_errors = ((co2_status in ('break', 'error')) or (nh3_status in ('break', 'error')))
+            result['all_neutralized'] = (mask == 0) and not sensor_errors
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка оценки причин аварии: {e}")
+            return result
 
     def add_write_command_to_db(self, register: int, value: int, user_info: str):
         """Добавляем команду записи в очередь (выполнит основная система)"""
@@ -185,6 +322,16 @@ class KUBTelegramBot:
             # Пользователь уже зарегистрирован - показываем главное меню
             access_level = self.bot_db.get_user_access_level(user.id)
             menu = build_main_menu(access_level)
+            # Если есть активные аварии/реле – добавим кнопку ACK (тихий режим)
+            try:
+                alarms_cnt = int((data or {}).get('active_alarms', 0) or 0)
+                relay_on = bool((data or {}).get('alarm_relay'))
+                if alarms_cnt > 0 or relay_on:
+                    from telegram import InlineKeyboardButton
+                    kb = menu.inline_keyboard
+                    kb.append([InlineKeyboardButton("🤫 Тихий режим 45 мин", callback_data="ack_alarms")])
+            except Exception:
+                pass
             
             welcome_text = (
                 f"👋 С возвращением, {user.first_name or user.username}!\n\n"
@@ -349,6 +496,25 @@ class KUBTelegramBot:
             
             if data:
                 status_text = format_sensor_data(data)
+                # Добавляем оценку причин аварии и нейтрализации
+                assess = self.compute_alarm_assessment(data)
+                if assess['items']:
+                    status_text += "\n**🧯 Анализ аварии:**\n"
+                    for it in assess['items'][:5]:
+                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                    if assess['all_neutralized'] and data.get('alarm_relay') is True:
+                        status_text += "\n✅ Причины устранены — можно сбросить реле аварии."
+                # Подсказка: датчики восстановились, а аварии/реле ещё активны → предложить сброс
+                recovery = self.get_recent_sensor_recovery(minutes=15)
+                relay_on = bool(data.get('alarm_relay')) if 'alarm_relay' in data else False
+                alarms_cnt = int(data.get('active_alarms', 0) or 0)
+                recovered_sensors = [name.upper() for name, ok in recovery.items() if ok]
+                if recovered_sensors and (relay_on or alarms_cnt > 0):
+                    rec_str = ', '.join(recovered_sensors)
+                    status_text += (
+                        f"\n\nℹ️ Обнаружено восстановление датчиков: {rec_str}.\n"
+                        f"Можно выполнить сброс аварий (кнопка ниже)."
+                    )
             else:
                 status_text = error_message(
                     "Нет данных от КУБ-1063\n\n"
@@ -357,7 +523,13 @@ class KUBTelegramBot:
                 )
             
             access_level = self.bot_db.get_user_access_level(user.id)
-            menu = build_main_menu(access_level)
+            badges = {}
+            if data:
+                badges = {
+                    'alarms': int(data.get('active_alarms', 0) or 0),
+                    'warnings': int(data.get('active_warnings', 0) or 0)
+                }
+            menu = build_main_menu(access_level, badges=badges)
             
             status_text = truncate_text(status_text, 4000)
             
@@ -378,6 +550,59 @@ class KUBTelegramBot:
                 reply_markup=back_menu,
                 parse_mode="Markdown"
             )
+
+    async def cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /reset — сброс аварий (для operator+)"""
+        user = update.effective_user
+        
+        # Проверка прав и лимитов
+        if not check_user_permission(user.id, "reset_alarms", self.bot_db):
+            await update.message.reply_text(
+                error_message("У вас нет прав для сброса аварий"),
+                parse_mode="Markdown"
+            )
+            return
+        allowed, rate_msg = check_command_rate_limit(user.id, self.bot_db)
+        if not allowed:
+            await update.message.reply_text(error_message(rate_msg), parse_mode="Markdown")
+            return
+        
+        try:
+            await update.message.reply_text(loading_message("Выполняется сброс аварий..."), parse_mode="Markdown")
+            user_info = f"telegram_user_{user.id}_{user.username or user.first_name}"
+            success, result = self.add_write_command_to_db(0x0020, 1, user_info)
+            access_level = self.bot_db.get_user_access_level(user.id)
+            data = self.get_current_data_from_db() or {}
+            badges = {
+                'alarms': int((data or {}).get('active_alarms', 0) or 0),
+                'warnings': int((data or {}).get('active_warnings', 0) or 0)
+            }
+            menu = build_main_menu(access_level, badges=badges)
+            if success:
+                await update.message.reply_text(
+                    success_message(f"Команда сброса отправлена. ID: `{result}`\nОжидайте 5–15 секунд."),
+                    reply_markup=menu,
+                    parse_mode="Markdown"
+                )
+                self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", True)
+                # Плановая проверка результата через 12 сек
+                try:
+                    self.application.job_queue.run_once(self._post_reset_check_job, when=12, data={
+                        'chat_id': update.effective_chat.id,
+                        'user_id': user.id
+                    })
+                except Exception as jerr:
+                    logger.warning(f"⚠️ Не удалось запланировать проверку после сброса: {jerr}")
+            else:
+                await update.message.reply_text(
+                    error_message(f"Не удалось отправить команду: {result}"),
+                    reply_markup=menu,
+                    parse_mode="Markdown"
+                )
+                self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", False)
+        except Exception as e:
+            logger.error(f"❌ Ошибка /reset: {e}")
+            await update.message.reply_text(error_message(str(e)), parse_mode="Markdown")
 
     async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /stats - статистика системы"""
@@ -854,6 +1079,8 @@ class KUBTelegramBot:
                 await self._handle_reset_alarms(query, context)
             elif data == "reset_alarms_confirmed":
                 await self._handle_confirm_reset_alarms(query, context)
+            elif data == "ack_alarms":
+                await self._handle_ack_alarms(query, context)
             elif data == "main_menu":
                 await self._handle_main_menu(query, context)
             elif data == "show_help":
@@ -974,7 +1201,22 @@ class KUBTelegramBot:
             data = self.get_current_data_from_db()
             
             if data:
+                # Оптимистичный режим: если после сброса прошло <35с, считаем реле ВЫКЛ
+                try:
+                    import time as _t
+                    deadline = self._optimistic_clear_until.get(query.message.chat_id)
+                    if deadline and _t.time() < deadline:
+                        data['alarm_relay'] = False
+                except Exception:
+                    pass
                 status_text = format_sensor_data(data)
+                assess = self.compute_alarm_assessment(data)
+                if assess['items']:
+                    status_text += "\n**🧯 Анализ аварии:**\n"
+                    for it in assess['items'][:5]:
+                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                    if assess['all_neutralized'] and data.get('alarm_relay') is True:
+                        status_text += "\n✅ Причины устранены — можно сбросить реле аварии."
             else:
                 status_text = error_message(
                     "Нет данных от КУБ-1063\n\n"
@@ -996,6 +1238,11 @@ class KUBTelegramBot:
                     reply_markup=menu,
                     parse_mode="Markdown"
                 )
+                # Запоминаем master‑message id для чата (обновили существующее)
+                try:
+                    self.bot_db.set_last_message_id(query.message.chat_id, query.message.message_id)
+                except Exception:
+                    pass
             except Exception as edit_error:
                 if "message is not modified" in str(edit_error).lower():
                     # Сообщение не изменилось, просто отправляем ответ без редактирования
@@ -1129,15 +1376,58 @@ class KUBTelegramBot:
             success, result = self.add_write_command_to_db(0x0020, 1, user_info)
             
             access_level = self.bot_db.get_user_access_level(user.id)
-            menu = build_main_menu(access_level)
+            data = self.get_current_data_from_db() or {}
+            badges = {
+                'alarms': int((data or {}).get('active_alarms', 0) or 0),
+                'warnings': int((data or {}).get('active_warnings', 0) or 0)
+            }
+            menu = build_main_menu(access_level, badges=badges)
             
             if success:
+                logger.info("[RESET] Команда сброса добавлена в очередь успешно (id=%s)", result)
                 await query.edit_message_text(
                     success_message(f"🔄 Команда сброса аварий отправлена!\n\nID команды: `{result}`\n\nВыполнение может занять несколько секунд."),
                     reply_markup=menu,
                     parse_mode="Markdown"
                 )
                 self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", True)
+                # Включаем оптимистичный режим (до 35 сек реле считаем ВЫКЛ)
+                try:
+                    chat_id = query.message.chat_id
+                    import time as _t
+                    self._optimistic_clear_until[chat_id] = _t.time() + 35
+                    logger.info("[RESET] Включен оптимистичный режим для chat_id=%s до %s", chat_id, int(self._optimistic_clear_until[chat_id]))
+                    # Перерисуем мастер‑сообщение, если знаем его id
+                    state = self.bot_db.get_bot_state(chat_id)
+                    mid = state.get('last_message_id')
+                    if mid:
+                        data2 = self.get_current_data_from_db() or {}
+                        data2['alarm_relay'] = False
+                        status_text2 = format_sensor_data(data2)
+                        assess2 = self.compute_alarm_assessment(data2)
+                        if assess2['items']:
+                            status_text2 += "\n**🧯 Анализ аварии:**\n"
+                            for it in assess2['items'][:5]:
+                                status_text2 += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                            if assess2['all_neutralized']:
+                                status_text2 += "\n✅ Причины устранены — можно сбросить реле аварии."
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=mid,
+                            text=truncate_text(status_text2, 4000),
+                            parse_mode='Markdown'
+                        )
+                        logger.info("[RESET] Мастер‑сообщение обновлено в оптимистичном режиме (chat_id=%s, mid=%s)", chat_id, mid)
+                except Exception as _e:
+                    logger.warning(f"⚠️ Не удалось перерисовать статус (оптимистично): {_e}")
+                # Плановая проверка результата через 12 сек
+                try:
+                    self.application.job_queue.run_once(self._post_reset_check_job, when=12, data={
+                        'chat_id': query.message.chat_id,
+                        'user_id': user.id
+                    })
+                except Exception as jerr:
+                    logger.warning(f"⚠️ Не удалось запланировать проверку после сброса: {jerr}")
             else:
                 await query.edit_message_text(
                     error_message(f"Ошибка отправки команды:\n{result}"),
@@ -1155,6 +1445,345 @@ class KUBTelegramBot:
                 reply_markup=back_menu,
                 parse_mode="Markdown"
             )
+
+    async def _alarm_watch_job(self, context: ContextTypes.DEFAULT_TYPE):
+        """Фоновая задача: оповещение об авариях"""
+        try:
+            data = self.get_current_data_from_db()
+            if not data:
+                return
+            alarms = int(data.get('active_alarms', 0) or 0)
+            warns = int(data.get('active_warnings', 0) or 0)
+            now = int(time.time())
+            # Условия уведомления: появление/рост аварий или периодическое напоминание раз в 15 минут
+            changed = alarms > 0 and (alarms != self._last_alarm_count)
+            periodic = alarms > 0 and (now - self._last_alarm_notify_ts >= 15 * 60)
+            cleared = self._last_alarm_count > 0 and alarms == 0
+            logger.debug("[ALARM_WATCH] alarms=%s warns=%s changed=%s periodic=%s cleared=%s", alarms, warns, changed, periodic, cleared)
+            
+            if changed or periodic:
+                # Кому отправлять: админам и операторам
+                recipients = set(self.config.telegram.admin_users or [])
+                try:
+                    users = self.bot_db.get_all_users()
+                    for u in users:
+                        lvl = (u.get('access_level') or 'user')
+                        if u.get('is_active', 1) and lvl in ('operator', 'engineer', 'admin'):
+                            recipients.add(int(u.get('telegram_id')))
+                except Exception:
+                    pass
+                if recipients:
+                    # Подготовим мастер‑сообщение (редактируемое)
+                    try:
+                        status_text = format_sensor_data(data)
+                        assess = self.compute_alarm_assessment(data)
+                        if assess['items']:
+                            status_text += "\n**🧯 Анализ аварии:**\n"
+                            for it in assess['items'][:5]:
+                                status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                    except Exception as _e:
+                        logger.warning(f"⚠️ Ошибка подготовки текста аварии: {_e}")
+                        status_text = (
+                            f"🚨 Обнаружены активные аварии: {alarms}\n"
+                            f"⚠️ Предупреждения: {warns}"
+                        )
+                    for uid in recipients:
+                        try:
+                            # Пытаемся отредактировать мастер‑сообщение, чтобы не плодить новые
+                            state = self.bot_db.get_bot_state(uid)
+                            mid = state.get('last_message_id')
+                            if mid:
+                                access_level = self.bot_db.get_user_access_level(uid)
+                                menu = build_main_menu(access_level)
+                                await context.bot.edit_message_text(
+                                    chat_id=uid,
+                                    message_id=mid,
+                                    text=truncate_text(status_text, 4000),
+                                    reply_markup=menu,
+                                    parse_mode='Markdown'
+                                )
+                            else:
+                                # Создадим первое мастер‑сообщение для чата
+                                sent = await context.bot.send_message(chat_id=uid, text=truncate_text(status_text, 4000), parse_mode='Markdown')
+                                self.bot_db.set_last_message_id(uid, sent.message_id)
+                            # Звуковой пинг только при появлении аварий (если не включен тихий режим)
+                            try:
+                                if not self.bot_db.is_ack_active(uid):
+                                    await self._send_sound_ping(context, uid, f"🚨 Аварии: {alarms}")
+                            except Exception:
+                                pass
+                        except Exception as send_err:
+                            logger.warning(f"⚠️ Не удалось обновить мастер‑сообщение {uid}: {send_err}")
+                    self._last_alarm_notify_ts = now
+            elif cleared:
+                # Сообщаем об устранении — обновляя мастер‑сообщение, не создавая новые
+                recipients = set(self.config.telegram.admin_users or [])
+                try:
+                    users = self.bot_db.get_all_users()
+                    for u in users:
+                        lvl = (u.get('access_level') or 'user')
+                        if u.get('is_active', 1) and lvl in ('operator', 'engineer', 'admin'):
+                            recipients.add(int(u.get('telegram_id')))
+                except Exception:
+                    pass
+                status_text = format_sensor_data(data)
+                assess = self.compute_alarm_assessment(data)
+                if assess['items']:
+                    status_text += "\n**🧯 Анализ аварии:**\n"
+                    for it in assess['items'][:5]:
+                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                status_text += "\n✅ Аварии устранены"
+                for uid in recipients:
+                    try:
+                        state = self.bot_db.get_bot_state(uid)
+                        mid = state.get('last_message_id')
+                        access_level = self.bot_db.get_user_access_level(uid)
+                        menu = build_main_menu(access_level)
+                        if mid:
+                            await context.bot.edit_message_text(
+                                chat_id=uid,
+                                message_id=mid,
+                                text=truncate_text(status_text, 4000),
+                                reply_markup=menu,
+                                parse_mode='Markdown'
+                            )
+                            logger.debug("[ALARM_WATCH] Обновлено мастер‑сообщение (uid=%s, mid=%s)", uid, mid)
+                        else:
+                            sent = await context.bot.send_message(chat_id=uid, text=truncate_text(status_text, 4000), parse_mode='Markdown')
+                            self.bot_db.set_last_message_id(uid, sent.message_id)
+                        # Без отдельного сообщения: всё отрисовано в мастер‑сообщении
+                    except Exception as send_err:
+                        logger.warning(f"⚠️ Не удалось обновить мастер‑сообщение {uid}: {send_err}")
+            else:
+                # Нет изменений, но проверим восстановление датчиков и активное реле/аварии
+                recovery = self.get_recent_sensor_recovery(minutes=15)
+                recovered = [k.upper() for k,v in recovery.items() if v]
+                if recovered and (active_alarms_val := data.get('active_alarms')) is not None:
+                    relay_on = bool(data.get('alarm_relay')) if 'alarm_relay' in data else False
+                    alarms_cnt = int(active_alarms_val or 0)
+                    if relay_on or alarms_cnt > 0:
+                        recipients = set(self.config.telegram.admin_users or [])
+                        try:
+                            users = self.bot_db.get_all_users()
+                            for u in users:
+                                lvl = (u.get('access_level') or 'user')
+                                if u.get('is_active', 1) and lvl in ('operator', 'engineer', 'admin'):
+                                    recipients.add(int(u.get('telegram_id')))
+                        except Exception:
+                            pass
+                        if recipients:
+                            text = (
+                                f"ℹ️ Датчики восстановились: {', '.join(recovered)};"
+                                f" аварии/реле ещё активны. Рекомендуем выполнить сброс из меню."
+                            )
+                            # Обновляем мастер‑сообщение краткой подсказкой
+                            for uid in recipients:
+                                try:
+                                    state = self.bot_db.get_bot_state(uid)
+                                    mid = state.get('last_message_id')
+                                    access_level = self.bot_db.get_user_access_level(uid)
+                                    menu = build_main_menu(access_level)
+                                    if mid:
+                                        await context.bot.edit_message_text(
+                                            chat_id=uid,
+                                            message_id=mid,
+                                            text=truncate_text(text, 4000),
+                                            reply_markup=menu,
+                                            parse_mode='Markdown'
+                                        )
+                                    else:
+                                        sent = await context.bot.send_message(chat_id=uid, text=truncate_text(text, 4000), parse_mode='Markdown')
+                                        self.bot_db.set_last_message_id(uid, sent.message_id)
+                                    # Подсказку даём только в мастер‑сообщении, без отдельного пинга
+                                except Exception as send_err:
+                                    logger.warning(f"⚠️ Не удалось обновить мастер‑сообщение {uid}: {send_err}")
+            
+            self._last_alarm_count = alarms
+            self._last_warning_count = warns
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка фонового мониторинга аварий: {e}")
+
+    async def _post_reset_check_job(self, context: ContextTypes.DEFAULT_TYPE):
+        """Проверить, снялись ли аварии после сброса, и уведомить пользователя"""
+        try:
+            data = self.get_current_data_from_db() or {}
+            alarms = int(data.get('active_alarms', 0) or 0)
+            relay_on = bool(data.get('alarm_relay')) if 'alarm_relay' in data else False
+            chat_id = (context.job.data or {}).get('chat_id')
+            if not chat_id:
+                return
+            # Подготовим текущее представление статуса для мастер‑сообщения
+            # Оптимистичное окно: если активно — считаем реле ВЫКЛ для рендера
+            try:
+                import time as _t
+                deadline = self._optimistic_clear_until.get(chat_id)
+                optimistic = bool(deadline and _t.time() < deadline)
+            except Exception:
+                optimistic = False
+            data_for_render = dict(data)
+            if optimistic:
+                data_for_render['alarm_relay'] = False
+
+            status_text = format_sensor_data(data_for_render)
+            assess = self.compute_alarm_assessment(data_for_render)
+            if assess['items']:
+                status_text += "\n**🧯 Анализ аварии:**\n"
+                for it in assess['items'][:5]:
+                    status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+            # Итоговая подпись об успехе/остатке
+            if optimistic or (alarms == 0 and not relay_on):
+                status_text += "\n✅ Аварии сняты"
+            else:
+                if alarms > 0 or relay_on:
+                    tail = []
+                    if alarms > 0:
+                        tail.append(f"Аварии: {alarms}")
+                    if relay_on:
+                        tail.append("реле аварии ВКЛ")
+                    status_text += "\n❗ " + ", ".join(tail)
+
+            # Обновляем мастер‑сообщение вместо отправки нового
+            try:
+                state = self.bot_db.get_bot_state(chat_id)
+                mid = state.get('last_message_id')
+                access_level = self.bot_db.get_user_access_level(chat_id)
+                menu = build_main_menu(access_level)
+                if mid:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=mid,
+                        text=truncate_text(status_text, 4000),
+                        reply_markup=menu,
+                        parse_mode='Markdown'
+                    )
+                else:
+                    sent = await context.bot.send_message(chat_id=chat_id, text=truncate_text(status_text, 4000), parse_mode='Markdown')
+                    self.bot_db.set_last_message_id(chat_id, sent.message_id)
+            except Exception as e_edit:
+                logger.warning(f"⚠️ Не удалось обновить мастер‑сообщение в пост‑проверке: {e_edit}")
+            # Пинга здесь не шлём — избегаем лишних сообщений в ленте
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка проверки после сброса: {e}")
+
+    async def _handle_ack_alarms(self, query, context):
+        """Включить тихий режим (ACK) для текущего чата на 45 минут"""
+        try:
+            chat_id = query.message.chat_id
+            self.bot_db.set_ack_until(chat_id, minutes=45)
+            await query.answer("🤫 Тихий режим включён на 45 минут", show_alert=True)
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка установки тихого режима: {e}")
+            await query.answer("❌ Не удалось включить тихий режим", show_alert=True)
+
+    async def _delete_message_job(self, context: ContextTypes.DEFAULT_TYPE):
+        """Удаляет вспомогательное пинг‑сообщение"""
+        try:
+            data = context.job.data or {}
+            await context.bot.delete_message(chat_id=data['chat_id'], message_id=data['message_id'])
+        except Exception as e:
+            logger.debug(f"[PING] Не удалось удалить пинг‑сообщение: {e}")
+
+    async def _send_sound_ping(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, delete_after: Optional[int] = None):
+        """Отправляет короткий звуковой пинг и по таймеру удаляет его, чтобы не захламлять ленту."""
+        try:
+            sent = await context.bot.send_message(chat_id=chat_id, text=text, disable_notification=False)
+            da = delete_after if delete_after is not None else self._sound_ping_delete_after
+            if hasattr(self, 'application') and self.application and self.application.job_queue and da > 0:
+                self.application.job_queue.run_once(self._delete_message_job, when=da, data={'chat_id': chat_id, 'message_id': sent.message_id})
+        except Exception as e:
+            logger.debug(f"[PING] Ошибка отправки звукового пинга: {e}")
+
+    def get_recent_write_commands(self, limit: int = 5):
+        """Последние команды записи из очереди"""
+        try:
+            with sqlite3.connect("kub_commands.db") as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    """
+                    SELECT id, register, value, status, created_at, executed_at, error_message
+                    FROM write_commands
+                    ORDER BY datetime(created_at) DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                )
+                return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения очереди команд: {e}")
+            return []
+
+    async def cmd_alarms(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /alarms — сводка по авариям/предупреждениям"""
+        user = update.effective_user
+        try:
+            data = self.get_current_data_from_db() or {}
+            alarms = int(data.get('active_alarms', 0) or 0)
+            warns = int(data.get('active_warnings', 0) or 0)
+            updated = data.get('updated_at') or '—'
+            txt = f"🧭 Сводка аварий\n\n🚨 Аварии: {alarms}\n⚠️ Предупреждения: {warns}\n⏱ Обновлено: {updated}"
+            # Детализация известных аварий по битам
+            if isinstance(data.get('active_alarms'), int) and data.get('active_alarms'):
+                details = decode_active_alarms(int(data['active_alarms']), max_items=12)
+                if details:
+                    txt += "\n\nИзвестные аварии:\n" + "\n".join(f"• {d}" for d in details)
+            if alarms > 0:
+                txt += "\n\nДля сброса используйте кнопку в меню или команду /reset (operator+)."
+            access_level = self.bot_db.get_user_access_level(user.id)
+            menu = build_main_menu(access_level, badges={'alarms': alarms, 'warnings': warns})
+            await update.message.reply_text(txt, reply_markup=menu)
+            self.bot_db.log_user_command(user.id, "alarms", None, True)
+        except Exception as e:
+            logger.error(f"❌ Ошибка /alarms: {e}")
+            await update.message.reply_text(error_message(str(e)), parse_mode="Markdown")
+
+    async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /queue — последние команды записи"""
+        user = update.effective_user
+        try:
+            cmds = self.get_recent_write_commands(limit=5)
+            if not cmds:
+                await update.message.reply_text("📭 Очередь команд пуста")
+                return
+            lines = ["📝 Последние команды записи:"]
+            for c in cmds:
+                cid = str(c.get('id'))[:8]
+                reg = int(c.get('register', 0) or 0)
+                val = c.get('value')
+                st = c.get('status')
+                created = c.get('created_at') or ''
+                icon = '✅' if st == 'completed' else ('⏳' if st in ('pending', 'executing') else '❌')
+                lines.append(f"{icon} {cid} — 0x{reg:04X}={val} [{st}] ({created})")
+            await update.message.reply_text("\n".join(lines))
+            self.bot_db.log_user_command(user.id, "queue", None, True)
+        except Exception as e:
+            logger.error(f"❌ Ошибка /queue: {e}")
+            await update.message.reply_text(error_message(str(e)), parse_mode="Markdown")
+
+    async def cmd_whoami(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /whoami — информация о пользователе и доступах"""
+        user = update.effective_user
+        try:
+            info = self.bot_db.get_user_level_info(user.id) or {}
+            level = info.get('current_level', 'user')
+            perms = self.bot_db.get_access_permissions(level) or {}
+            allowed, msg = check_command_rate_limit(user.id, self.bot_db)
+            txt = [
+                "👤 Ваш профиль",
+                f"ID: `{user.id}`",
+                f"Уровень: `{level}`" + (" (временный)" if info.get('is_temporary') else ""),
+            ]
+            if info.get('temp_expires'):
+                txt.append(f"Истекает: {info.get('temp_expires')}")
+            txt.append("\nПрава:")
+            if perms.get('can_read'): txt.append("• ✅ Чтение")
+            if perms.get('can_write'): txt.append("• ✅ Запись")
+            if perms.get('can_reset_alarms'): txt.append("• ✅ Сброс аварий")
+            txt.append(f"\nЛимит команд: {msg}")
+            await update.message.reply_text("\n".join(txt), parse_mode="Markdown")
+            self.bot_db.log_user_command(user.id, "whoami", None, True)
+        except Exception as e:
+            logger.error(f"❌ Ошибка /whoami: {e}")
+            await update.message.reply_text(error_message(str(e)), parse_mode="Markdown")
 
     async def _handle_show_help(self, query, context):
         """Показать справку через callback"""
@@ -1400,12 +2029,93 @@ class KUBTelegramBot:
             logger.error(f"❌ Ошибка получения информации об уровне: {e}")
             await query.answer("❌ Ошибка получения информации", show_alert=True)
 
-    # Заглушки для остальных функций настроек
+    # Настройки системы (сводка конфигурации)
     async def _handle_system_config(self, query, context):
-        await query.answer("🔧 Настройки системы - в разработке", show_alert=True)
+        try:
+            from core.config_manager import get_config
+            cfg = get_config()
+            data = self.get_current_data_from_db() or {}
+            do1 = data.get('digital_outputs_1')
+            do2 = data.get('digital_outputs_2')
+            do3 = data.get('digital_outputs_3')
+            # Alarm relay summary
+            ar = getattr(cfg, 'alarm_relay', None)
+            if ar and getattr(ar, 'enabled', False):
+                reg = str(getattr(ar, 'register', '0x0082'))
+                bit = int(getattr(ar, 'bit', 7))
+                relay_state = data.get('alarm_relay')
+                ar_text = f"Включено ({reg}, бит {bit}) — текущее: {'ВКЛ' if relay_state else 'ВЫКЛ'}"
+            else:
+                ar_text = "Отключено"
+            # Sensors
+            sensors = getattr(cfg, 'sensors', {}) or {}
+            sensors_lines = []
+            for key, enabled in sensors.items():
+                sensors_lines.append(f"• {key}: {'вкл' if enabled else 'выкл'}")
+            # System outputs
+            outputs = getattr(cfg, 'system_outputs', []) or []
+            if outputs:
+                reg_map = {'0x0081': do1, '0x0082': do2, '0x00a2': do3, '0x00A2': do3}
+                out_lines = []
+                for o in outputs:
+                    if not o.enabled:
+                        continue
+                    val = reg_map.get(str(o.register))
+                    state = None
+                    if isinstance(val, int):
+                        try:
+                            state = ((val >> int(o.bit)) & 1) == 1
+                        except Exception:
+                            state = None
+                    out_lines.append(f"• {o.label}: {'ВКЛ' if state else ('ВЫКЛ' if state is not None else '—')}")
+                outputs_text = "\n".join(out_lines) if out_lines else "—"
+            else:
+                outputs_text = "—"
+            text = (
+                "⚙️ **НАСТРОЙКИ СИСТЕМЫ (сводка)**\n\n"
+                f"🔐 Аварийное реле: {ar_text}\n\n"
+                f"🧩 Датчики (вывод в UI):\n" + ("\n".join(sensors_lines) or "—") + "\n\n"
+                f"🧲 Системные выходы:\n{outputs_text}\n\n"
+                "Изменение настроек из бота пока отключено (read‑only)."
+            )
+            from telegram_bot.bot_utils import build_settings_menu
+            menu = build_settings_menu(self.bot_db.get_user_access_level(query.from_user.id))
+            await query.edit_message_text(text, reply_markup=menu, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"❌ Ошибка показа настроек: {e}")
+            await query.answer("❌ Ошибка отображения настроек", show_alert=True)
 
+    # Системные логи/сводка (краткий технический отчёт)
     async def _handle_system_logs(self, query, context):
-        await query.answer("📋 Логи системы - в разработке", show_alert=True)
+        try:
+            data = self.get_current_data_from_db() or {}
+            alarms = int(data.get('active_alarms', 0) or 0)
+            warns = int(data.get('active_warnings', 0) or 0)
+            relay_on = bool(data.get('alarm_relay')) if 'alarm_relay' in data else False
+            updated = data.get('updated_at') or '—'
+            # Очередь команд записи
+            recent = self.get_recent_write_commands(limit=5)
+            lines = []
+            for c in recent:
+                cid = str(c.get('id'))[:8]
+                reg = int(c.get('register', 0) or 0)
+                st = c.get('status')
+                when = c.get('executed_at') or c.get('created_at') or ''
+                icon = '✅' if st == 'completed' else ('⏳' if st in ('pending', 'executing') else '❌')
+                lines.append(f"{icon} {cid} 0x{reg:04X} [{st}] {when}")
+            queue_text = "\n".join(lines) if lines else "—"
+            text = (
+                "📋 **Системная сводка**\n\n"
+                f"⏱ Обновлено: `{updated}`\n"
+                f"🚨 Аварии: {alarms} | ⚠️ Предупреждения: {warns} | {('Реле ВКЛ' if relay_on else 'Реле ВЫКЛ')}\n\n"
+                f"📝 Последние команды записи:\n{queue_text}"
+            )
+            from telegram_bot.bot_utils import build_settings_menu
+            menu = build_settings_menu(self.bot_db.get_user_access_level(query.from_user.id))
+            await query.edit_message_text(text, reply_markup=menu, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"❌ Ошибка показа сводки логов: {e}")
+            await query.answer("❌ Ошибка отображения сводки", show_alert=True)
 
     async def _handle_permissions_config(self, query, context):
         await query.answer("🔐 Управление правами - в разработке", show_alert=True)
@@ -1896,6 +2606,11 @@ class KUBTelegramBot:
             self.application.add_handler(CommandHandler("status", self.cmd_status))
             self.application.add_handler(CommandHandler("stats", self.cmd_stats))
             self.application.add_handler(CommandHandler("help", self.cmd_help))
+            # Управление авариями
+            self.application.add_handler(CommandHandler("reset", self.cmd_reset))
+            self.application.add_handler(CommandHandler("alarms", self.cmd_alarms))
+            self.application.add_handler(CommandHandler("queue", self.cmd_queue))
+            self.application.add_handler(CommandHandler("whoami", self.cmd_whoami))
             
             # УПРАВЛЕНИЕ РОЛЯМИ
             self.application.add_handler(CommandHandler("promote", self.cmd_promote))
@@ -1921,6 +2636,13 @@ class KUBTelegramBot:
             # Запускаем polling вручную для лучшего контроля
             await self.application.updater.start_polling(drop_pending_updates=True)
             
+            # Фоновая задача мониторинга аварий
+            try:
+                self.application.job_queue.run_repeating(self._alarm_watch_job, interval=40, first=10, name="alarm_watch")
+                logger.info("🛰️ Запущен фоновый мониторинг аварий")
+            except Exception as jerr:
+                logger.warning(f"⚠️ Не удалось запустить фоновый мониторинг: {jerr}")
+
             logger.info("🤖 Бот запущен и ждет сообщения...")
             
             # Проверяем истекшие временные уровни доступа (временно отключено)

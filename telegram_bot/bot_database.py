@@ -22,6 +22,12 @@ class TelegramBotDB:
         if not Path(db_file).exists():
             logger.warning(f"⚠️ База данных {db_file} не найдена, создаем новую")
             self._create_database()
+        else:
+            # Обеспечиваем наличие служебных таблиц (миграции при обновлении)
+            try:
+                self._ensure_schema()
+            except Exception as e:
+                logger.error(f"❌ Ошибка миграции схемы БД: {e}")
         
         logger.info(f"🗄️ Подключение к базе данных: {db_file}")
     
@@ -83,11 +89,106 @@ class TelegramBotDB:
                     (access_level, can_read, can_write, can_reset_alarms, allowed_registers, commands_per_hour)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, access_levels)
+
+                # Таблица состояния чатов (master message, ACK/тихий режим)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS bot_state (
+                        chat_id INTEGER PRIMARY KEY,
+                        last_message_id INTEGER,
+                        ack_until TIMESTAMP
+                    )
+                """)
                 
                 logger.info("✅ База данных создана")
         except Exception as e:
             logger.error(f"❌ Ошибка создания базы данных: {e}")
             raise
+
+    # =======================
+    # Состояние чатов / ACK
+    # =======================
+    def _ensure_schema(self) -> None:
+        """Гарантирует наличие служебных таблиц для состояния бота."""
+        with sqlite3.connect(self.db_file) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    last_message_id INTEGER,
+                    ack_until TIMESTAMP
+                )
+            """)
+
+    def get_bot_state(self, chat_id: int) -> Dict[str, Any]:
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                conn.row_factory = sqlite3.Row
+                # На случай старой базы — создадим таблицу
+                try:
+                    row = conn.execute("SELECT * FROM bot_state WHERE chat_id=?", (chat_id,)).fetchone()
+                except sqlite3.OperationalError:
+                    conn.execute("""
+                        CREATE TABLE IF NOT EXISTS bot_state (
+                            chat_id INTEGER PRIMARY KEY,
+                            last_message_id INTEGER,
+                            ack_until TIMESTAMP
+                        )
+                    """)
+                    row = conn.execute("SELECT * FROM bot_state WHERE chat_id=?", (chat_id,)).fetchone()
+                return dict(row) if row else {'chat_id': chat_id, 'last_message_id': None, 'ack_until': None}
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения bot_state для чата {chat_id}: {e}")
+            return {'chat_id': chat_id, 'last_message_id': None, 'ack_until': None}
+
+    def set_last_message_id(self, chat_id: int, message_id: int) -> None:
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                try:
+                    conn.execute(
+                        "INSERT INTO bot_state(chat_id,last_message_id) VALUES(?,?)\n"
+                        "ON CONFLICT(chat_id) DO UPDATE SET last_message_id=excluded.last_message_id",
+                        (chat_id, message_id)
+                    )
+                except sqlite3.OperationalError:
+                    self._ensure_schema()
+                    conn.execute(
+                        "INSERT INTO bot_state(chat_id,last_message_id) VALUES(?,?)\n"
+                        "ON CONFLICT(chat_id) DO UPDATE SET last_message_id=excluded.last_message_id",
+                        (chat_id, message_id)
+                    )
+        except Exception as e:
+            logger.error(f"❌ Ошибка записи last_message_id для чата {chat_id}: {e}")
+
+    def set_ack_until(self, chat_id: int, minutes: int = 45) -> None:
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                try:
+                    conn.execute(
+                        "INSERT INTO bot_state(chat_id,ack_until) VALUES(?, datetime('now', ?))\n"
+                        "ON CONFLICT(chat_id) DO UPDATE SET ack_until=datetime('now', ?)",
+                        (chat_id, f'+{minutes} minutes', f'+{minutes} minutes')
+                    )
+                except sqlite3.OperationalError:
+                    self._ensure_schema()
+                    conn.execute(
+                        "INSERT INTO bot_state(chat_id,ack_until) VALUES(?, datetime('now', ?))\n"
+                        "ON CONFLICT(chat_id) DO UPDATE SET ack_until=datetime('now', ?)",
+                        (chat_id, f'+{minutes} minutes', f'+{minutes} minutes')
+                    )
+        except Exception as e:
+            logger.error(f"❌ Ошибка записи ack_until для чата {chat_id}: {e}")
+
+    def is_ack_active(self, chat_id: int) -> bool:
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                row = conn.execute("SELECT ack_until FROM bot_state WHERE chat_id=?", (chat_id,)).fetchone()
+                if not row or not row[0]:
+                    return False
+                # Проверяем, не истёк ли ACK
+                cur = conn.execute("SELECT datetime('now') < ?", (row[0],)).fetchone()
+                return bool(cur and cur[0] == 1)
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки ACK для чата {chat_id}: {e}")
+            return False
     
     def register_user(self, telegram_id: int, username: str = None, 
                      first_name: str = None, last_name: str = None,

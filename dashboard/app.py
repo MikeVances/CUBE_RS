@@ -72,6 +72,12 @@ if 'data_cache' not in st.session_state:
     st.session_state.data_cache = {}
     st.session_state.cache_timestamp = None
 
+DISCRETE_KEYS = {
+    'timestamp', 'connection_status', 'success_rate', 'error',
+    'active_alarms', 'active_warnings', 'digital_outputs_1', 'digital_outputs_2', 'digital_outputs_3',
+    'ventilation_scheme', 'alarm_relay'
+}
+
 def smooth_data(data, cache_window=5):
     """Сглаживает данные, используя скользящее среднее"""
     if not data:
@@ -90,7 +96,7 @@ def smooth_data(data, cache_window=5):
     
     # Добавляем текущие данные
     for key, value in data.items():
-        if key not in ['timestamp', 'connection_status', 'success_rate', 'error']:
+        if key not in DISCRETE_KEYS:
             if key not in st.session_state.data_cache:
                 st.session_state.data_cache[key] = []
             
@@ -210,11 +216,16 @@ def main():
                 """, unsafe_allow_html=True)
             
             with col2:
-                humidity = data.get('humidity', 0)
-                if humidity is None:
-                    humidity = 0
+                hum_status = data.get('humidity_status')
+                humidity = data.get('humidity')
+                if hum_status == 'disabled':
+                    humidity = None
                 humidity_color = get_status_color(humidity, 40, 70)
-                humidity_str = f"{humidity:.1f}%" if humidity is not None else "N/A"
+                if hum_status == 'pending':
+                    humidity_str = "ожидаем замер"
+                    humidity_color = "#8b949e"
+                else:
+                    humidity_str = f"{humidity:.1f}%" if humidity is not None else "N/A"
                 
                 st.markdown(f"""
                 <div style="background-color: #21262d; padding: 16px; border-radius: 6px; border-left: 4px solid {humidity_color};">
@@ -225,11 +236,17 @@ def main():
                 """, unsafe_allow_html=True)
             
             with col3:
-                co2 = data.get('co2', 0)
-                if co2 is None:
-                    co2 = 0
-                co2_color = get_status_color(co2, 400, 800)
-                co2_str = f"{co2} ppm" if co2 is not None else "N/A"
+                co2_status = data.get('co2_status')
+                co2 = data.get('co2')
+                if co2_status == 'disabled':
+                    co2 = None
+                # Диапазон «нормы» CO₂ расширен: 400–3000 ppm
+                co2_color = get_status_color(co2, 400, 3000)
+                if co2_status == 'pending':
+                    co2_str = "ожидаем замер"
+                    co2_color = "#8b949e"
+                else:
+                    co2_str = f"{co2} ppm" if co2 is not None else "N/A"
                 
                 st.markdown(f"""
                 <div style="background-color: #21262d; padding: 16px; border-radius: 6px; border-left: 4px solid {co2_color};">
@@ -259,8 +276,14 @@ def main():
             col5, col6, col7, col8 = st.columns(4)
             
             with col5:
-                pressure = data.get('pressure', 0)
-                pressure_str = f"{pressure:.1f} Па" if pressure is not None else "N/A"
+                pressure_status = data.get('pressure_status')
+                pressure = data.get('pressure')
+                if pressure_status == 'pending':
+                    pressure_str = "ожидаем замер"
+                elif pressure_status == 'disabled':
+                    pressure_str = "отключён"
+                else:
+                    pressure_str = f"{pressure:.1f} Па" if pressure is not None else "N/A"
                 st.markdown(
                     '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">🌪️ Давление</div>',
                     unsafe_allow_html=True
@@ -268,8 +291,14 @@ def main():
                 st.metric(label="", value=pressure_str, help="Отрицательное давление", label_visibility="collapsed")
             
             with col6:
-                nh3 = data.get('nh3', 0)
-                nh3_str = f"{nh3:.1f} ppm" if nh3 is not None else "N/A"
+                nh3_status = data.get('nh3_status')
+                nh3 = data.get('nh3')
+                if nh3_status == 'pending':
+                    nh3_str = "ожидаем замер"
+                elif nh3_status == 'disabled':
+                    nh3_str = "отключён"
+                else:
+                    nh3_str = f"{nh3:.1f} ppm" if nh3 is not None else "N/A"
                 st.markdown(
                     '<div style="font-size:1.3em; color:#fff; font-weight:bold; margin-bottom:0.2em;">💨 NH₃</div>',
                     unsafe_allow_html=True
@@ -291,6 +320,12 @@ def main():
                 )
                 st.metric(label="", value=last_update.strftime("%H:%M:%S"), help="Время последнего обновления", label_visibility="collapsed")
             
+            # Показ состояния аварийного реле (если рассчитано)
+            relay = data.get('alarm_relay')
+            relay_label = data.get('alarm_relay_label', 'Реле аварии')
+            if relay is not None:
+                st.info(f"{relay_label}: {'ВКЛ' if relay else 'ВЫКЛ'}")
+
             # Статистика работы (если доступна)
             if DEVICE_AVAILABLE:
                 try:

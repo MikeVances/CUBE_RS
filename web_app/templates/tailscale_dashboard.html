@@ -1,0 +1,805 @@
+{% extends "base.html" %}
+
+{% block title %}Tailscale Mesh Network{% endblock %}
+
+{% block extra_styles %}
+<style>
+    .device-card {
+        transition: transform 0.2s ease-in-out;
+    }
+    
+    .device-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    
+    .status-online {
+        color: #28a745;
+    }
+    
+    .status-offline {
+        color: #dc3545;
+    }
+    
+    .status-unknown {
+        color: #6c757d;
+    }
+    
+    .api-reachable {
+        color: #28a745;
+    }
+    
+    .api-unreachable {
+        color: #dc3545;
+    }
+    
+    .tailscale-ip {
+        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+        font-size: 0.9em;
+        background-color: #f8f9fa;
+        padding: 2px 6px;
+        border-radius: 3px;
+        border: 1px solid #e9ecef;
+    }
+    
+    .auth-key-display {
+        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+        font-size: 0.85em;
+        background-color: #f8f9fa;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #e9ecef;
+        word-break: break-all;
+    }
+    
+    .loading-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0,0,0,0.5);
+        z-index: 9999;
+    }
+    
+    .loading-spinner {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: white;
+        text-align: center;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Tailscale Status Row -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-network-wired me-2"></i>
+                        Tailscale Mesh Network
+                    </h5>
+                    <div>
+                        <button class="btn btn-outline-primary btn-sm me-2" onclick="refreshTailscaleData()">
+                            <i class="fas fa-sync-alt me-1"></i>
+                            Обновить
+                        </button>
+                        <button class="btn btn-success btn-sm" onclick="showCreateAuthKeyModal()">
+                            <i class="fas fa-key me-1"></i>
+                            Создать ключ
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="row" id="tailscaleStatus">
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-primary" id="totalDevices">--</div>
+                                <div class="metric-label">Всего устройств</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-success" id="onlineDevices">--</div>
+                                <div class="metric-label">Онлайн</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-info" id="totalFarms">--</div>
+                                <div class="metric-label">Фермы</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value" id="localStatus">--</div>
+                                <div class="metric-label">Локальный статус</div>
+                                <small class="text-muted" id="localIP">--</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tabs for Devices/Farms -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <ul class="nav nav-tabs mb-3" id="tailscaleTabs">
+                    <li class="nav-item">
+                        <a class="nav-link active" id="devices-tab" data-bs-toggle="tab" href="#devices" role="tab">
+                            <i class="fas fa-desktop me-1"></i>
+                            Все устройства
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" id="farms-tab" data-bs-toggle="tab" href="#farms" role="tab">
+                            <i class="fas fa-industry me-1"></i>
+                            Фермы КУБ-1063
+                        </a>
+                    </li>
+                </ul>
+                
+                <div class="tab-content" id="tailscaleTabContent">
+                    <!-- All Devices Tab -->
+                    <div class="tab-pane fade show active" id="devices" role="tabpanel">
+                        <div class="row" id="devicesContainer">
+                            <div class="col-12 text-center">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">Загрузка...</span>
+                                </div>
+                                <p class="mt-2">Загрузка устройств...</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Farms Tab -->
+                    <div class="tab-pane fade" id="farms" role="tabpanel">
+                        <div class="row" id="farmsContainer">
+                            <div class="col-12 text-center">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">Загрузка...</span>
+                                </div>
+                                <p class="mt-2">Загрузка ферм...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Auth Key Modal -->
+<div class="modal fade" id="authKeyModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-key me-2"></i>
+                    Создание ключа авторизации
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="authKeyForm">
+                    <div class="mb-3">
+                        <label for="reusableKey" class="form-label">Настройки ключа</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="reusableKey" checked>
+                            <label class="form-check-label" for="reusableKey">
+                                Переиспользуемый ключ
+                            </label>
+                            <small class="form-text text-muted">Ключ можно использовать несколько раз</small>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="ephemeralKey">
+                            <label class="form-check-label" for="ephemeralKey">
+                                Временный ключ
+                            </label>
+                            <small class="form-text text-muted">Устройство будет удалено при отключении</small>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3" id="authKeyResult" style="display: none;">
+                        <label class="form-label">Созданный ключ:</label>
+                        <div class="auth-key-display" id="authKeyDisplay"></div>
+                        <small class="form-text text-muted">
+                            Скопируйте этот ключ для настройки новой фермы. Ключ будет показан только один раз.
+                        </small>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+                <button type="button" class="btn btn-primary" onclick="createAuthKey()" id="createKeyBtn">
+                    <i class="fas fa-key me-1"></i>
+                    Создать ключ
+                </button>
+                <button type="button" class="btn btn-success" onclick="copyAuthKey()" id="copyKeyBtn" style="display: none;">
+                    <i class="fas fa-copy me-1"></i>
+                    Копировать
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Device Details Modal -->
+<div class="modal fade" id="deviceDetailsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-desktop me-2"></i>
+                    Детали устройства
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="deviceDetailsContent">
+                <div class="text-center">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Загрузка...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Loading Overlay -->
+<div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-spinner">
+        <div class="spinner-border text-light" role="status">
+            <span class="visually-hidden">Загрузка...</span>
+        </div>
+        <p class="mt-2">Обновление данных...</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    let tailscaleData = {
+        status: null,
+        devices: [],
+        farms: []
+    };
+    
+    // Инициализация при загрузке страницы
+    document.addEventListener('DOMContentLoaded', function() {
+        refreshTailscaleData();
+    });
+    
+    // Обновление всех данных Tailscale
+    async function refreshTailscaleData() {
+        showLoadingOverlay();
+        
+        try {
+            await Promise.all([
+                updateTailscaleStatus(),
+                updateDevicesList(),
+                updateFarmsList()
+            ]);
+        } catch (error) {
+            console.error('Ошибка обновления данных Tailscale:', error);
+            showNotification('Ошибка обновления данных Tailscale', 'danger');
+        } finally {
+            hideLoadingOverlay();
+        }
+    }
+    
+    // Получение статуса Tailscale
+    async function updateTailscaleStatus() {
+        try {
+            const response = await fetch('/api/tailscale/status');
+            const result = await response.json();
+            
+            tailscaleData.status = result;
+            updateStatusDisplay(result);
+            
+        } catch (error) {
+            console.error('Ошибка получения статуса:', error);
+        }
+    }
+    
+    // Обновление отображения статуса
+    function updateStatusDisplay(status) {
+        if (status.status === 'success') {
+            document.getElementById('totalDevices').textContent = status.devices.total || 0;
+            document.getElementById('onlineDevices').textContent = status.devices.online || 0;
+            document.getElementById('totalFarms').textContent = status.farms.total || 0;
+            
+            const localStatusEl = document.getElementById('localStatus');
+            const localIPEl = document.getElementById('localIP');
+            
+            if (status.local.connected) {
+                localStatusEl.textContent = 'Подключен';
+                localStatusEl.className = 'metric-value status-online';
+                localIPEl.textContent = status.local.ip || '--';
+            } else {
+                localStatusEl.textContent = 'Отключен';
+                localStatusEl.className = 'metric-value status-offline';
+                localIPEl.textContent = '--';
+            }
+        } else if (status.status === 'disabled') {
+            document.getElementById('totalDevices').textContent = '--';
+            document.getElementById('onlineDevices').textContent = '--';
+            document.getElementById('totalFarms').textContent = '--';
+            
+            document.getElementById('localStatus').textContent = 'Не настроен';
+            document.getElementById('localStatus').className = 'metric-value status-unknown';
+            document.getElementById('localIP').textContent = '--';
+            
+            showNotification('Tailscale не настроен', 'warning');
+        }
+    }
+    
+    // Получение списка устройств
+    async function updateDevicesList(force = false) {
+        try {
+            const url = force ? '/api/tailscale/devices?refresh=true' : '/api/tailscale/devices';
+            const response = await fetch(url);
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                tailscaleData.devices = result.devices;
+                renderDevices(result.devices);
+            } else {
+                renderDevicesError(result.message);
+            }
+            
+        } catch (error) {
+            console.error('Ошибка получения устройств:', error);
+            renderDevicesError('Ошибка подключения');
+        }
+    }
+    
+    // Отображение устройств
+    function renderDevices(devices) {
+        const container = document.getElementById('devicesContainer');
+        
+        if (!devices.length) {
+            container.innerHTML = `
+                <div class="col-12 text-center">
+                    <i class="fas fa-desktop fa-3x text-muted mb-3"></i>
+                    <p class="text-muted">Устройства не найдены</p>
+                </div>
+            `;
+            return;
+        }
+        
+        container.innerHTML = devices.map(device => `
+            <div class="col-lg-4 col-md-6 mb-3">
+                <div class="card device-card h-100" onclick="showDeviceDetails('${device.id}')">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <h6 class="card-title mb-0">${device.hostname}</h6>
+                            <span class="badge ${device.online ? 'bg-success' : 'bg-danger'}">
+                                ${device.online ? 'Онлайн' : 'Офлайн'}
+                            </span>
+                        </div>
+                        
+                        <p class="card-text">
+                            <small class="text-muted">IP:</small>
+                            <span class="tailscale-ip">${device.tailscale_ip}</span>
+                        </p>
+                        
+                        <p class="card-text">
+                            <small class="text-muted">ОС:</small> ${device.os}<br>
+                            <small class="text-muted">Последний визит:</small> ${formatTime(device.last_seen)}
+                        </p>
+                        
+                        <div class="d-flex justify-content-between align-items-center">
+                            <small class="text-muted">
+                                API: <span class="${device.api_reachable ? 'api-reachable' : 'api-unreachable'}">
+                                    ${device.api_reachable ? '✅ Доступен' : '❌ Недоступен'}
+                                </span>
+                            </small>
+                            <i class="fas fa-chevron-right text-muted"></i>
+                        </div>
+                        
+                        ${device.tags && device.tags.length ? `
+                            <div class="mt-2">
+                                ${device.tags.map(tag => `<span class="badge bg-light text-dark me-1">${tag}</span>`).join('')}
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+    
+    // Ошибка загрузки устройств
+    function renderDevicesError(message) {
+        document.getElementById('devicesContainer').innerHTML = `
+            <div class="col-12 text-center">
+                <i class="fas fa-exclamation-triangle fa-3x text-warning mb-3"></i>
+                <p class="text-muted">${message}</p>
+                <button class="btn btn-outline-primary" onclick="updateDevicesList(true)">
+                    Попробовать снова
+                </button>
+            </div>
+        `;
+    }
+    
+    // Получение списка ферм
+    async function updateFarmsList(force = false) {
+        try {
+            const url = force ? '/api/tailscale/farms?refresh=true' : '/api/tailscale/farms';
+            const response = await fetch(url);
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                tailscaleData.farms = result.farms;
+                renderFarms(result.farms);
+            } else {
+                renderFarmsError(result.message);
+            }
+            
+        } catch (error) {
+            console.error('Ошибка получения ферм:', error);
+            renderFarmsError('Ошибка подключения');
+        }
+    }
+    
+    // Отображение ферм
+    function renderFarms(farms) {
+        const container = document.getElementById('farmsContainer');
+        
+        if (!farms.length) {
+            container.innerHTML = `
+                <div class="col-12 text-center">
+                    <i class="fas fa-industry fa-3x text-muted mb-3"></i>
+                    <p class="text-muted">Фермы не найдены</p>
+                    <p><small class="text-muted">Устройства с тегом "farm" не обнаружены</small></p>
+                </div>
+            `;
+            return;
+        }
+        
+        container.innerHTML = farms.map(farm => `
+            <div class="col-lg-6 col-md-12 mb-3">
+                <div class="card device-card h-100">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <h6 class="card-title mb-0">
+                                <i class="fas fa-industry me-2"></i>
+                                ${farm.farm_name}
+                            </h6>
+                            <span class="badge ${farm.status === 'online' ? 'bg-success' : 
+                                              farm.status === 'connected_but_api_down' ? 'bg-warning' : 'bg-danger'}">
+                                ${farm.status === 'online' ? 'Активна' : 
+                                  farm.status === 'connected_but_api_down' ? 'Подключена' : 'Офлайн'}
+                            </span>
+                        </div>
+                        
+                        <p class="card-text">
+                            <small class="text-muted">Tailscale IP:</small>
+                            <span class="tailscale-ip">${farm.device.tailscale_ip}</span>
+                        </p>
+                        
+                        <p class="card-text">
+                            <small class="text-muted">API порт:</small> ${farm.api_port}<br>
+                            <small class="text-muted">Возможности:</small> ${farm.capabilities.join(', ')}
+                        </p>
+                        
+                        <div class="d-flex justify-content-between align-items-center">
+                            <small class="text-muted">
+                                API: <span class="${farm.api_reachable ? 'api-reachable' : 'api-unreachable'}">
+                                    ${farm.api_reachable ? '✅ Доступен' : '❌ Недоступен'}
+                                </span>
+                            </small>
+                            <div>
+                                <button class="btn btn-sm btn-outline-primary me-1" 
+                                        onclick="checkFarmConnectivity('${farm.device.tailscale_ip}', ${farm.api_port})">
+                                    <i class="fas fa-wifi"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-info" 
+                                        onclick="showDeviceDetails('${farm.device.id}')">
+                                    <i class="fas fa-info-circle"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+    
+    // Ошибка загрузки ферм
+    function renderFarmsError(message) {
+        document.getElementById('farmsContainer').innerHTML = `
+            <div class="col-12 text-center">
+                <i class="fas fa-exclamation-triangle fa-3x text-warning mb-3"></i>
+                <p class="text-muted">${message}</p>
+                <button class="btn btn-outline-primary" onclick="updateFarmsList(true)">
+                    Попробовать снова
+                </button>
+            </div>
+        `;
+    }
+    
+    // Показ деталей устройства
+    async function showDeviceDetails(deviceId) {
+        const modal = new bootstrap.Modal(document.getElementById('deviceDetailsModal'));
+        const content = document.getElementById('deviceDetailsContent');
+        
+        content.innerHTML = `
+            <div class="text-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Загрузка...</span>
+                </div>
+            </div>
+        `;
+        
+        modal.show();
+        
+        try {
+            const response = await fetch(`/api/tailscale/devices/${deviceId}`);
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                renderDeviceDetails(result.device);
+            } else {
+                content.innerHTML = `
+                    <div class="alert alert-danger">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        ${result.message}
+                    </div>
+                `;
+            }
+            
+        } catch (error) {
+            console.error('Ошибка загрузки деталей устройства:', error);
+            content.innerHTML = `
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    Ошибка загрузки данных
+                </div>
+            `;
+        }
+    }
+    
+    // Отображение деталей устройства
+    function renderDeviceDetails(device) {
+        const content = document.getElementById('deviceDetailsContent');
+        
+        content.innerHTML = `
+            <div class="row">
+                <div class="col-md-6">
+                    <h6>Основная информация</h6>
+                    <table class="table table-sm">
+                        <tr><th>Имя хоста:</th><td>${device.hostname}</td></tr>
+                        <tr><th>Полное имя:</th><td>${device.name}</td></tr>
+                        <tr><th>Tailscale IP:</th><td><span class="tailscale-ip">${device.tailscale_ip}</span></td></tr>
+                        <tr><th>Операционная система:</th><td>${device.os}</td></tr>
+                        <tr><th>Статус:</th><td>
+                            <span class="badge ${device.online ? 'bg-success' : 'bg-danger'}">
+                                ${device.online ? 'Онлайн' : 'Офлайн'}
+                            </span>
+                        </td></tr>
+                        <tr><th>Последний визит:</th><td>${formatTime(device.last_seen)}</td></tr>
+                    </table>
+                </div>
+                
+                <div class="col-md-6">
+                    <h6>Проверка портов</h6>
+                    ${device.port_checks ? `
+                        <table class="table table-sm">
+                            ${Object.entries(device.port_checks).map(([port, status]) => `
+                                <tr>
+                                    <th>Порт ${port}:</th>
+                                    <td>
+                                        <span class="${status ? 'api-reachable' : 'api-unreachable'}">
+                                            ${status ? '✅ Доступен' : '❌ Недоступен'}
+                                        </span>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </table>
+                    ` : `
+                        <p class="text-muted">Проверка портов недоступна для офлайн устройств</p>
+                    `}
+                </div>
+            </div>
+            
+            ${device.tags && device.tags.length ? `
+                <div class="mt-3">
+                    <h6>Теги</h6>
+                    <div>
+                        ${device.tags.map(tag => `<span class="badge bg-secondary me-1">${tag}</span>`).join('')}
+                    </div>
+                </div>
+            ` : ''}
+        `;
+    }
+    
+    // Проверка подключения к ферме
+    async function checkFarmConnectivity(tailscaleIp, apiPort) {
+        showLoadingOverlay();
+        
+        try {
+            const response = await fetch('/api/tailscale/connectivity/check', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    tailscale_ip: tailscaleIp,
+                    api_port: apiPort
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                const status = result.basic_connectivity ? 'success' : 'danger';
+                const message = result.basic_connectivity ? 
+                    `Ферма ${tailscaleIp} доступна` : 
+                    `Ферма ${tailscaleIp} недоступна`;
+                
+                showNotification(message, status);
+            } else {
+                showNotification(result.message, 'danger');
+            }
+            
+        } catch (error) {
+            console.error('Ошибка проверки подключения:', error);
+            showNotification('Ошибка проверки подключения', 'danger');
+        } finally {
+            hideLoadingOverlay();
+        }
+    }
+    
+    // Показ модала создания ключа
+    function showCreateAuthKeyModal() {
+        const modal = new bootstrap.Modal(document.getElementById('authKeyModal'));
+        
+        // Сброс формы
+        document.getElementById('authKeyForm').reset();
+        document.getElementById('reusableKey').checked = true;
+        document.getElementById('ephemeralKey').checked = false;
+        document.getElementById('authKeyResult').style.display = 'none';
+        document.getElementById('createKeyBtn').style.display = 'inline-block';
+        document.getElementById('copyKeyBtn').style.display = 'none';
+        
+        modal.show();
+    }
+    
+    // Создание ключа авторизации
+    async function createAuthKey() {
+        const reusable = document.getElementById('reusableKey').checked;
+        const ephemeral = document.getElementById('ephemeralKey').checked;
+        
+        const createBtn = document.getElementById('createKeyBtn');
+        const originalText = createBtn.innerHTML;
+        
+        createBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Создание...';
+        createBtn.disabled = true;
+        
+        try {
+            const response = await fetch('/api/tailscale/auth-key', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    reusable: reusable,
+                    ephemeral: ephemeral
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                document.getElementById('authKeyDisplay').textContent = result.auth_key;
+                document.getElementById('authKeyResult').style.display = 'block';
+                document.getElementById('createKeyBtn').style.display = 'none';
+                document.getElementById('copyKeyBtn').style.display = 'inline-block';
+                
+                showNotification('Ключ авторизации создан', 'success');
+            } else {
+                showNotification(result.message, 'danger');
+            }
+            
+        } catch (error) {
+            console.error('Ошибка создания ключа:', error);
+            showNotification('Ошибка создания ключа', 'danger');
+        } finally {
+            createBtn.innerHTML = originalText;
+            createBtn.disabled = false;
+        }
+    }
+    
+    // Копирование ключа в буфер обмена
+    async function copyAuthKey() {
+        const authKey = document.getElementById('authKeyDisplay').textContent;
+        
+        try {
+            await navigator.clipboard.writeText(authKey);
+            showNotification('Ключ скопирован в буфер обмена', 'success');
+        } catch (error) {
+            console.error('Ошибка копирования:', error);
+            showNotification('Не удалось скопировать ключ', 'warning');
+        }
+    }
+    
+    // Показ/скрытие оверлея загрузки
+    function showLoadingOverlay() {
+        document.getElementById('loadingOverlay').style.display = 'block';
+    }
+    
+    function hideLoadingOverlay() {
+        document.getElementById('loadingOverlay').style.display = 'none';
+    }
+    
+    // Показ уведомлений (toast)
+    function showNotification(message, type = 'info') {
+        // Простая реализация уведомлений
+        // В реальном проекте лучше использовать toast library
+        const alertClass = `alert-${type}`;
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert ${alertClass} alert-dismissible fade show position-fixed`;
+        alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 10000; max-width: 300px;';
+        alertDiv.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        
+        document.body.appendChild(alertDiv);
+        
+        // Автоматическое удаление через 5 секунд
+        setTimeout(() => {
+            if (alertDiv.parentNode) {
+                alertDiv.parentNode.removeChild(alertDiv);
+            }
+        }, 5000);
+    }
+    
+    // Форматирование времени
+    function formatTime(timeString) {
+        if (!timeString) return '--';
+        
+        try {
+            const date = new Date(timeString);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / 60000);
+            
+            if (diffMins < 1) return 'только что';
+            if (diffMins < 60) return `${diffMins} мин назад`;
+            
+            const diffHours = Math.floor(diffMins / 60);
+            if (diffHours < 24) return `${diffHours} ч назад`;
+            
+            const diffDays = Math.floor(diffHours / 24);
+            if (diffDays < 7) return `${diffDays} дн назад`;
+            
+            return date.toLocaleString();
+        } catch (error) {
+            return timeString;
+        }
+    }
+</script>
+{% endblock %}

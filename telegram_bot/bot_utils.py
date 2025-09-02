@@ -6,8 +6,10 @@
 """
 
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from core.config_manager import get_config
+_CFG = get_config()
 
 # Эмодзи для различных состояний
 EMOJI = {
@@ -28,6 +30,69 @@ EMOJI = {
     'home': '🏠',
     'refresh': '🔄'
 }
+
+# Из документации (фрагмент): карта некоторых битов активных аварий
+# Нумерация битов: 0 — младший бит слова по адресу 0x00C0, 16 — младший бит 0x00C1 и т.д.
+# Здесь приведены только встречающиеся и критичные для UX пункты.
+ACTIVE_ALARM_BITS: Dict[int, str] = {
+    26: "Аварийный режим управления воздухозаборником 3",
+    27: "Аварийный режим управления воздухозаборником 4",
+    28: "Низкое напряжение питания",
+    30: "Не установлены дата и время",
+    33: "Перегрузка системы",
+    34: "Требуется первичная настройка",
+    35: "Превышена максимальная внутренняя температура",
+    36: "Низкая внутренняя температура",
+    37: "Высокая влажность",
+    38: "Высокое отрицательное давление",
+    39: "Низкое отрицательное давление",
+    40: "Обрыв датчика влажности",
+    41: "Обрыв датчика отрицательного давления",
+    42: "Обрыв датчика внутренней температуры 1",
+    43: "Обрыв датчика внутренней температуры 2",
+    44: "Обрыв датчика наружной температуры",
+    45: "Аварийный режим вентиляции по температуре",
+    46: "Аварийный режим контроля влажности",
+    47: "Аварийный режим охладителя",
+    51: "Аварийный режим воздухозаборника 1",
+    52: "Аварийный режим воздухозаборника 2",
+    53: "Аварийный режим нагревателя 1",
+    54: "Аварийный режим нагревателя 2",
+    55: "Аварийный режим демпфера",
+    56: "Неправильные уставки",
+    57: "Высокая внутренняя температура",
+    58: "Аварийный режим туннельным воздухозаборником",
+    59: "Обрыв датчика температуры",
+    60: "Обрыв датчика внутренней температуры 3",
+    61: "Обрыв датчика внутренней температуры 4",
+    62: "Аварийный режим нагревателя 3",
+    63: "Аварийный режим нагревателя 4",
+}
+
+def decode_active_alarms(mask: int, max_items: int = 10) -> List[str]:
+    """Возвращает список названий активных аварий по маске.
+    Показывает известные биты; неизвестные/прочие считаются как «неизвестные».
+    """
+    if not isinstance(mask, int) or mask == 0:
+        return []
+    names: List[str] = []
+    unknown = 0
+    for bit in range(0, 64):
+        if (mask >> bit) & 1:
+            name = ACTIVE_ALARM_BITS.get(bit)
+            if name:
+                names.append(f"{EMOJI['alarm']} {name} (бит {bit})")
+            else:
+                unknown += 1
+    if unknown:
+        names.append(f"{EMOJI['alarm']} Неизвестных аварий: {unknown}")
+    return names[:max_items]
+
+def _bitcount(value: int) -> int:
+    try:
+        return bin(int(value)).count("1") if value is not None else 0
+    except Exception:
+        return 0
 
 def format_sensor_data(data: Dict[str, Any]) -> str:
     """Форматирование данных с датчиков для отображения"""
@@ -81,27 +146,54 @@ def format_sensor_data(data: Dict[str, Any]) -> str:
     if temp_target is not None:
         text += f"• Целевая T°: `{temp_target:.1f}°C`\n"
     
-    if humidity is not None:
+    hum_status = data.get('humidity_status')
+    # Учитываем конфиг: скрываем датчик, если выключен в настройках
+    if hum_status == 'disabled' or not _CFG.sensors.get('humidity', True):
+        pass  # скрываем
+    elif hum_status == 'pending':
+        text += f"• Влажность: `ожидаем замер` {EMOJI['info']}\n"
+    elif humidity is not None:
         humidity_status = _get_humidity_status(humidity)
         text += f"• Влажность: `{humidity:.1f}%` {humidity_status}\n"
     else:
-        text += f"• Влажность: `нет данных` {EMOJI['error']}\n"
+        text += f"• Влажность: `нет данных` {EMOJI['error']} (возможен обрыв датчика)\n"
     
     # Качество воздуха
     text += "\n**🫁 КАЧЕСТВО ВОЗДУХА:**\n"
     
-    if co2 is not None:
+    co2_status = data.get('co2_status')
+    if co2_status == 'disabled' or not _CFG.sensors.get('co2', True):
+        pass
+    elif co2_status == 'pending':
+        text += f"• CO₂: `ожидаем замер` {EMOJI['info']}\n"
+    elif co2 is not None:
         co2_status = _get_co2_status(co2)
         text += f"• CO₂: `{co2} ppm` {co2_status}\n"
     else:
-        text += f"• CO₂: `нет данных` {EMOJI['error']}\n"
+        text += f"• CO₂: `нет данных` {EMOJI['error']} (возможен обрыв датчика)\n"
     
-    if nh3 is not None:
+    nh3_status = data.get('nh3_status')
+    if nh3_status == 'disabled' or not _CFG.sensors.get('nh3', False):
+        pass
+    elif nh3_status == 'pending':
+        text += f"• NH₃: `ожидаем замер` {EMOJI['info']}\n"
+    elif nh3 is not None:
         nh3_status = _get_nh3_status(nh3)
         text += f"• NH₃: `{nh3:.1f} ppm` {nh3_status}\n"
+    else:
+        text += f"• NH₃: `нет данных` {EMOJI['error']} (возможен обрыв датчика)\n"
     
-    if pressure is not None:
-        text += f"• Давление: `{pressure:.1f} Па`\n"
+    # Давление: показываем динамически с учетом статуса
+    pressure_status = data.get('pressure_status')
+    if _CFG.sensors.get('pressure', True):
+        if pressure_status == 'disabled':
+            pass
+        elif pressure_status == 'pending':
+            text += f"• Давление: `ожидаем замер` {EMOJI['info']}\n"
+        elif pressure is not None:
+            text += f"• Давление: `{pressure:.1f} Па`\n"
+        else:
+            text += f"• Давление: `нет данных` {EMOJI['error']} (возможен обрыв датчика)\n"
     
     # Система управления
     text += "\n**⚙️ СИСТЕМА:**\n"
@@ -114,19 +206,60 @@ def format_sensor_data(data: Dict[str, Any]) -> str:
         if ventilation_target is not None:
             text += f" (цель: {ventilation_target:.1f}%)"
         text += "\n"
+
+    # Состояние аварийного реле (если вычислено)
+    alarm_relay = data.get('alarm_relay')
+    alarm_label = data.get('alarm_relay_label', 'Реле аварии')
+    if alarm_relay is True:
+        text += f"• {alarm_label}: `ВКЛ` {EMOJI['alarm']}\n"
+    elif alarm_relay is False:
+        text += f"• {alarm_label}: `ВЫКЛ` {EMOJI['ok']}\n"
+    
+    # Дополнительные системные выходы из конфига (группы вентиляторов и др.)
+    outputs = getattr(_CFG, 'system_outputs', []) or []
+    if outputs:
+        reg_map = {'0x0081': 'digital_outputs_1', '0x0082': 'digital_outputs_2', '0x00a2': 'digital_outputs_3'}
+        for o in outputs:
+            try:
+                if not o.enabled:
+                    continue
+                key = reg_map.get(str(o.register).lower())
+                if not key:
+                    continue
+                value = data.get(key)
+                if not isinstance(value, int):
+                    continue
+                state = ((value >> int(o.bit)) & 1) == 1
+                text += f"• {o.label}: `{'ВКЛ' if state else 'ВЫКЛ'}`\n"
+            except Exception:
+                continue
     
     # Аварии и предупреждения
-    active_alarms = data.get('active_alarms', 0)
-    active_warnings = data.get('active_warnings', 0)
+    active_alarms_val = data.get('active_alarms', 0)  # может быть битовой маской
+    active_warnings_val = data.get('active_warnings', 0)
+    active_alarms = _bitcount(active_alarms_val) if isinstance(active_alarms_val, int) else int(active_alarms_val or 0)
+    active_warnings = _bitcount(active_warnings_val) if isinstance(active_warnings_val, int) else int(active_warnings_val or 0)
     
     if active_alarms > 0:
         text += f"\n🚨 **АВАРИИ: {active_alarms}**\n"
+        # Пытаемся вывести расшифровку известных аварий
+        details = decode_active_alarms(active_alarms_val if isinstance(active_alarms_val, int) else 0, max_items=5)
+        if details:
+            for line in details:
+                text += f"• {line}\n"
     
     if active_warnings > 0:
         text += f"⚠️ **ПРЕДУПРЕЖДЕНИЯ: {active_warnings}**\n"
     
-    if active_alarms == 0 and active_warnings == 0:
+    # Уточняем итоговый статус: не писать "в норме", если критичные сенсоры недоступны
+    critical_missing = (data.get('co2_status') not in (None, 'disabled') and co2 is None)
+    alarm_active = (alarm_relay is True)
+    if active_alarms == 0 and active_warnings == 0 and not critical_missing and not alarm_active:
         text += f"\n{EMOJI['ok']} **Система в норме**\n"
+    elif critical_missing:
+        text += f"\n{EMOJI['error']} **Критично:** отсутствуют данные CO₂ — проверьте датчик/линию\n"
+    elif alarm_active:
+        text += f"\n{EMOJI['alarm']} **Внимание:** активировано аварийное реле\n"
     
     return text
 
@@ -180,13 +313,23 @@ def _get_nh3_status(nh3: float) -> str:
 # UX УЛУЧШЕНИЯ: МЕНЮ И КНОПКИ
 # ========================================================================
 
-def build_main_menu(access_level: str = "user") -> InlineKeyboardMarkup:
+def build_main_menu(access_level: str = "user", badges: Optional[Dict[str, int]] = None) -> InlineKeyboardMarkup:
     """
     🎯 ОСНОВНОЕ МЕНЮ с кнопками по уровню доступа
     Возвращает главное меню с inline-кнопками
     """
+    badges = badges or {}
+    alarms = int(badges.get('alarms', 0) or 0)
+    warnings = int(badges.get('warnings', 0) or 0)
+
+    status_label = "📊 Показания"
+    if alarms > 0:
+        status_label += f" (🚨{alarms})"
+    elif warnings > 0:
+        status_label += f" (⚠️{warnings})"
+
     buttons = [
-        [InlineKeyboardButton("📊 Показания", callback_data="show_status")],
+        [InlineKeyboardButton(status_label, callback_data="show_status")],
         [InlineKeyboardButton(f"{EMOJI['refresh']} Обновить", callback_data="refresh_status")],
     ]
     

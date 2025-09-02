@@ -43,7 +43,38 @@ services:
   
   # Порты веб-сервисов
   dashboard_port: 8501
-  websocket_port: 8765
+websocket_port: 8765
+
+# Конфигурация аварийного реле (для показа в UI/боте)
+alarm_relay:
+  enabled: true
+  register: '0x0082'   # цифровые выходы (слово 2)
+  bit: 7               # предположительно старший бит
+  label: 'Реле аварии'
+
+# Управление выводом датчиков (для бота/дашборда)
+sensors:
+  temperature: true
+  humidity: true
+  co2: true
+  nh3: false
+  pressure: true
+
+# Карта отображаемых системных выходов (цифровые выходы по битам)
+# Заполните по вашей карте. Примеры ниже (выключены по умолчанию):
+system_outputs:
+  - enabled: false
+    register: '0x0081'
+    bit: 0
+    label: 'Группа вентиляторов 1'
+  - enabled: false
+    register: '0x0081'
+    bit: 1
+    label: 'Группа вентиляторов 2'
+  - enabled: false
+    register: '0x0082'
+    bit: 0
+    label: 'Освещение'
 
 # Карта Modbus регистров КУБ-1063
 modbus_registers:

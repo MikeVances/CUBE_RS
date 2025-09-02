@@ -14,7 +14,7 @@
 import json
 import yaml
 import os
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 from dataclasses import dataclass
 from pathlib import Path
 import logging
@@ -92,6 +92,22 @@ class ServiceConfig:
     dashboard_port: int = 8501
     websocket_port: int = 8765
 
+@dataclass
+class AlarmRelayConfig:
+    """Конфигурация аварийного реле для отображения в UI/боте"""
+    enabled: bool = False
+    register: str = "0x0082"  # один из 0x0081/0x0082/0x00A2 (цифровые выходы)
+    bit: int = 7               # номер бита (0..15)
+    label: str = "Реле аварии"
+
+@dataclass
+class SystemOutput:
+    """Описатель выводимого релейного выхода (по биту цифрового слова)."""
+    enabled: bool = False
+    register: str = "0x0081"   # 0x0081/0x0082/0x00A2
+    bit: int = 0               # 0..15
+    label: str = "Выход"
+
 class ConfigManager:
     """
     Централизованный менеджер всех конфигураций системы
@@ -114,6 +130,16 @@ class ConfigManager:
         self.telegram: TelegramConfig = TelegramConfig()
         self.system: SystemConfig = SystemConfig()
         self.services: ServiceConfig = ServiceConfig()
+        self.alarm_relay: AlarmRelayConfig = AlarmRelayConfig()
+        # Управляемые через конфиг элементы UI
+        self.sensors: Dict[str, bool] = {
+            'temperature': True,
+            'humidity': True,
+            'co2': True,
+            'nh3': False,
+            'pressure': True,
+        }
+        self.system_outputs: List[SystemOutput] = []
         
         # Modbus регистры
         self.modbus_registers: Dict[str, str] = {}
@@ -187,6 +213,36 @@ class ConfigManager:
                     for key, value in srv_data.items():
                         if hasattr(self.services, key):
                             setattr(self.services, key, value)
+
+                # Аварийное реле (опционально)
+                if 'alarm_relay' in config_data:
+                    ar = config_data['alarm_relay'] or {}
+                    if isinstance(ar, dict):
+                        for key in ['enabled', 'register', 'bit', 'label']:
+                            if key in ar and hasattr(self.alarm_relay, key):
+                                setattr(self.alarm_relay, key, ar[key])
+
+                # Датчики (включение/отключение вывода)
+                if 'sensors' in config_data and isinstance(config_data['sensors'], dict):
+                    for k, v in config_data['sensors'].items():
+                        if isinstance(v, bool):
+                            self.sensors[k] = v
+
+                # Системные выходы (реле/группы вентиляторов)
+                if 'system_outputs' in config_data and isinstance(config_data['system_outputs'], list):
+                    outputs = []
+                    for item in config_data['system_outputs']:
+                        try:
+                            so = SystemOutput(
+                                enabled=bool(item.get('enabled', False)),
+                                register=str(item.get('register', '0x0081')),
+                                bit=int(item.get('bit', 0)),
+                                label=str(item.get('label', 'Выход')),
+                            )
+                            outputs.append(so)
+                        except Exception:
+                            continue
+                    self.system_outputs = outputs
                 
                 # Modbus регистры
                 if 'modbus_registers' in config_data:

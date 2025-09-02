@@ -25,9 +25,13 @@ ALL_FIELDS = [
     "digital_outputs_2",  # 0x0082
     "digital_outputs_3",  # 0x00A2
     "pressure",           # 0x0083
+    "pressure_status",    # текстовый статус датчика давления
     "humidity",           # 0x0084
+    "humidity_status",    # статус датчика влажности
     "co2",                # 0x0085
+    "co2_status",         # статус датчика CO2
     "nh3",                # 0x0086
+    "nh3_status",         # статус датчика NH3
     "grv_base",           # 0x0087
     "grv_tunnel",         # 0x0088
     "damper",             # 0x0089
@@ -54,9 +58,13 @@ CREATE TABLE IF NOT EXISTS latest_data (
     digital_outputs_2 INTEGER,
     digital_outputs_3 INTEGER,
     pressure REAL,
+    pressure_status TEXT,
     humidity REAL,
+    humidity_status TEXT,
     co2 INTEGER,
+    co2_status TEXT,
     nh3 REAL,
+    nh3_status TEXT,
     grv_base INTEGER,
     grv_tunnel INTEGER,
     damper INTEGER,
@@ -84,9 +92,13 @@ CREATE TABLE IF NOT EXISTS sensor_data (
     digital_outputs_2 INTEGER,
     digital_outputs_3 INTEGER,
     pressure REAL,
+    pressure_status TEXT,
     humidity REAL,
+    humidity_status TEXT,
     co2 INTEGER,
+    co2_status TEXT,
     nh3 REAL,
+    nh3_status TEXT,
     grv_base INTEGER,
     grv_tunnel INTEGER,
     damper INTEGER,
@@ -119,6 +131,17 @@ def init_db():
         cursor.execute(CREATE_SQL)
         cursor.execute(CREATE_HISTORY_SQL)
         cursor.execute(INSERT_SQL)
+        # Миграция: добавляем недостающие колонки статусов при обновлении
+        def _ensure_column(table: str, col: str, col_type: str):
+            cur = conn.execute(f"PRAGMA table_info({table})")
+            cols = [r[1] for r in cur.fetchall()]
+            if col not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+        for t in ("latest_data", "sensor_data"):
+            _ensure_column(t, "pressure_status", "TEXT")
+            _ensure_column(t, "humidity_status", "TEXT")
+            _ensure_column(t, "co2_status", "TEXT")
+            _ensure_column(t, "nh3_status", "TEXT")
         conn.commit()
 
 def update_data(**kwargs):

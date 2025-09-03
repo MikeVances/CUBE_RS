@@ -1,0 +1,445 @@
+{% extends "base.html" %}
+
+{% block content %}
+<!-- Current Status Row -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">
+                    <i class="fas fa-info-circle me-2"></i>
+                    Текущее состояние системы
+                </h5>
+                <div class="row" id="currentStatus">
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-primary" id="tempValue">--</div>
+                                <div class="metric-label">Температура (°C)</div>
+                                <small class="text-muted">Цель: <span id="tempTarget">--</span>°C</small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-info" id="humidityValue">--</div>
+                                <div class="metric-label">Влажность (%)</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-warning" id="co2Value">--</div>
+                                <div class="metric-label">CO₂ (ppm)</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-success" id="ventValue">--</div>
+                                <div class="metric-label">Вентиляция (%)</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="row mt-3">
+                    <div class="col-md-6">
+                        <small class="text-muted">
+                            <i class="fas fa-clock me-1"></i>
+                            Последнее обновление: <span id="lastUpdate">--</span>
+                        </small>
+                    </div>
+                    <div class="col-md-6 text-end">
+                        <small class="text-muted">
+                            <i class="fas fa-microchip me-1"></i>
+                            Версия ПО: <span id="softwareVersion">--</span>
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Charts Row -->
+<div class="row">
+    <!-- Temperature Chart -->
+    <div class="col-lg-6 mb-4">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">
+                    <i class="fas fa-thermometer-half me-2 text-primary"></i>
+                    Температура
+                </h5>
+                <div class="chart-container">
+                    <div class="loading-spinner">
+                        <div class="spinner-border text-primary" role="status"></div>
+                    </div>
+                    <canvas id="tempChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Humidity Chart -->
+    <div class="col-lg-6 mb-4">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">
+                    <i class="fas fa-tint me-2 text-info"></i>
+                    Влажность
+                </h5>
+                <div class="chart-container">
+                    <div class="loading-spinner">
+                        <div class="spinner-border text-info" role="status"></div>
+                    </div>
+                    <canvas id="humidityChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- CO2 Chart -->
+    <div class="col-lg-6 mb-4">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">
+                    <i class="fas fa-lungs me-2 text-warning"></i>
+                    CO₂
+                </h5>
+                <div class="chart-container">
+                    <div class="loading-spinner">
+                        <div class="spinner-border text-warning" role="status"></div>
+                    </div>
+                    <canvas id="co2Chart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Ventilation Chart -->
+    <div class="col-lg-6 mb-4">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">
+                    <i class="fas fa-wind me-2 text-success"></i>
+                    Вентиляция
+                </h5>
+                <div class="chart-container">
+                    <div class="loading-spinner">
+                        <div class="spinner-border text-success" role="status"></div>
+                    </div>
+                    <canvas id="ventChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Statistics Row -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">
+                    <i class="fas fa-chart-bar me-2"></i>
+                    Статистика системы
+                </h5>
+                <div class="row" id="statisticsRow">
+                    <div class="col-md-3 mb-3">
+                        <div class="text-center">
+                            <div class="h4 text-success" id="successRate">--%</div>
+                            <small class="text-muted">Успешность</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <div class="text-center">
+                            <div class="h4 text-primary" id="totalReadings">--</div>
+                            <small class="text-muted">Всего измерений</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <div class="text-center">
+                            <div class="h4 text-info" id="systemStatus">--</div>
+                            <small class="text-muted">Статус системы</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <div class="text-center">
+                            <div class="h4 text-warning" id="errorCount">--</div>
+                            <small class="text-muted">Ошибки</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    let charts = {};
+    let currentData = {};
+    let historyData = [];
+    
+    // Инициализация графиков
+    function initCharts() {
+        const chartConfig = {
+            type: 'line',
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            displayFormats: {
+                                minute: 'HH:mm',
+                                hour: 'HH:mm'
+                            }
+                        }
+                    },
+                    y: {
+                        beginAtZero: false
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top'
+                    }
+                },
+                elements: {
+                    point: {
+                        radius: 3
+                    },
+                    line: {
+                        tension: 0.4
+                    }
+                }
+            }
+        };
+        
+        // Температурный график
+        charts.temperature = new Chart(document.getElementById('tempChart'), {
+            ...chartConfig,
+            data: {
+                datasets: [
+                    {
+                        label: 'Текущая температура',
+                        borderColor: '#007bff',
+                        backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                        data: []
+                    },
+                    {
+                        label: 'Целевая температура', 
+                        borderColor: '#dc3545',
+                        backgroundColor: 'rgba(220, 53, 69, 0.1)',
+                        borderDash: [5, 5],
+                        data: []
+                    }
+                ]
+            }
+        });
+        
+        // График влажности
+        charts.humidity = new Chart(document.getElementById('humidityChart'), {
+            ...chartConfig,
+            data: {
+                datasets: [{
+                    label: 'Влажность',
+                    borderColor: '#17a2b8',
+                    backgroundColor: 'rgba(23, 162, 184, 0.1)',
+                    data: []
+                }]
+            }
+        });
+        
+        // График CO2
+        charts.co2 = new Chart(document.getElementById('co2Chart'), {
+            ...chartConfig,
+            data: {
+                datasets: [{
+                    label: 'CO₂',
+                    borderColor: '#ffc107',
+                    backgroundColor: 'rgba(255, 193, 7, 0.1)',
+                    data: []
+                }]
+            }
+        });
+        
+        // График вентиляции
+        charts.ventilation = new Chart(document.getElementById('ventChart'), {
+            ...chartConfig,
+            data: {
+                datasets: [{
+                    label: 'Вентиляция',
+                    borderColor: '#28a745',
+                    backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                    data: []
+                }]
+            }
+        });
+    }
+    
+    // Обновление текущих данных
+    async function updateCurrentData() {
+        try {
+            const response = await fetch('/api/data/current');
+            const result = await response.json();
+            
+            if (result.status === 'success' && result.data) {
+                currentData = result.data;
+                updateCurrentDisplay();
+            } else {
+                console.warn('Нет текущих данных:', result.message);
+            }
+        } catch (error) {
+            console.error('Ошибка получения текущих данных:', error);
+        }
+    }
+    
+    // Обновление исторических данных
+    async function updateHistoryData() {
+        try {
+            const response = await fetch('/api/data/history?hours=6');
+            const result = await response.json();
+            
+            if (result.status === 'success' && result.data) {
+                historyData = result.data;
+                updateCharts();
+            }
+        } catch (error) {
+            console.error('Ошибка получения исторических данных:', error);
+        }
+    }
+    
+    // Обновление статистики
+    async function updateStatistics() {
+        try {
+            const response = await fetch('/api/data/statistics');
+            const result = await response.json();
+            
+            if (result.status === 'success' && result.data) {
+                updateStatisticsDisplay(result.data);
+            }
+        } catch (error) {
+            console.error('Ошибка получения статистики:', error);
+        }
+    }
+    
+    // Обновление отображения текущих данных
+    function updateCurrentDisplay() {
+        document.getElementById('tempValue').textContent = formatNumber(currentData.temp_inside);
+        document.getElementById('tempTarget').textContent = formatNumber(currentData.temp_target);
+        document.getElementById('humidityValue').textContent = formatNumber(currentData.humidity);
+        document.getElementById('co2Value').textContent = Math.round(currentData.co2 || 0);
+        document.getElementById('ventValue').textContent = formatNumber(currentData.ventilation_level);
+        document.getElementById('lastUpdate').textContent = formatTime(currentData.updated_at);
+        document.getElementById('softwareVersion').textContent = currentData.software_version || 'N/A';
+    }
+    
+    // Обновление статистики
+    function updateStatisticsDisplay(stats) {
+        document.getElementById('successRate').textContent = 
+            `${Math.round((stats.success_rate || 0) * 100)}%`;
+        document.getElementById('totalReadings').textContent = stats.total_readings || 0;
+        document.getElementById('systemStatus').textContent = 
+            stats.is_running ? 'Активна' : 'Неактивна';
+        document.getElementById('errorCount').textContent = stats.error_count || 0;
+    }
+    
+    // Обновление графиков
+    function updateCharts() {
+        if (!historyData.length) return;
+        
+        // Подготовка данных для графиков
+        const tempData = [];
+        const tempTargetData = [];
+        const humidityData = [];
+        const co2Data = [];
+        const ventData = [];
+        
+        historyData.forEach(record => {
+            const timestamp = new Date(record.timestamp);
+            
+            if (record.temp_inside !== null) {
+                tempData.push({x: timestamp, y: record.temp_inside});
+            }
+            if (record.temp_target !== null) {
+                tempTargetData.push({x: timestamp, y: record.temp_target});
+            }
+            if (record.humidity !== null) {
+                humidityData.push({x: timestamp, y: record.humidity});
+            }
+            if (record.co2 !== null) {
+                co2Data.push({x: timestamp, y: record.co2});
+            }
+            if (record.ventilation_level !== null) {
+                ventData.push({x: timestamp, y: record.ventilation_level});
+            }
+        });
+        
+        // Обновление данных в графиках
+        charts.temperature.data.datasets[0].data = tempData;
+        charts.temperature.data.datasets[1].data = tempTargetData;
+        charts.humidity.data.datasets[0].data = humidityData;
+        charts.co2.data.datasets[0].data = co2Data;
+        charts.ventilation.data.datasets[0].data = ventData;
+        
+        // Обновление графиков
+        Object.values(charts).forEach(chart => chart.update());
+    }
+    
+    // Показать спиннер загрузки
+    function showLoadingSpinners() {
+        document.querySelectorAll('.loading-spinner').forEach(spinner => {
+            spinner.style.display = 'block';
+        });
+    }
+    
+    // Скрыть спиннер загрузки
+    function hideLoadingSpinners() {
+        document.querySelectorAll('.loading-spinner').forEach(spinner => {
+            spinner.style.display = 'none';
+        });
+    }
+    
+    // Полное обновление данных
+    async function refreshAllData() {
+        showLoadingSpinners();
+        
+        await Promise.all([
+            updateCurrentData(),
+            updateHistoryData(),
+            updateStatistics()
+        ]);
+        
+        hideLoadingSpinners();
+    }
+    
+    // Инициализация при загрузке страницы
+    document.addEventListener('DOMContentLoaded', function() {
+        initCharts();
+        refreshAllData();
+        
+        // Автообновление каждые 30 секунд
+        dataUpdateInterval = setInterval(refreshAllData, 30000);
+    });
+    
+    // Очистка при выгрузке страницы
+    window.addEventListener('beforeunload', function() {
+        if (dataUpdateInterval) {
+            clearInterval(dataUpdateInterval);
+        }
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: kub-1063-web-app
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    plan: free
+    envVars:
+      - key: GATEWAY_URL
+        value: https://your-gateway-domain.com  # Замените на реальный URL вашего Gateway
+      - key: API_KEY
+        value: dev-api-key  # Замените на реальный API ключ
+      - key: API_SECRET
+        generateValue: true  # Render создаст случайный секрет
+      - key: SECRET_KEY
+        generateValue: true  # Render создаст случайный Flask секрет
+      - key: DEBUG
+        value: "false"

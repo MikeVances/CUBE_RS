@@ -39,7 +39,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Наши модули
-from bot_database import TelegramBotDB
+from .bot_database import TelegramBotDB
 from bot_permissions import check_user_permission, check_command_rate_limit, get_user_access_level
 from bot_utils import (
     format_sensor_data, format_system_stats, 

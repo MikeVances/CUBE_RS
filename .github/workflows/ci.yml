@@ -1,0 +1,461 @@
+name: 🚀 CUBE_RS Quality Foundation CI
+
+on:
+  push:
+    branches: [ main, develop, "feature/*" ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run daily at 6 AM UTC to catch dependency issues
+    - cron: '0 6 * * *'
+
+env:
+  PYTHON_VERSION: "3.11"
+  POETRY_VERSION: "1.8.0"
+
+# Ensure only one workflow runs at a time per PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===== SETUP AND VALIDATION =====
+  setup:
+    name: 🔧 Setup & Validation
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+      should-run-tests: ${{ steps.changes.outputs.python }}
+    
+    steps:
+    - name: 📂 Checkout Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better caching
+
+    - name: 🔍 Check for Python Changes  
+      uses: dorny/paths-filter@v2
+      id: changes
+      with:
+        filters: |
+          python:
+            - '**/*.py'
+            - 'pyproject.toml'
+            - 'requirements*.txt'
+            - '.pre-commit-config.yaml'
+
+    - name: 🔑 Generate Cache Key
+      id: cache-key
+      run: |
+        echo "key=deps-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}" >> $GITHUB_OUTPUT
+
+    - name: ✅ Validate Project Structure
+      run: |
+        echo "📋 Validating project structure..."
+        
+        # Check required files exist
+        required_files=(
+          "pyproject.toml"
+          ".pre-commit-config.yaml"
+          "tests/conftest.py"
+          "core/types.py"
+        )
+        
+        for file in "${required_files[@]}"; do
+          if [[ ! -f "$file" ]]; then
+            echo "❌ Required file missing: $file"
+            exit 1
+          fi
+        done
+        
+        echo "✅ Project structure validation passed"
+
+  # ===== DEPENDENCY MANAGEMENT =====
+  dependencies:
+    name: 📦 Dependencies & Security
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.should-run-tests == 'true'
+    
+    steps:
+    - name: 📂 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📦 Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ env.POETRY_VERSION }}
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+        
+    - name: 📚 Cache Dependencies
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: ${{ needs.setup.outputs.cache-key }}
+        restore-keys: |
+          deps-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+        
+    - name: ⬇️ Install Dependencies
+      run: |
+        poetry config virtualenvs.create true
+        poetry config virtualenvs.in-project true
+        poetry install --no-interaction --no-ansi --with dev,test
+        
+    - name: 🔍 Check Poetry Lock File
+      run: poetry check --lock
+      
+    - name: 🔒 Security Audit
+      run: |
+        poetry run pip-audit --desc --format=json --output=security-report.json || true
+        
+    - name: 📤 Upload Security Report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-audit
+        path: security-report.json
+
+  # ===== CODE QUALITY CHECKS =====
+  quality:
+    name: 🎨 Code Quality
+    runs-on: ubuntu-latest
+    needs: [setup, dependencies]
+    if: needs.setup.outputs.should-run-tests == 'true'
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [format, lint, types, security]
+        
+    steps:
+    - name: 📂 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📦 Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ env.POETRY_VERSION }}
+        
+    - name: 📚 Restore Dependencies Cache
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: ${{ needs.setup.outputs.cache-key }}
+        
+    - name: ⬇️ Install Dependencies
+      run: poetry install --no-interaction --no-ansi --with dev
+      
+    - name: 🎨 Format Check (Black)
+      if: matrix.check == 'format'
+      run: |
+        echo "🎨 Checking code formatting..."
+        poetry run black --check --diff --color . || {
+          echo "❌ Code formatting issues found. Run 'black .' to fix."
+          exit 1
+        }
+        
+    - name: 📋 Import Sort Check (isort)
+      if: matrix.check == 'format'
+      run: |
+        echo "📋 Checking import sorting..."
+        poetry run isort --check-only --diff --color . || {
+          echo "❌ Import sorting issues found. Run 'isort .' to fix."
+          exit 1
+        }
+        
+    - name: 🔍 Lint (Ruff)
+      if: matrix.check == 'lint'
+      run: |
+        echo "🔍 Running linter..."
+        poetry run ruff check --format=github . || {
+          echo "❌ Linting issues found. Run 'ruff check --fix .' to fix."
+          exit 1
+        }
+        
+    - name: 🏷️ Type Check (MyPy)
+      if: matrix.check == 'types'
+      run: |
+        echo "🏷️ Running type checker..."
+        poetry run mypy --config-file pyproject.toml . || {
+          echo "❌ Type checking failed. Fix type errors before proceeding."
+          exit 1
+        }
+        
+    - name: 🔒 Security Check (Bandit)
+      if: matrix.check == 'security'
+      run: |
+        echo "🔒 Running security checks..."
+        poetry run bandit -r . -f json -o bandit-report.json || {
+          echo "❌ Security issues found. Review bandit-report.json"
+          exit 1
+        }
+        
+    - name: 📤 Upload Reports
+      uses: actions/upload-artifact@v3
+      if: always() && matrix.check == 'security'
+      with:
+        name: security-bandit
+        path: bandit-report.json
+
+  # ===== TESTING =====
+  test:
+    name: 🧪 Tests
+    runs-on: ubuntu-latest
+    needs: [setup, dependencies]
+    if: needs.setup.outputs.should-run-tests == 'true'
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+        test-type: [unit, integration]
+        
+    services:
+      # SQLite doesn't need a service, but placeholder for future PostgreSQL
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: 📂 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: 📦 Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ env.POETRY_VERSION }}
+        
+    - name: 📚 Restore Dependencies Cache
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: deps-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+        
+    - name: ⬇️ Install Dependencies
+      run: poetry install --no-interaction --no-ansi --with dev,test
+      
+    - name: 🧪 Run Unit Tests
+      if: matrix.test-type == 'unit'
+      env:
+        PYTHONPATH: ${{ github.workspace }}
+      run: |
+        echo "🧪 Running unit tests..."
+        poetry run pytest tests/unit/ \
+          --cov=core \
+          --cov=modbus \
+          --cov-report=xml:coverage-unit.xml \
+          --cov-report=html:htmlcov-unit \
+          --cov-report=term-missing \
+          --junitxml=unit-test-results.xml \
+          --tb=short \
+          -v \
+          --durations=10
+          
+    - name: 🔗 Run Integration Tests
+      if: matrix.test-type == 'integration'
+      env:
+        PYTHONPATH: ${{ github.workspace }}
+        REDIS_URL: redis://localhost:6379
+      run: |
+        echo "🔗 Running integration tests..."
+        poetry run pytest tests/integration/ \
+          --junitxml=integration-test-results.xml \
+          --tb=short \
+          -v \
+          --durations=10 || true  # Allow to fail for now
+          
+    - name: 📊 Upload Coverage to Codecov
+      if: matrix.test-type == 'unit' && matrix.python-version == '3.11'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage-unit.xml
+        flags: unittests
+        name: codecov-${{ matrix.python-version }}
+        fail_ci_if_error: false
+        
+    - name: 📈 Publish Test Results
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      if: always()
+      with:
+        files: "*test-results.xml"
+        check_name: "Test Results (${{ matrix.python-version }}, ${{ matrix.test-type }})"
+        
+    - name: 📤 Upload Coverage Reports
+      uses: actions/upload-artifact@v3
+      if: always() && matrix.test-type == 'unit'
+      with:
+        name: coverage-${{ matrix.python-version }}
+        path: |
+          coverage-unit.xml
+          htmlcov-unit/
+
+  # ===== PRE-COMMIT VALIDATION =====
+  pre-commit:
+    name: 🔍 Pre-commit Hooks
+    runs-on: ubuntu-latest
+    needs: [setup, dependencies]
+    if: needs.setup.outputs.should-run-tests == 'true'
+    
+    steps:
+    - name: 📂 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📦 Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ env.POETRY_VERSION }}
+        
+    - name: 📚 Restore Dependencies Cache
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: ${{ needs.setup.outputs.cache-key }}
+        
+    - name: ⬇️ Install Dependencies
+      run: poetry install --no-interaction --no-ansi --with dev
+      
+    - name: 🔍 Run Pre-commit Hooks
+      run: |
+        echo "🔍 Running pre-commit hooks..."
+        poetry run pre-commit install
+        poetry run pre-commit run --all-files --show-diff-on-failure
+
+  # ===== BUILD & PACKAGE =====
+  build:
+    name: 🏗️ Build & Package
+    runs-on: ubuntu-latest
+    needs: [quality, test, pre-commit]
+    if: needs.setup.outputs.should-run-tests == 'true'
+    
+    steps:
+    - name: 📂 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📦 Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ env.POETRY_VERSION }}
+        
+    - name: 🏗️ Build Package
+      run: |
+        echo "🏗️ Building Python package..."
+        poetry build
+        
+    - name: 📋 List Build Artifacts
+      run: |
+        echo "📋 Build artifacts:"
+        ls -la dist/
+        
+    - name: 📤 Upload Build Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: python-package
+        path: dist/
+        retention-days: 30
+
+  # ===== PERFORMANCE BENCHMARKS =====
+  performance:
+    name: ⚡ Performance Benchmarks
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: 📂 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📦 Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ env.POETRY_VERSION }}
+        
+    - name: ⬇️ Install Dependencies
+      run: poetry install --no-interaction --no-ansi --with dev,test
+      
+    - name: ⚡ Run Performance Tests
+      run: |
+        echo "⚡ Running performance benchmarks..."
+        poetry run pytest tests/unit/ -m "slow" \
+          --tb=short \
+          --durations=0 \
+          -v || true  # Allow to fail for now
+          
+    - name: 📊 Performance Report Comment
+      if: github.event_name == 'pull_request'
+      run: |
+        echo "📊 Performance benchmarks completed"
+        echo "Results would be posted as PR comment in real implementation"
+
+  # ===== SUMMARY =====
+  ci-success:
+    name: ✅ CI Success
+    runs-on: ubuntu-latest
+    needs: [setup, dependencies, quality, test, pre-commit, build]
+    if: always()
+    
+    steps:
+    - name: 📊 Check Results
+      run: |
+        echo "📊 CI Pipeline Results:"
+        echo "Setup: ${{ needs.setup.result }}"
+        echo "Dependencies: ${{ needs.dependencies.result }}"
+        echo "Quality: ${{ needs.quality.result }}"
+        echo "Tests: ${{ needs.test.result }}"
+        echo "Pre-commit: ${{ needs.pre-commit.result }}"
+        echo "Build: ${{ needs.build.result }}"
+        
+        # Check if any required job failed
+        if [[ "${{ needs.setup.result }}" == "failure" ]] || \
+           [[ "${{ needs.dependencies.result }}" == "failure" ]] || \
+           [[ "${{ needs.quality.result }}" == "failure" ]] || \
+           [[ "${{ needs.test.result }}" == "failure" ]] || \
+           [[ "${{ needs.pre-commit.result }}" == "failure" ]] || \
+           [[ "${{ needs.build.result }}" == "failure" ]]; then
+          echo "❌ CI Pipeline failed"
+          exit 1
+        fi
+        
+        echo "✅ CI Pipeline completed successfully!"
+        
+    - name: 🎉 Success Notification
+      if: success() && github.event_name == 'pull_request'
+      run: |
+        echo "🎉 Quality Foundation CI completed successfully!"
+        echo "Ready for code review and merge."

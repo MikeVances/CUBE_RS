@@ -13,7 +13,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
 
-from core.types import ModbusRequest, ModbusResponse, ModbusFunctionCode, APIResponse
+from core.types import ModbusRequest, ModbusResponse, ModbusFunctionCode, APIResponse, ModbusDevice, ModbusConnectionType, ModbusConnectionInfo
 from modbus.gateway_typed import TypedModbusGateway
 
 
@@ -200,7 +200,8 @@ class TestTypedModbusGatewayUnit:
         assert not gateway.running
         assert gateway.request_counter == 0
         assert gateway.error_counter == 0
-        assert len(gateway.connected_devices) == 0
+        assert gateway.modbus_client is not None
+        assert gateway.connection_pool is not None
 
     @pytest.mark.asyncio
     async def test_database_initialization(self, gateway):
@@ -213,6 +214,19 @@ class TestTypedModbusGatewayUnit:
     @pytest.mark.asyncio  
     async def test_execute_modbus_read_success(self, gateway):
         """Test successful Modbus read execution."""
+        # Register a test device first
+        device_info = ModbusDevice(
+            device_id=1,
+            name="Test Device 1",
+            connection_info=ModbusConnectionInfo(
+                connection_type=ModbusConnectionType.TCP,
+                host="127.0.0.1",
+                port=502,
+                device_address=1
+            )
+        )
+        gateway.modbus_client.register_device(device_info)
+        
         request = ModbusRequest(
             device_id=1,
             function_code=ModbusFunctionCode.READ_HOLDING_REGISTERS,
@@ -220,7 +234,7 @@ class TestTypedModbusGatewayUnit:
             register_count=3
         )
         
-        response = await gateway._execute_modbus_read(request)
+        response = await gateway.modbus_client.execute_request(request)
         
         assert response.success
         assert response.request == request
@@ -233,6 +247,19 @@ class TestTypedModbusGatewayUnit:
     @pytest.mark.asyncio
     async def test_execute_modbus_read_coils(self, gateway):
         """Test reading coils returns boolean values."""
+        # Register a test device first
+        device_info = ModbusDevice(
+            device_id=2,
+            name="Test Device 2",
+            connection_info=ModbusConnectionInfo(
+                connection_type=ModbusConnectionType.TCP,
+                host="127.0.0.1",
+                port=502,
+                device_address=2
+            )
+        )
+        gateway.modbus_client.register_device(device_info)
+        
         request = ModbusRequest(
             device_id=2,
             function_code=ModbusFunctionCode.READ_COILS,
@@ -240,7 +267,7 @@ class TestTypedModbusGatewayUnit:
             register_count=5
         )
         
-        response = await gateway._execute_modbus_read(request)
+        response = await gateway.modbus_client.execute_request(request)
         
         assert response.success
         assert len(response.data) == 5
@@ -250,6 +277,19 @@ class TestTypedModbusGatewayUnit:
     @pytest.mark.asyncio
     async def test_execute_modbus_write_success(self, gateway):
         """Test successful Modbus write execution."""
+        # Register a test device first
+        device_info = ModbusDevice(
+            device_id=1,
+            name="Test Device 1",
+            connection_info=ModbusConnectionInfo(
+                connection_type=ModbusConnectionType.TCP,
+                host="127.0.0.1",
+                port=502,
+                device_address=1
+            )
+        )
+        gateway.modbus_client.register_device(device_info)
+        
         request = ModbusRequest(
             device_id=1,
             function_code=ModbusFunctionCode.WRITE_SINGLE_REGISTER,
@@ -258,7 +298,7 @@ class TestTypedModbusGatewayUnit:
             write_values=[1234]
         )
         
-        response = await gateway._execute_modbus_write(request)
+        response = await gateway.modbus_client.execute_request(request)
         
         assert response.success
         assert response.request == request
@@ -307,6 +347,19 @@ class TestTypedModbusGatewayUnit:
     @pytest.mark.asyncio
     async def test_concurrent_requests(self, gateway):
         """Test concurrent request handling with semaphore."""
+        # Register a test device first
+        device_info = ModbusDevice(
+            device_id=1,
+            name="Test Device 1",
+            connection_info=ModbusConnectionInfo(
+                connection_type=ModbusConnectionType.TCP,
+                host="127.0.0.1",
+                port=502,
+                device_address=1
+            )
+        )
+        gateway.modbus_client.register_device(device_info)
+        
         request = ModbusRequest(
             device_id=1,
             function_code=ModbusFunctionCode.READ_HOLDING_REGISTERS,
@@ -316,7 +369,7 @@ class TestTypedModbusGatewayUnit:
         
         # Start multiple concurrent requests
         tasks = [
-            gateway._execute_modbus_read(request)
+            gateway.modbus_client.execute_request(request)
             for _ in range(10)
         ]
         
@@ -438,6 +491,19 @@ class TestTypedModbusGatewayPerformance:
         """Test response time tracking accuracy."""
         gateway = TypedModbusGateway(db_path=":memory:")
         
+        # Register a test device first
+        device_info = ModbusDevice(
+            device_id=1,
+            name="Test Device 1",
+            connection_info=ModbusConnectionInfo(
+                connection_type=ModbusConnectionType.TCP,
+                host="127.0.0.1",
+                port=502,
+                device_address=1
+            )
+        )
+        gateway.modbus_client.register_device(device_info)
+        
         request = ModbusRequest(
             device_id=1,
             function_code=ModbusFunctionCode.READ_HOLDING_REGISTERS,
@@ -445,7 +511,7 @@ class TestTypedModbusGatewayPerformance:
             register_count=1
         )
         
-        response = await gateway._execute_modbus_read(request)
+        response = await gateway.modbus_client.execute_request(request)
         
         # Response time should be reasonable (< 100ms for simulated operation)
         assert 0 < response.response_time_ms < 100
@@ -465,8 +531,17 @@ class TestTypedModbusGatewayPerformance:
         
         async def execute_requests():
             """Execute multiple concurrent requests."""
+            # Register a test device first
+            device_info = ModbusDevice(
+                device_id=1,
+                host="127.0.0.1",
+                port=502,
+                connection_type=ModbusConnectionType.TCP
+            )
+            gateway.modbus_client.register_device(device_info)
+            
             tasks = [
-                gateway._execute_modbus_read(request)
+                gateway.modbus_client.execute_request(request)
                 for _ in range(20)
             ]
             return await asyncio.gather(*tasks)

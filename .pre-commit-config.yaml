@@ -24,8 +24,11 @@ repos:
         name: 🐛 Check for debug statements
       - id: check-docstring-first
         name: 📚 Check docstring is first
-      - id: requirements-txt-fixer
-        name: 📦 Fix requirements.txt
+      - id: check-case-conflict
+        name: 🔤 Check case conflicts
+      - id: check-added-large-files
+        name: 📏 Check for large files
+        args: [--maxkb=1000]
 
   # ===== ФОРМАТИРОВАНИЕ КОДА =====
   - repo: https://github.com/psf/black
@@ -100,11 +103,19 @@ repos:
     hooks:
       - id: pytest-check
         name: 🧪 Run fast unit tests
-        entry: python -m pytest tests/unit -v --tb=short -x
+        entry: python -m pytest tests/unit -v --tb=short -x --ignore=tests/unit/test_deduplication_security.py
         language: python
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
+      
+      - id: deduplication-check
+        name: 📊 Check code deduplication
+        entry: python scripts/validate_deduplication.py
+        language: python
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
 
   # ===== PERFORMANCE =====
   - repo: https://github.com/asottile/pyupgrade

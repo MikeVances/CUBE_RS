@@ -21,8 +21,12 @@ from core.types import (
     ModbusRequest, ModbusResponse, ModbusDevice, DeviceId, RegisterValue,
     APIResponse, SystemEvent, EventType, PerformanceMetric,
     AsyncDatabaseProtocol, AsyncModbusClientProtocol,
-    ModbusFunctionCode, DatabaseRecord, CubeRSError, ModbusError
+    ModbusFunctionCode, DatabaseRecord, CubeRSError, ModbusError,
+    ModbusConnectionInfo, ModbusConnectionType, ModbusConnectionStatus
 )
+
+# Import our async Modbus client
+from modbus.async_client import AsyncModbusClient, ModbusConnectionPool
 
 # Configure structured logging
 logger = logging.getLogger(__name__)
@@ -41,7 +45,8 @@ class TypedModbusGateway:
         host: str = "0.0.0.0",
         port: int = 5023,
         db_path: str = "kub_data.db",
-        max_concurrent_requests: int = 100
+        max_concurrent_requests: int = 100,
+        connection_pool_size: int = 10
     ) -> None:
         """Initialize the typed Modbus gateway."""
         self.host = host
@@ -55,9 +60,17 @@ class TypedModbusGateway:
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
         
-        # Device management
-        self.connected_devices: Dict[DeviceId, ModbusDevice] = {}
-        self.device_stats: Dict[DeviceId, Dict[str, Any]] = {}
+        # Modbus client with connection pooling
+        self.connection_pool = ModbusConnectionPool(
+            max_connections=connection_pool_size,
+            connection_timeout=5.0,
+            idle_timeout=300.0
+        )
+        self.modbus_client = AsyncModbusClient(
+            connection_pool=self.connection_pool,
+            default_retry_count=3,
+            default_retry_delay=1.0
+        )
         
         # Performance monitoring
         self.request_counter: int = 0
@@ -75,7 +88,8 @@ class TypedModbusGateway:
                 "host": self.host,
                 "port": self.port, 
                 "db_path": str(self.db_path),
-                "max_concurrent": self.max_concurrent_requests
+                "max_concurrent": self.max_concurrent_requests,
+                "connection_pool_size": connection_pool_size
             }
         )
 
@@ -88,6 +102,12 @@ class TypedModbusGateway:
         try:
             # Initialize database
             await self._init_database()
+            
+            # Start Modbus client
+            await self.modbus_client.start()
+            
+            # Register default test devices (for development)
+            await self._register_default_devices()
             
             # Create aiohttp application
             self.app = web.Application()
@@ -137,6 +157,9 @@ class TypedModbusGateway:
         
         self.running = False
         
+        # Stop Modbus client
+        await self.modbus_client.stop()
+        
         # Stop HTTP server
         if self.site:
             await self.site.stop()
@@ -158,8 +181,10 @@ class TypedModbusGateway:
         self.app.router.add_get('/health', self._handle_health_check)
         self.app.router.add_get('/metrics', self._handle_metrics)
         self.app.router.add_get('/devices', self._handle_devices)
+        self.app.router.add_get('/connections', self._handle_connections)
         
         # Administrative endpoints
+        self.app.router.add_post('/devices', self._handle_register_device)
         self.app.router.add_post('/devices/{device_id}/connect', self._handle_device_connect)
         self.app.router.add_delete('/devices/{device_id}', self._handle_device_disconnect)
 
@@ -255,8 +280,8 @@ class TypedModbusGateway:
                 request_data = await request.json()
                 modbus_request = ModbusRequest(**request_data)
                 
-                # Perform read operation
-                response = await self._execute_modbus_read(modbus_request)
+                # Execute request through real Modbus client
+                response = await self.modbus_client.execute_request(modbus_request)
                 
                 # Save to database
                 await self._save_to_database(response)
@@ -302,7 +327,8 @@ class TypedModbusGateway:
                 if modbus_request.function_code not in write_functions:
                     raise ValueError(f"Function code {modbus_request.function_code} is not for write operations")
                 
-                response = await self._execute_modbus_write(modbus_request)
+                # Execute request through real Modbus client
+                response = await self.modbus_client.execute_request(modbus_request)
                 await self._save_to_database(response)
                 
                 api_response = APIResponse.success_response(response.model_dump())
@@ -338,22 +364,45 @@ class TypedModbusGateway:
                 if self.response_times else 0.0
             )
             
+            # Get Modbus client statistics
+            connection_stats = self.modbus_client.get_connection_stats()
+            registered_devices = connection_stats.get("registered_devices", 0)
+            device_health = connection_stats.get("device_health", {})
+            healthy_devices = sum(1 for device_stats in device_health.values() 
+                                 if device_stats.get("is_healthy", False))
+            
+            # Determine overall health status
+            overall_healthy = (
+                db_healthy and 
+                registered_devices > 0 and 
+                healthy_devices / registered_devices >= 0.8 if registered_devices > 0 else True
+            )
+            
             health_data = {
-                "status": "healthy" if db_healthy else "degraded",
+                "status": "healthy" if overall_healthy else "degraded",
                 "timestamp": datetime.now().isoformat(),
                 "uptime_seconds": round(uptime_seconds, 1),
-                "version": "2.0.0-typed",
+                "version": "2.0.0-async-core",
                 "database_healthy": db_healthy,
+                "modbus_client_healthy": healthy_devices / registered_devices if registered_devices > 0 else 1.0,
                 "total_requests": total_requests,
                 "error_count": self.error_counter,
                 "success_rate_percent": round(success_rate, 2),
                 "avg_response_time_ms": round(avg_response_time, 2),
-                "connected_devices": len(self.connected_devices),
+                "registered_devices": registered_devices,
+                "healthy_devices": healthy_devices,
                 "concurrent_limit": self.max_concurrent_requests,
-                "memory_usage_mb": self._get_memory_usage()
+                "memory_usage_mb": self._get_memory_usage(),
+                "connection_pool": {
+                    "active_pools": len(connection_stats.get("pool_stats", {})),
+                    "total_connections": sum(
+                        stats.get("tcp_pool_size", 0) + stats.get("serial_pool_size", 0)
+                        for stats in connection_stats.get("pool_stats", {}).values()
+                    )
+                }
             }
             
-            status_code = 200 if db_healthy else 503
+            status_code = 200 if overall_healthy else 503
             api_response = APIResponse.success_response(health_data)
             return json_response(api_response.model_dump(), status=status_code)
             
@@ -383,7 +432,8 @@ class TypedModbusGateway:
                 metrics.append(f"cube_rs_response_time_p99_ms {sorted_times[p99_idx]:.2f}")
             
             # Device metrics
-            metrics.append(f"cube_rs_connected_devices {len(self.connected_devices)}")
+            device_count = len(self.modbus_client.device_registry.devices) if self.modbus_client else 0
+            metrics.append(f"cube_rs_connected_devices {device_count}")
             
             # System metrics
             uptime = (datetime.now() - self.start_time).total_seconds()
@@ -396,72 +446,6 @@ class TypedModbusGateway:
             logger.error(f"Metrics generation failed: {e}", exc_info=True)
             return web.Response(text="# Metrics unavailable", status=503)
 
-    async def _execute_modbus_read(self, request: ModbusRequest) -> ModbusResponse:
-        """Execute Modbus read operation with proper error handling."""
-        start_time = time.perf_counter()
-        
-        try:
-            # For now, simulate reading with test data
-            # TODO: Replace with real pymodbus async client
-            await asyncio.sleep(0.01)  # Simulate I/O delay
-            
-            # Generate test data based on function code
-            test_data: List[RegisterValue]
-            if request.function_code == ModbusFunctionCode.READ_COILS:
-                # Boolean values for coils
-                test_data = [bool(i % 2) for i in range(request.register_count)]
-            elif request.function_code == ModbusFunctionCode.READ_DISCRETE_INPUTS:
-                # Boolean values for discrete inputs
-                test_data = [bool((i + 1) % 2) for i in range(request.register_count)]
-            else:
-                # Integer values for registers
-                test_data = [42 + i * 10 for i in range(request.register_count)]
-            
-            response_time_ms = (time.perf_counter() - start_time) * 1000
-            
-            return ModbusResponse(
-                request=request,
-                success=True,
-                data=test_data,
-                response_time_ms=response_time_ms
-            )
-            
-        except Exception as e:
-            response_time_ms = (time.perf_counter() - start_time) * 1000
-            logger.error(f"Modbus read failed: {e}", exc_info=True)
-            
-            return ModbusResponse(
-                request=request,
-                success=False,
-                error_message=str(e),
-                response_time_ms=response_time_ms
-            )
-
-    async def _execute_modbus_write(self, request: ModbusRequest) -> ModbusResponse:
-        """Execute Modbus write operation."""
-        start_time = time.perf_counter()
-        
-        try:
-            # TODO: Implement real Modbus writing
-            await asyncio.sleep(0.02)  # Simulate write delay
-            
-            response_time_ms = (time.perf_counter() - start_time) * 1000
-            
-            return ModbusResponse(
-                request=request,
-                success=True,
-                response_time_ms=response_time_ms
-            )
-            
-        except Exception as e:
-            response_time_ms = (time.perf_counter() - start_time) * 1000
-            
-            return ModbusResponse(
-                request=request,
-                success=False,
-                error_message=str(e),
-                response_time_ms=response_time_ms
-            )
 
     async def _save_to_database(self, response: ModbusResponse) -> None:
         """Save Modbus response to database with proper async handling."""
@@ -547,21 +531,100 @@ class TypedModbusGateway:
         except ImportError:
             return 0.0
 
-    # Placeholder methods for device management
+    async def _register_default_devices(self) -> None:
+        """Register default test devices for development."""
+        # TCP device
+        tcp_device = ModbusDevice(
+            device_id=1,
+            name="Test TCP Device",
+            connection_info=ModbusConnectionInfo(
+                connection_type=ModbusConnectionType.TCP,
+                host="127.0.0.1",
+                port=5020,  # Default Modbus TCP port for testing
+                device_address=1,
+                timeout=3.0,
+                retry_count=3
+            ),
+            description="Default TCP test device for development"
+        )
+        
+        # RTU device (if needed for testing)
+        rtu_device = ModbusDevice(
+            device_id=2,
+            name="Test RTU Device", 
+            connection_info=ModbusConnectionInfo(
+                connection_type=ModbusConnectionType.RTU,
+                host="/dev/ttyUSB0",  # Serial port
+                device_address=1,
+                timeout=3.0,
+                retry_count=2
+            ),
+            description="Default RTU test device for development"
+        )
+        
+        # Register devices
+        self.modbus_client.register_device(tcp_device)
+        # Only register RTU device if serial port exists
+        import os
+        if os.path.exists("/dev/ttyUSB0"):
+            self.modbus_client.register_device(rtu_device)
+        
+        logger.info("🔧 Registered default test devices")
+
     async def _handle_devices(self, request: Request) -> Response:
-        """List connected devices."""
-        devices_data = [
-            {
-                "device_id": device.device_id,
-                "name": device.name,
-                "enabled": device.enabled,
-                "stats": self.device_stats.get(device.device_id, {})
-            }
-            for device in self.connected_devices.values()
-        ]
+        """List registered devices with their status."""
+        connection_stats = self.modbus_client.get_connection_stats()
+        devices_data = connection_stats.get("device_health", {})
         
         api_response = APIResponse.success_response(devices_data)
         return json_response(api_response.model_dump())
+    
+    async def _handle_connections(self, request: Request) -> Response:
+        """Get connection pool statistics."""
+        connection_stats = self.modbus_client.get_connection_stats()
+        pool_stats = connection_stats.get("pool_stats", {})
+        
+        api_response = APIResponse.success_response(pool_stats)
+        return json_response(api_response.model_dump())
+    
+    async def _handle_register_device(self, request: Request) -> Response:
+        """Register a new Modbus device."""
+        try:
+            device_data = await request.json()
+            
+            # Create connection info
+            connection_info = ModbusConnectionInfo(
+                connection_type=ModbusConnectionType(device_data["connection_type"]),
+                host=device_data["host"],
+                port=device_data.get("port", 502),
+                device_address=device_data.get("device_address", 1),
+                timeout=device_data.get("timeout", 5.0),
+                retry_count=device_data.get("retry_count", 3)
+            )
+            
+            # Create device
+            device = ModbusDevice(
+                device_id=device_data["device_id"],
+                name=device_data["name"],
+                connection_info=connection_info,
+                description=device_data.get("description", ""),
+                enabled=device_data.get("enabled", True)
+            )
+            
+            # Register device
+            self.modbus_client.register_device(device)
+            
+            api_response = APIResponse.success_response({
+                "device_id": device.device_id,
+                "name": device.name,
+                "status": "registered"
+            })
+            return json_response(api_response.model_dump(), status=201)
+            
+        except Exception as e:
+            logger.error(f"Failed to register device: {e}", exc_info=True)
+            error_response = APIResponse.error_response(f"Registration failed: {e}")
+            return json_response(error_response.model_dump(), status=400)
 
     async def _handle_device_connect(self, request: Request) -> Response:
         """Connect to a device."""

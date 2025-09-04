@@ -21,7 +21,7 @@ rs485:
 
 # Настройки Modbus TCP сервера
 modbus_tcp:
-  port: 5023
+  port: 5024
   timeout: 3.0
   max_connections: 10
 

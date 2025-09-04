@@ -31,6 +31,22 @@ class ModbusFunctionCode(IntEnum):
     WRITE_MULTIPLE_REGISTERS = 16
 
 
+class ModbusConnectionType(IntEnum):
+    """Modbus connection types."""
+    TCP = 1
+    RTU = 2
+    ASCII = 3
+
+
+class ModbusConnectionStatus(IntEnum):
+    """Connection status for Modbus devices."""
+    DISCONNECTED = 0
+    CONNECTING = 1
+    CONNECTED = 2
+    ERROR = 3
+    TIMEOUT = 4
+
+
 class ModbusDataType(IntEnum):
     """Modbus data types for register interpretation."""
     INT16 = 1
@@ -47,23 +63,59 @@ RegisterValue = Union[int, float, bool]  # Type alias for register values
 
 
 @dataclass(frozen=True)
+class ModbusConnectionInfo:
+    """Modbus connection configuration."""
+    connection_type: ModbusConnectionType
+    host: str = "localhost"
+    port: int = 502
+    device_address: int = 1  # Slave address
+    timeout: float = 5.0
+    retry_count: int = 3
+    
+    def __post_init__(self) -> None:
+        """Validate connection configuration."""
+        if self.connection_type == ModbusConnectionType.TCP and self.port <= 0:
+            raise ValueError("TCP port must be positive")
+        if not (1 <= self.device_address <= 255):
+            raise ValueError(f"Device address must be 1-255, got {self.device_address}")
+        if self.timeout <= 0:
+            raise ValueError("Timeout must be positive")
+
+
+@dataclass
 class ModbusDevice:
-    """Immutable Modbus device configuration."""
+    """Modbus device with connection management."""
     device_id: DeviceId
     name: str
+    connection_info: ModbusConnectionInfo
     description: Optional[str] = None
     enabled: bool = True
-    timeout_ms: int = 5000
-    retry_count: int = 3
+    status: ModbusConnectionStatus = ModbusConnectionStatus.DISCONNECTED
+    last_success: Optional[datetime] = None
+    last_error: Optional[str] = None
+    total_requests: int = 0
+    successful_requests: int = 0
     
     def __post_init__(self) -> None:
         """Validate device configuration."""
         if not (1 <= self.device_id <= 255):
             raise ValueError(f"Device ID must be 1-255, got {self.device_id}")
-        if self.timeout_ms <= 0:
-            raise ValueError("Timeout must be positive")
-        if self.retry_count < 0:
-            raise ValueError("Retry count cannot be negative")
+    
+    @property
+    def success_rate(self) -> float:
+        """Calculate success rate percentage."""
+        if self.total_requests == 0:
+            return 0.0
+        return (self.successful_requests / self.total_requests) * 100
+    
+    @property
+    def is_healthy(self) -> bool:
+        """Check if device is considered healthy."""
+        return (
+            self.enabled and 
+            self.status == ModbusConnectionStatus.CONNECTED and
+            self.success_rate > 80.0
+        )
 
 
 class ModbusRequest(BaseModel):

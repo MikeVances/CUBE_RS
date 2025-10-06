@@ -1,0 +1,43 @@
+{
+  "gateway": {
+    "name": "StienenGateway",
+    "rs485_port": "/dev/ttyUSB0",
+    "rs485_baudrate": 38400,
+    "polling_interval": 5.0,
+    "identification_timeout": 30.0,
+    "max_retries": 3,
+    "scada_export_interval": 1.0,
+    "keep_alive_interval": 30.0
+  },
+  "devices": [
+    {
+      "address": 1,
+      "name": "ClimateController_01",
+      "hardware": 1001,
+      "version": 1,
+      "enabled": true
+    }
+  ],
+  "scada": {
+    "rest_api_url": null,
+    "rest_auth_token": null,
+    "xml_export_path": "./exports/stienen_data.xml",
+    "csv_export_path": "./exports/stienen_data.csv",
+    "mqtt_broker_host": null,
+    "mqtt_broker_port": 1883,
+    "mqtt_username": null,
+    "mqtt_password": null,
+    "export_interval": 1.0,
+    "only_changed_values": true
+  },
+  "variables": {
+    "config_file": "./config/variables.json",
+    "auto_discovery": true
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "./logs/gateway.log",
+    "max_size_mb": 10,
+    "backup_count": 5
+  }
+}

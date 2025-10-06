@@ -44,7 +44,7 @@ python dashboard/app.py
 #### Терминал 4: Telegram Bot
 ```bash
 cd CUBE_RS
-python telegram_bot/run_bot.py
+python telegram_bot/async_bot_main.py
 ```
 
 #### Терминал 5: WebSocket Server

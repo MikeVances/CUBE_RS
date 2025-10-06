@@ -1,0 +1,95 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Data and temporary files
+*.db
+*.db-shm
+*.db-wal
+cache/
+tmp/
+temp/
+
+# Configuration secrets
+config/secrets/
+.env.local
+.env.production
+
+# Flask instance folder
+instance/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# Testing
+.pytest_cache/
+.tox/
+
+# Frontend build files (if any)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+
+# Mobile development
+mobile/android/.gradle
+mobile/android/app/build/
+mobile/ios/build/
+mobile/ios/Pods/
+
+# SSL Certificates
+ssl/
+*.pem
+*.key
+*.crt

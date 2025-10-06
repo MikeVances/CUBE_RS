@@ -1,0 +1,35 @@
+[Unit]
+Description=CUBE EDGE System Monitor
+After=cube-edge.service
+PartOf=cube-edge.service
+
+[Service]
+Type=simple
+User=cube_edge
+Group=cube_edge
+WorkingDirectory=/opt/cube_edge
+
+# Скрипт мониторинга, который проверяет состояние основного сервиса
+ExecStart=/opt/cube_edge/scripts/monitor.sh
+
+# Автоматический перезапуск
+Restart=always
+RestartSec=30
+
+# Ограничения ресурсов
+MemoryLimit=128M
+CPUQuota=10%
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cube-edge-monitor
+
+# Безопасность
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cube_edge /var/log/cube_edge
+
+[Install]
+WantedBy=multi-user.target

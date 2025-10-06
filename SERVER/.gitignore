@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+auth.db
+demo_auth.db
+tunnel_broker.db
+
+# Configuration secrets
+config/secrets/
+.env.local
+.env.production
+
+# SSL Certificates
+nginx/ssl/
+*.pem
+*.key
+*.crt
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# Testing
+.pytest_cache/
+.tox/
+
+# Docker volumes
+docker-data/
+
+# Backup files
+*.backup

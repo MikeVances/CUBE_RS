@@ -1,0 +1,282 @@
+{
+  "types": [
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 1,
+      "name": "Temperature",
+      "type": 4,
+      "mul": 1,
+      "div": 10,
+      "step": 0.1,
+      "min": -500,
+      "max": 1500,
+      "text": null,
+      "acknowledge_change": false
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 2,
+      "name": "Humidity",
+      "type": 2,
+      "mul": 1,
+      "div": 10,
+      "step": 0.1,
+      "min": 0,
+      "max": 1000,
+      "text": null,
+      "acknowledge_change": false
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 3,
+      "name": "Boolean",
+      "type": 0,
+      "mul": 1,
+      "div": 1,
+      "step": 1.0,
+      "min": 0,
+      "max": 1,
+      "text": null,
+      "acknowledge_change": false
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 4,
+      "name": "Percentage",
+      "type": 2,
+      "mul": 1,
+      "div": 10,
+      "step": 0.1,
+      "min": 0,
+      "max": 1000,
+      "text": null,
+      "acknowledge_change": false
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 5,
+      "name": "Pressure",
+      "type": 4,
+      "mul": 1,
+      "div": 100,
+      "step": 0.01,
+      "min": 0,
+      "max": 1000,
+      "text": null,
+      "acknowledge_change": false
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 6,
+      "name": "FlowRate",
+      "type": 4,
+      "mul": 1,
+      "div": 10,
+      "step": 0.1,
+      "min": 0,
+      "max": 10000,
+      "text": null,
+      "acknowledge_change": false
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 7,
+      "name": "Consumption",
+      "type": 3,
+      "mul": 1,
+      "div": 100,
+      "step": 0.01,
+      "min": 0,
+      "max": 999999,
+      "text": null,
+      "acknowledge_change": false
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 8,
+      "name": "SystemStatus",
+      "type": 2,
+      "mul": 1,
+      "div": 1,
+      "step": 1.0,
+      "min": 0,
+      "max": 65535,
+      "text": null,
+      "acknowledge_change": false
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 9,
+      "name": "DeviceName",
+      "type": 5,
+      "mul": 1,
+      "div": 1,
+      "step": 1.0,
+      "min": 0,
+      "max": 255,
+      "text": null,
+      "acknowledge_change": false
+    }
+  ],
+  "references": [
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 1,
+      "index": 0,
+      "length": 4,
+      "name": "AirTemperature",
+      "type_id": 1,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 2,
+      "index": 4,
+      "length": 4,
+      "name": "TargetTemperature",
+      "type_id": 1,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 3,
+      "index": 8,
+      "length": 2,
+      "name": "Humidity",
+      "type_id": 2,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 4,
+      "index": 10,
+      "length": 1,
+      "name": "FanEnabled",
+      "type_id": 3,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 5,
+      "index": 11,
+      "length": 1,
+      "name": "HeaterEnabled",
+      "type_id": 3,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 6,
+      "index": 12,
+      "length": 2,
+      "name": "FeedLevel",
+      "type_id": 4,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 7,
+      "index": 14,
+      "length": 1,
+      "name": "MotorRunning",
+      "type_id": 3,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 8,
+      "index": 15,
+      "length": 4,
+      "name": "DailyConsumption",
+      "type_id": 7,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 9,
+      "index": 19,
+      "length": 2,
+      "name": "WaterLevel",
+      "type_id": 4,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 10,
+      "index": 21,
+      "length": 1,
+      "name": "PumpStatus",
+      "type_id": 3,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 11,
+      "index": 22,
+      "length": 4,
+      "name": "Pressure",
+      "type_id": 5,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 12,
+      "index": 26,
+      "length": 4,
+      "name": "FlowRate",
+      "type_id": 6,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 13,
+      "index": 30,
+      "length": 2,
+      "name": "SystemStatus",
+      "type_id": 8,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 14,
+      "index": 32,
+      "length": 2,
+      "name": "ErrorCode",
+      "type_id": 8,
+      "defop": null
+    },
+    {
+      "hardware": 1001,
+      "version": 1,
+      "id": 15,
+      "index": 34,
+      "length": 16,
+      "name": "DeviceName",
+      "type_id": 9,
+      "defop": null
+    }
+  ]
+} 

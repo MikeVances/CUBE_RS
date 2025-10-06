@@ -1,0 +1,36 @@
+FROM python:3.11-slim
+
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Создание пользователя
+RUN useradd -m -u 1000 webapp && \
+    mkdir -p /app/logs && \
+    chown -R webapp:webapp /app
+
+# Рабочая директория
+WORKDIR /app
+
+# Копирование requirements и установка зависимостей
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копирование кода
+COPY mobile_app.py .
+COPY tunnel_system/ ./tunnel_system/
+COPY --chown=webapp:webapp . .
+
+# Переключение на unprivileged пользователя
+USER webapp
+
+# Порт
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+# Команда запуска
+CMD ["python3", "mobile_app.py", "--host", "0.0.0.0", "--port", "5000", "--broker", "http://tunnel-broker:8080"]

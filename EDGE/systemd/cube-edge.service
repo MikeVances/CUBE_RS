@@ -1,0 +1,54 @@
+[Unit]
+Description=CUBE RS EDGE Industrial IoT Gateway
+Documentation=https://github.com/your-org/CUBE_RS
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cube_edge
+Group=cube_edge
+WorkingDirectory=/opt/cube_edge
+ExecStart=/opt/cube_edge/venv/bin/python /opt/cube_edge/production_start.py
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Автоматический перезапуск
+Restart=always
+RestartSec=10
+
+# Ограничения ресурсов
+MemoryLimit=512M
+CPUQuota=50%
+
+# Переменные окружения для production
+Environment=CUBE_MASTER_PASSWORD_FILE=/etc/cube_edge/master_password
+Environment=EDGE_OFFLINE_MODE=false
+Environment=ENVIRONMENT=production
+Environment=PYTHONPATH=/opt/cube_edge
+
+# Файлы логов
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cube-edge
+
+# Безопасность
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cube_edge /var/log/cube_edge /tmp
+
+# Дополнительные ограничения безопасности
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Сетевые ограничения (можно настроить под конкретные нужды)
+# IPAddressDeny=any
+# IPAddressAllow=localhost
+# IPAddressAllow=192.168.0.0/16
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+[Unit]
+Description=EDGE Web Application
+After=network.target tunnel-broker.service
+Wants=network-online.target
+Requires=tunnel-broker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=webapp
+Group=webapp
+WorkingDirectory=/opt/edge-server
+ExecStart=/usr/bin/python3 mobile_app.py --host 0.0.0.0 --port 5000 --broker http://localhost:8080
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=30
+RestartSec=5
+Restart=always
+
+# Environment
+Environment=WEBAPP_HOST=0.0.0.0
+Environment=WEBAPP_PORT=5000
+Environment=BROKER_URL=http://localhost:8080
+Environment=SECRET_KEY=change-me-in-production
+Environment=LOG_LEVEL=INFO
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/edge-server/logs
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=web-app
+
+[Install]
+WantedBy=multi-user.target

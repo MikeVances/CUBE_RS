@@ -1,0 +1,121 @@
+{
+  "gateway": {
+    "name": "Production_Stienen_Gateway",
+    "rs485_port": "/dev/ttyUSB0",
+    "rs485_baudrate": 38400,
+    "polling_interval": 5.0,
+    "identification_timeout": 30.0,
+    "max_retries": 3,
+    "scada_export_interval": 1.0,
+    "keep_alive_interval": 30.0
+  },
+  "devices": [
+    {
+      "address": 1,
+      "name": "Climate_Controller_Building_A",
+      "hardware": 1001,
+      "version": 1,
+      "enabled": true,
+      "description": "Основной климат-контроллер здания A",
+      "location": "Building A, Room 101",
+      "variables": [
+        "AirTemperature",
+        "TargetTemperature", 
+        "Humidity",
+        "FanEnabled",
+        "HeaterEnabled"
+      ]
+    },
+    {
+      "address": 2,
+      "name": "Feed_Controller_Section_1",
+      "hardware": 1001,
+      "version": 1,
+      "enabled": true,
+      "description": "Контроллер кормления секция 1",
+      "location": "Section 1, Feed Tower",
+      "variables": [
+        "FeedLevel",
+        "MotorRunning",
+        "DailyConsumption",
+        "LastFeedTime"
+      ]
+    },
+    {
+      "address": 3,
+      "name": "Water_Controller_Main",
+      "hardware": 1001,
+      "version": 1,
+      "enabled": true,
+      "description": "Основной контроллер водоснабжения",
+      "location": "Water Plant, Main Building",
+      "variables": [
+        "WaterLevel",
+        "PumpStatus",
+        "Pressure",
+        "FlowRate"
+      ]
+    }
+  ],
+  "scada": {
+    "rest_api_url": "https://scada.company.com/api/v1",
+    "rest_auth_token": "Bearer your_api_token_here",
+    "xml_export_path": "./exports/stienen_data.xml",
+    "csv_export_path": "./exports/stienen_data.csv",
+    "mqtt_broker_host": "mqtt.company.com",
+    "mqtt_broker_port": 1883,
+    "mqtt_username": "stienen_gateway",
+    "mqtt_password": "secure_mqtt_password",
+    "mqtt_topic_prefix": "stienen",
+    "export_interval": 1.0,
+    "only_changed_values": true,
+    "batch_size": 100,
+    "timeout_seconds": 30
+  },
+  "variables": {
+    "config_file": "./config/variables.json",
+    "auto_discovery": true,
+    "cache_enabled": true,
+    "cache_ttl_seconds": 300
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "./logs/gateway.log",
+    "max_size_mb": 10,
+    "backup_count": 5,
+    "console_output": true,
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "date_format": "%Y-%m-%d %H:%M:%S"
+  },
+  "monitoring": {
+    "enabled": true,
+    "prometheus_port": 9090,
+    "health_check_interval": 30,
+    "performance_profiling": false,
+    "metrics": {
+      "packet_counters": true,
+      "device_status": true,
+      "response_times": true,
+      "error_rates": true
+    }
+  },
+  "security": {
+    "api_key_required": false,
+    "jwt_secret": "your_jwt_secret_key_here",
+    "allowed_origins": ["*"],
+    "rate_limiting": {
+      "enabled": true,
+      "requests_per_minute": 60
+    }
+  },
+  "database": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 5432,
+    "database": "stienen",
+    "username": "stienen",
+    "password": "secure_password",
+    "pool_size": 10,
+    "max_overflow": 20
+  }
+}

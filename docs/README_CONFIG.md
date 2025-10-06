@@ -153,7 +153,7 @@ python tools/start_all_services.py
 python -m modbus.gateway
 
 # Telegram Bot с централизованной конфигурацией  
-python telegram_bot/run_bot.py
+python telegram_bot/async_bot_main.py
 
 # Dashboard на настроенном порту
 streamlit run dashboard/app.py --server.port 8501

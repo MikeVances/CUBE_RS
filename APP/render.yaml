@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: cube-rs-mobile-app
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn backend.app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120 --chdir backend
+    plan: free
+    envVars:
+      - key: GATEWAY_URL
+        value: https://your-edge-device.com:8000  # Замените на реальный URL вашего EDGE
+      - key: API_KEY
+        value: your-edge-api-key  # Замените на реальный API ключ EDGE
+      - key: API_SECRET
+        generateValue: true  # Render создаст случайный секрет
+      - key: SECRET_KEY
+        generateValue: true  # Render создаст случайный Flask секрет
+      - key: DEBUG
+        value: "false"
+      - key: TAILSCALE_ENABLED
+        value: "false"  # По умолчанию выключен
+      - key: TAILSCALE_TAILNET
+        value: "your-tailnet.ts.net"  # Замените на ваш tailnet
+      - key: TAILSCALE_API_KEY
+        value: "tskey-api-xxxxxxxx"  # Замените на ваш Tailscale API key

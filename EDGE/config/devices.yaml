@@ -1,0 +1,15 @@
+devices:
+- description: Система вентиляции и климат-контроля
+  device_id: 1
+  device_type: KUB-1063
+  enabled: true
+  location: Корпус №1
+  name: Корпус 1 - Вентиляция
+  slave_id: 1
+- description: Система обогрева для тестирования
+  device_id: 2
+  device_type: KUB-1112
+  enabled: true
+  location: Тестовая зона
+  name: Тестовый КУБ-1112 Обогрев
+  slave_id: 2

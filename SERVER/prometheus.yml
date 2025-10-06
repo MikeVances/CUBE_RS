@@ -1,0 +1,54 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'cube-rs'
+    environment: 'development'
+
+rule_files:
+  # Add alerting rules here
+  # - "alert_rules.yml"
+
+scrape_configs:
+  # Modbus Gateway metrics
+  - job_name: 'modbus-gateway'
+    static_configs:
+      - targets: ['modbus-gateway:5023']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    
+  # API Gateway metrics
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    
+  # System metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['host.docker.internal:9100']
+    scrape_interval: 15s
+    
+  # Health checks
+  - job_name: 'health-checks'
+    static_configs:
+      - targets: 
+        - 'modbus-gateway:5023'
+        - 'api-gateway:8000'
+        - 'web-dashboard:8501'
+    metrics_path: '/health/detailed'
+    scrape_interval: 30s
+    
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+# Alerting configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # Add alertmanager if needed
+          # - alertmanager:9093

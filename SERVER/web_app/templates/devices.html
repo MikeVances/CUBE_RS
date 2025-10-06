@@ -1,0 +1,540 @@
+{% extends "base.html" %}
+
+{% block title %}Управление устройствами{% endblock %}
+
+{% block content %}
+<!-- Device Registry Header -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h5 class="card-title mb-1">
+                            <i class="fas fa-desktop me-2"></i>
+                            Реестр устройств
+                        </h5>
+                        <p class="text-muted mb-0">Управление зарегистрированными устройствами CUBE_RS</p>
+                    </div>
+                    <div>
+                        <button class="btn btn-outline-primary me-2" onclick="refreshDevices()">
+                            <i class="fas fa-sync-alt me-1"></i>
+                            Обновить
+                        </button>
+                        <button class="btn btn-primary" onclick="showRegisterDeviceModal()">
+                            <i class="fas fa-plus me-1"></i>
+                            Зарегистрировать устройство
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Device Statistics -->
+<div class="row mb-4">
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card metric-card h-100">
+            <div class="card-body text-center">
+                <div class="metric-value text-primary" id="totalDevicesCount">--</div>
+                <div class="metric-label">Всего устройств</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card metric-card h-100">
+            <div class="card-body text-center">
+                <div class="metric-value text-success" id="activeDevicesCount">--</div>
+                <div class="metric-label">Активные</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card metric-card h-100">
+            <div class="card-body text-center">
+                <div class="metric-value text-warning" id="pendingDevicesCount">--</div>
+                <div class="metric-label">Ожидание</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card metric-card h-100">
+            <div class="card-body text-center">
+                <div class="metric-value text-info" id="farmDevicesCount">--</div>
+                <div class="metric-label">Фермы</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Device Filter -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="row align-items-end">
+                    <div class="col-md-3">
+                        <label for="statusFilter" class="form-label">Статус</label>
+                        <select class="form-select" id="statusFilter" onchange="filterDevices()">
+                            <option value="">Все статусы</option>
+                            <option value="active">Активные</option>
+                            <option value="pending">Ожидание</option>
+                            <option value="inactive">Неактивные</option>
+                            <option value="revoked">Отозванные</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="typeFilter" class="form-label">Тип устройства</label>
+                        <select class="form-select" id="typeFilter" onchange="filterDevices()">
+                            <option value="">Все типы</option>
+                            <option value="farm">Ферма</option>
+                            <option value="mobile">Мобильное</option>
+                            <option value="gateway">Шлюз</option>
+                            <option value="edge">EDGE</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label for="searchFilter" class="form-label">Поиск</label>
+                        <input type="text" class="form-control" id="searchFilter" placeholder="Имя хоста, IP..." onkeyup="filterDevices()">
+                    </div>
+                    <div class="col-md-2">
+                        <button class="btn btn-outline-secondary w-100" onclick="clearFilters()">
+                            <i class="fas fa-times me-1"></i>
+                            Очистить
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Devices List -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <h6 class="card-title">Зарегистрированные устройства</h6>
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Устройство</th>
+                                <th>Тип</th>
+                                <th>Статус</th>
+                                <th>IP адрес</th>
+                                <th>Регистрация</th>
+                                <th>Последний визит</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody id="devicesTableBody">
+                            <tr>
+                                <td colspan="7" class="text-center">
+                                    <div class="spinner-border text-primary" role="status">
+                                        <span class="visually-hidden">Загрузка...</span>
+                                    </div>
+                                    <p class="mt-2 mb-0">Загрузка устройств...</p>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Register Device Modal -->
+<div class="modal fade" id="registerDeviceModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-plus me-2"></i>
+                    Регистрация устройства
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="registerDeviceForm">
+                    <div class="mb-3">
+                        <label for="deviceHostname" class="form-label">Имя хоста</label>
+                        <input type="text" class="form-control" id="deviceHostname" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="tailscaleIP" class="form-label">Tailscale IP</label>
+                        <input type="text" class="form-control" id="tailscaleIP" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="deviceType" class="form-label">Тип устройства</label>
+                        <select class="form-select" id="deviceType" required>
+                            <option value="">Выберите тип</option>
+                            <option value="farm">Ферма КУБ-1063</option>
+                            <option value="mobile">Мобильное приложение</option>
+                            <option value="gateway">Шлюз</option>
+                            <option value="edge">EDGE устройство</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="authKey" class="form-label">Ключ авторизации</label>
+                        <input type="text" class="form-control" id="authKey" required>
+                        <small class="form-text text-muted">Используйте ключ, созданный в Tailscale</small>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                <button type="button" class="btn btn-primary" onclick="registerDevice()">
+                    <i class="fas fa-plus me-1"></i>
+                    Зарегистрировать
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Device Details Modal -->
+<div class="modal fade" id="deviceDetailsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-info-circle me-2"></i>
+                    <span id="deviceDetailsTitle">Детали устройства</span>
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="deviceDetailsContent">
+                <!-- Content will be loaded dynamically -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+                <button type="button" class="btn btn-danger" id="revokeDeviceBtn" onclick="revokeDevice()" style="display: none;">
+                    <i class="fas fa-ban me-1"></i>
+                    Отозвать
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    let devicesData = [];
+    let filteredDevices = [];
+    let currentDeviceId = null;
+    
+    // Инициализация при загрузке страницы
+    document.addEventListener('DOMContentLoaded', function() {
+        loadDevices();
+    });
+    
+    // Загрузка списка устройств
+    async function loadDevices() {
+        try {
+            const response = await fetch('/api/devices');
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                devicesData = result.devices;
+                filteredDevices = [...devicesData];
+                renderDevices();
+                updateStatistics();
+            } else {
+                showError('Ошибка загрузки устройств: ' + result.message);
+            }
+        } catch (error) {
+            console.error('Ошибка загрузки устройств:', error);
+            showError('Ошибка подключения к серверу');
+        }
+    }
+    
+    // Обновление списка устройств
+    async function refreshDevices() {
+        await loadDevices();
+        showNotification('Список устройств обновлен', 'success');
+    }
+    
+    // Отображение устройств
+    function renderDevices() {
+        const tbody = document.getElementById('devicesTableBody');
+        
+        if (!filteredDevices.length) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="7" class="text-center text-muted">
+                        ${devicesData.length ? 'Нет устройств, соответствующих фильтру' : 'Нет зарегистрированных устройств'}
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+        
+        tbody.innerHTML = filteredDevices.map(device => `
+            <tr>
+                <td>
+                    <div>
+                        <strong>${device.hostname}</strong>
+                        <br>
+                        <small class="text-muted">${device.device_id}</small>
+                    </div>
+                </td>
+                <td>
+                    <span class="badge bg-secondary">${getDeviceTypeLabel(device.device_type)}</span>
+                </td>
+                <td>
+                    <span class="badge ${getStatusBadgeClass(device.status)}">${getStatusLabel(device.status)}</span>
+                </td>
+                <td>
+                    <code>${device.tailscale_ip}</code>
+                </td>
+                <td>
+                    <small>${formatTime(device.registration_time)}</small>
+                </td>
+                <td>
+                    <small>${formatTime(device.last_seen)}</small>
+                </td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary" onclick="showDeviceDetails('${device.device_id}')">
+                        <i class="fas fa-info-circle"></i>
+                    </button>
+                    ${device.status !== 'revoked' ? `
+                        <button class="btn btn-sm btn-outline-danger" onclick="confirmRevokeDevice('${device.device_id}')">
+                            <i class="fas fa-ban"></i>
+                        </button>
+                    ` : ''}
+                </td>
+            </tr>
+        `).join('');
+    }
+    
+    // Фильтрация устройств
+    function filterDevices() {
+        const statusFilter = document.getElementById('statusFilter').value;
+        const typeFilter = document.getElementById('typeFilter').value;
+        const searchFilter = document.getElementById('searchFilter').value.toLowerCase();
+        
+        filteredDevices = devicesData.filter(device => {
+            const statusMatch = !statusFilter || device.status === statusFilter;
+            const typeMatch = !typeFilter || device.device_type === typeFilter;
+            const searchMatch = !searchFilter || 
+                device.hostname.toLowerCase().includes(searchFilter) ||
+                device.tailscale_ip.includes(searchFilter) ||
+                device.device_id.toLowerCase().includes(searchFilter);
+            
+            return statusMatch && typeMatch && searchMatch;
+        });
+        
+        renderDevices();
+    }
+    
+    // Очистка фильтров
+    function clearFilters() {
+        document.getElementById('statusFilter').value = '';
+        document.getElementById('typeFilter').value = '';
+        document.getElementById('searchFilter').value = '';
+        filteredDevices = [...devicesData];
+        renderDevices();
+    }
+    
+    // Обновление статистики
+    function updateStatistics() {
+        const stats = {
+            total: devicesData.length,
+            active: devicesData.filter(d => d.status === 'active').length,
+            pending: devicesData.filter(d => d.status === 'pending').length,
+            farms: devicesData.filter(d => d.device_type === 'farm').length
+        };
+        
+        document.getElementById('totalDevicesCount').textContent = stats.total;
+        document.getElementById('activeDevicesCount').textContent = stats.active;
+        document.getElementById('pendingDevicesCount').textContent = stats.pending;
+        document.getElementById('farmDevicesCount').textContent = stats.farms;
+    }
+    
+    // Показ модала регистрации устройства
+    function showRegisterDeviceModal() {
+        const modal = new bootstrap.Modal(document.getElementById('registerDeviceModal'));
+        document.getElementById('registerDeviceForm').reset();
+        modal.show();
+    }
+    
+    // Регистрация устройства
+    async function registerDevice() {
+        const hostname = document.getElementById('deviceHostname').value;
+        const tailscaleIP = document.getElementById('tailscaleIP').value;
+        const deviceType = document.getElementById('deviceType').value;
+        const authKey = document.getElementById('authKey').value;
+        
+        if (!hostname || !tailscaleIP || !deviceType || !authKey) {
+            showNotification('Заполните все поля', 'warning');
+            return;
+        }
+        
+        try {
+            const response = await fetch('/api/devices/register', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    hostname: hostname,
+                    tailscale_ip: tailscaleIP,
+                    device_type: deviceType,
+                    auth_key: authKey
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                showNotification('Устройство зарегистрировано', 'success');
+                bootstrap.Modal.getInstance(document.getElementById('registerDeviceModal')).hide();
+                await loadDevices();
+            } else {
+                showNotification(result.message, 'danger');
+            }
+        } catch (error) {
+            console.error('Ошибка регистрации:', error);
+            showNotification('Ошибка регистрации устройства', 'danger');
+        }
+    }
+    
+    // Показ деталей устройства
+    async function showDeviceDetails(deviceId) {
+        const device = devicesData.find(d => d.device_id === deviceId);
+        if (!device) return;
+        
+        currentDeviceId = deviceId;
+        
+        const modal = new bootstrap.Modal(document.getElementById('deviceDetailsModal'));
+        const title = document.getElementById('deviceDetailsTitle');
+        const content = document.getElementById('deviceDetailsContent');
+        const revokeBtn = document.getElementById('revokeDeviceBtn');
+        
+        title.textContent = `${device.hostname} - Детали`;
+        revokeBtn.style.display = device.status !== 'revoked' ? 'inline-block' : 'none';
+        
+        content.innerHTML = `
+            <div class="row">
+                <div class="col-md-6">
+                    <h6>Основная информация</h6>
+                    <table class="table table-sm">
+                        <tr><th>ID устройства:</th><td><code>${device.device_id}</code></td></tr>
+                        <tr><th>Имя хоста:</th><td>${device.hostname}</td></tr>
+                        <tr><th>Tailscale IP:</th><td><code>${device.tailscale_ip}</code></td></tr>
+                        <tr><th>Тип устройства:</th><td><span class="badge bg-secondary">${getDeviceTypeLabel(device.device_type)}</span></td></tr>
+                        <tr><th>Статус:</th><td><span class="badge ${getStatusBadgeClass(device.status)}">${getStatusLabel(device.status)}</span></td></tr>
+                    </table>
+                </div>
+                <div class="col-md-6">
+                    <h6>Временные данные</h6>
+                    <table class="table table-sm">
+                        <tr><th>Регистрация:</th><td>${formatTime(device.registration_time)}</td></tr>
+                        <tr><th>Последний визит:</th><td>${formatTime(device.last_seen)}</td></tr>
+                        <tr><th>Хэш ключа:</th><td><code>${device.auth_key_hash.substring(0, 16)}...</code></td></tr>
+                    </table>
+                </div>
+            </div>
+        `;
+        
+        modal.show();
+    }
+    
+    // Подтверждение отзыва устройства
+    function confirmRevokeDevice(deviceId) {
+        if (confirm('Вы уверены, что хотите отозвать регистрацию этого устройства?')) {
+            revokeDevice(deviceId);
+        }
+    }
+    
+    // Отзыв устройства
+    async function revokeDevice(deviceId = null) {
+        const id = deviceId || currentDeviceId;
+        if (!id) return;
+        
+        try {
+            const response = await fetch(`/api/devices/${id}/revoke`, {
+                method: 'POST'
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                showNotification('Регистрация устройства отозвана', 'success');
+                if (bootstrap.Modal.getInstance(document.getElementById('deviceDetailsModal'))) {
+                    bootstrap.Modal.getInstance(document.getElementById('deviceDetailsModal')).hide();
+                }
+                await loadDevices();
+            } else {
+                showNotification(result.message, 'danger');
+            }
+        } catch (error) {
+            console.error('Ошибка отзыва:', error);
+            showNotification('Ошибка отзыва регистрации', 'danger');
+        }
+    }
+    
+    // Вспомогательные функции
+    function getDeviceTypeLabel(type) {
+        const labels = {
+            farm: 'Ферма',
+            mobile: 'Мобильное',
+            gateway: 'Шлюз',
+            edge: 'EDGE'
+        };
+        return labels[type] || type;
+    }
+    
+    function getStatusLabel(status) {
+        const labels = {
+            active: 'Активное',
+            pending: 'Ожидание',
+            inactive: 'Неактивное',
+            revoked: 'Отозвано'
+        };
+        return labels[status] || status;
+    }
+    
+    function getStatusBadgeClass(status) {
+        const classes = {
+            active: 'bg-success',
+            pending: 'bg-warning',
+            inactive: 'bg-secondary',
+            revoked: 'bg-danger'
+        };
+        return classes[status] || 'bg-secondary';
+    }
+    
+    function formatTime(timestamp) {
+        if (!timestamp) return '--';
+        return new Date(timestamp).toLocaleString('ru-RU');
+    }
+    
+    function showError(message) {
+        showNotification(message, 'danger');
+    }
+    
+    function showNotification(message, type = 'info') {
+        const alertClass = `alert-${type}`;
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert ${alertClass} alert-dismissible fade show position-fixed`;
+        alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 10000; max-width: 300px;';
+        alertDiv.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        
+        document.body.appendChild(alertDiv);
+        
+        setTimeout(() => {
+            if (alertDiv.parentNode) {
+                alertDiv.parentNode.removeChild(alertDiv);
+            }
+        }, 5000);
+    }
+</script>
+{% endblock %}

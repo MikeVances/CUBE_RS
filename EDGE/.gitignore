@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+*.log.*
+config/logs/*
+
+# Data and temporary files
+data/
+*.db
+*.db-shm
+*.db-wal
+tmp/
+temp/
+cache/
+apps/edge/storage/*.db
+
+# Configuration secrets (keep encrypted versions)
+config/secrets/*.key
+config/secrets/*.txt
+!config/secrets/*.enc
+config/secrets/dev_password.txt
+config/secrets/master.key
+config/bot_secrets.json.backup
+.env.local
+.env.production
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# Testing
+.pytest_cache/
+.tox/
+
+# Modbus specific
+*.pcap
+serial_capture/
+

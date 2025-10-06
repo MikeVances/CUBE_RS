@@ -1,0 +1,16 @@
+[Unit]
+Description=CUBE EDGE Backup Timer
+Requires=cube-edge-backup.service
+
+[Timer]
+# Запуск каждые 6 часов
+OnCalendar=*-*-* 00,06,12,18:00:00
+
+# Если система была выключена, запустить при следующем включении
+Persistent=true
+
+# Случайная задержка до 30 минут чтобы не все backup'ы запускались одновременно
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

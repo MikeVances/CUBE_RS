@@ -1,0 +1,743 @@
+{% extends "base.html" %}
+
+{% block title %}Безопасность и контроль доступа{% endblock %}
+
+{% block content %}
+<!-- Security Overview -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">
+                    <i class="fas fa-shield-alt me-2"></i>
+                    Состояние безопасности системы
+                </h5>
+                <div class="row" id="securityOverview">
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-success" id="securityLevel">--</div>
+                                <div class="metric-label">Уровень безопасности</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-primary" id="activeUsers">--</div>
+                                <div class="metric-label">Активные пользователи</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-warning" id="failedAttempts">--</div>
+                                <div class="metric-label">Неудачных попыток (24ч)</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="card metric-card h-100">
+                            <div class="card-body text-center">
+                                <div class="metric-value text-info" id="totalRoles">--</div>
+                                <div class="metric-label">Ролей в системе</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tabs for different security sections -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <ul class="nav nav-tabs mb-3" id="securityTabs">
+                    <li class="nav-item">
+                        <a class="nav-link active" id="users-tab" data-bs-toggle="tab" href="#users" role="tab">
+                            <i class="fas fa-users me-1"></i>
+                            Пользователи
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" id="roles-tab" data-bs-toggle="tab" href="#roles" role="tab">
+                            <i class="fas fa-user-tag me-1"></i>
+                            Роли
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" id="audit-tab" data-bs-toggle="tab" href="#audit" role="tab">
+                            <i class="fas fa-history me-1"></i>
+                            Аудит
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" id="permissions-tab" data-bs-toggle="tab" href="#permissions" role="tab">
+                            <i class="fas fa-key me-1"></i>
+                            Права доступа
+                        </a>
+                    </li>
+                </ul>
+                
+                <div class="tab-content" id="securityTabContent">
+                    <!-- Users Tab -->
+                    <div class="tab-pane fade show active" id="users" role="tabpanel">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6>Управление пользователями</h6>
+                            <button class="btn btn-primary btn-sm" onclick="showCreateUserModal()">
+                                <i class="fas fa-user-plus me-1"></i>
+                                Добавить пользователя
+                            </button>
+                        </div>
+                        
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Пользователь</th>
+                                        <th>Роль</th>
+                                        <th>Статус</th>
+                                        <th>Последний вход</th>
+                                        <th>Создан</th>
+                                        <th>Действия</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="usersTableBody">
+                                    <tr>
+                                        <td colspan="6" class="text-center">
+                                            <div class="spinner-border text-primary" role="status">
+                                                <span class="visually-hidden">Загрузка...</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <!-- Roles Tab -->
+                    <div class="tab-pane fade" id="roles" role="tabpanel">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6>Роли и права доступа</h6>
+                            <button class="btn btn-primary btn-sm" onclick="showCreateRoleModal()">
+                                <i class="fas fa-plus me-1"></i>
+                                Создать роль
+                            </button>
+                        </div>
+                        
+                        <div class="row" id="rolesContainer">
+                            <div class="col-12 text-center">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">Загрузка...</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Audit Tab -->
+                    <div class="tab-pane fade" id="audit" role="tabpanel">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6>Журнал аудита</h6>
+                            <div>
+                                <select class="form-select form-select-sm d-inline-block w-auto me-2" id="auditFilter">
+                                    <option value="">Все действия</option>
+                                    <option value="login">Вход в систему</option>
+                                    <option value="permission_check">Проверка прав</option>
+                                    <option value="role_change">Изменение роли</option>
+                                    <option value="user_create">Создание пользователя</option>
+                                </select>
+                                <button class="btn btn-outline-primary btn-sm" onclick="loadAuditLog()">
+                                    <i class="fas fa-sync-alt me-1"></i>
+                                    Обновить
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Время</th>
+                                        <th>Пользователь</th>
+                                        <th>Действие</th>
+                                        <th>Детали</th>
+                                        <th>IP адрес</th>
+                                        <th>Результат</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="auditTableBody">
+                                    <tr>
+                                        <td colspan="6" class="text-center">
+                                            <div class="spinner-border text-primary" role="status">
+                                                <span class="visually-hidden">Загрузка...</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <!-- Permissions Tab -->
+                    <div class="tab-pane fade" id="permissions" role="tabpanel">
+                        <h6>Матрица прав доступа</h6>
+                        <p class="text-muted">Обзор прав доступа для всех ролей в системе</p>
+                        
+                        <div id="permissionsMatrix">
+                            <div class="text-center">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">Загрузка...</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create User Modal -->
+<div class="modal fade" id="createUserModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-user-plus me-2"></i>
+                    Создание пользователя
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="createUserForm">
+                    <div class="mb-3">
+                        <label for="newUserName" class="form-label">Имя пользователя</label>
+                        <input type="text" class="form-control" id="newUserName" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="newUserRole" class="form-label">Роль</label>
+                        <select class="form-select" id="newUserRole" required>
+                            <option value="">Выберите роль</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="newUserPassword" class="form-label">Пароль</label>
+                        <input type="password" class="form-control" id="newUserPassword" required>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                <button type="button" class="btn btn-primary" onclick="createUser()">
+                    <i class="fas fa-user-plus me-1"></i>
+                    Создать
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Role Modal -->
+<div class="modal fade" id="createRoleModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-plus me-2"></i>
+                    Создание роли
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="createRoleForm">
+                    <div class="mb-3">
+                        <label for="newRoleName" class="form-label">Название роли</label>
+                        <input type="text" class="form-control" id="newRoleName" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="newRoleDescription" class="form-label">Описание</label>
+                        <textarea class="form-control" id="newRoleDescription" rows="2"></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Права доступа</label>
+                        <div id="permissionsCheckboxes">
+                            <!-- Permissions will be loaded dynamically -->
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                <button type="button" class="btn btn-primary" onclick="createRole()">
+                    <i class="fas fa-plus me-1"></i>
+                    Создать роль
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    let usersData = [];
+    let rolesData = [];
+    let auditData = [];
+    let permissionsData = [];
+    
+    // Инициализация при загрузке страницы
+    document.addEventListener('DOMContentLoaded', function() {
+        loadSecurityData();
+        
+        // Обработка переключения табов
+        document.querySelectorAll('#securityTabs a[data-bs-toggle="tab"]').forEach(tab => {
+            tab.addEventListener('shown.bs.tab', function (e) {
+                const target = e.target.getAttribute('href');
+                if (target === '#audit' && !auditData.length) {
+                    loadAuditLog();
+                }
+            });
+        });
+    });
+    
+    // Загрузка данных безопасности
+    async function loadSecurityData() {
+        await Promise.all([
+            loadUsers(),
+            loadRoles(),
+            loadPermissions(),
+            loadSecurityOverview()
+        ]);
+    }
+    
+    // Загрузка пользователей
+    async function loadUsers() {
+        try {
+            const response = await fetch('/api/security/users');
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                usersData = result.users;
+                renderUsers();
+            }
+        } catch (error) {
+            console.error('Ошибка загрузки пользователей:', error);
+        }
+    }
+    
+    // Загрузка ролей
+    async function loadRoles() {
+        try {
+            const response = await fetch('/api/security/roles');
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                rolesData = result.roles;
+                renderRoles();
+                updateRoleSelectors();
+            }
+        } catch (error) {
+            console.error('Ошибка загрузки ролей:', error);
+        }
+    }
+    
+    // Загрузка прав доступа
+    async function loadPermissions() {
+        try {
+            const response = await fetch('/api/security/permissions');
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                permissionsData = result.permissions;
+                renderPermissionsMatrix();
+                updatePermissionsCheckboxes();
+            }
+        } catch (error) {
+            console.error('Ошибка загрузки прав доступа:', error);
+        }
+    }
+    
+    // Загрузка обзора безопасности
+    async function loadSecurityOverview() {
+        try {
+            const response = await fetch('/api/security/overview');
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                updateSecurityOverview(result.data);
+            }
+        } catch (error) {
+            console.error('Ошибка загрузки обзора безопасности:', error);
+        }
+    }
+    
+    // Обновление обзора безопасности
+    function updateSecurityOverview(data) {
+        document.getElementById('securityLevel').textContent = data.security_level || 'Высокий';
+        document.getElementById('activeUsers').textContent = data.active_users || 0;
+        document.getElementById('failedAttempts').textContent = data.failed_attempts_24h || 0;
+        document.getElementById('totalRoles').textContent = data.total_roles || 0;
+    }
+    
+    // Отображение пользователей
+    function renderUsers() {
+        const tbody = document.getElementById('usersTableBody');
+        
+        if (!usersData.length) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="text-center text-muted">Нет пользователей</td>
+                </tr>
+            `;
+            return;
+        }
+        
+        tbody.innerHTML = usersData.map(user => `
+            <tr>
+                <td>
+                    <strong>${user.username}</strong>
+                    <br>
+                    <small class="text-muted">${user.user_id}</small>
+                </td>
+                <td>
+                    <span class="badge bg-primary">${user.role_name}</span>
+                </td>
+                <td>
+                    <span class="badge ${user.is_active ? 'bg-success' : 'bg-danger'}">
+                        ${user.is_active ? 'Активен' : 'Заблокирован'}
+                    </span>
+                </td>
+                <td>
+                    <small>${formatTime(user.last_login)}</small>
+                </td>
+                <td>
+                    <small>${formatTime(user.created_at)}</small>
+                </td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary" onclick="editUser('${user.user_id}')">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                    ${user.is_active ? `
+                        <button class="btn btn-sm btn-outline-warning" onclick="toggleUserStatus('${user.user_id}', false)">
+                            <i class="fas fa-ban"></i>
+                        </button>
+                    ` : `
+                        <button class="btn btn-sm btn-outline-success" onclick="toggleUserStatus('${user.user_id}', true)">
+                            <i class="fas fa-check"></i>
+                        </button>
+                    `}
+                </td>
+            </tr>
+        `).join('');
+    }
+    
+    // Отображение ролей
+    function renderRoles() {
+        const container = document.getElementById('rolesContainer');
+        
+        if (!rolesData.length) {
+            container.innerHTML = `
+                <div class="col-12 text-center text-muted">
+                    Нет ролей в системе
+                </div>
+            `;
+            return;
+        }
+        
+        container.innerHTML = rolesData.map(role => `
+            <div class="col-lg-6 col-md-12 mb-3">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <h6 class="card-title">${role.role_name}</h6>
+                                <p class="text-muted small">${role.description || 'Без описания'}</p>
+                                <div>
+                                    <strong>Права:</strong>
+                                    <div class="mt-1">
+                                        ${role.permissions.map(perm => `
+                                            <span class="badge bg-light text-dark me-1 mb-1">${perm}</span>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                                <small class="text-muted">
+                                    Пользователей: <strong>${role.user_count || 0}</strong>
+                                </small>
+                            </div>
+                            <div>
+                                <button class="btn btn-sm btn-outline-primary" onclick="editRole('${role.role_id}')">
+                                    <i class="fas fa-edit"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+    
+    // Загрузка журнала аудита
+    async function loadAuditLog() {
+        const filter = document.getElementById('auditFilter').value;
+        
+        try {
+            const url = filter ? `/api/security/audit?action=${filter}` : '/api/security/audit';
+            const response = await fetch(url);
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                auditData = result.audit_logs;
+                renderAuditLog();
+            }
+        } catch (error) {
+            console.error('Ошибка загрузки аудита:', error);
+        }
+    }
+    
+    // Отображение журнала аудита
+    function renderAuditLog() {
+        const tbody = document.getElementById('auditTableBody');
+        
+        if (!auditData.length) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="text-center text-muted">Нет записей аудита</td>
+                </tr>
+            `;
+            return;
+        }
+        
+        tbody.innerHTML = auditData.map(log => `
+            <tr>
+                <td><small>${formatTime(log.timestamp)}</small></td>
+                <td>${log.username || 'Система'}</td>
+                <td>
+                    <span class="badge bg-info">${log.action}</span>
+                </td>
+                <td><small>${log.details || '--'}</small></td>
+                <td><small>${log.ip_address || '--'}</small></td>
+                <td>
+                    <span class="badge ${log.success ? 'bg-success' : 'bg-danger'}">
+                        ${log.success ? 'Успех' : 'Ошибка'}
+                    </span>
+                </td>
+            </tr>
+        `).join('');
+    }
+    
+    // Отображение матрицы прав доступа
+    function renderPermissionsMatrix() {
+        const container = document.getElementById('permissionsMatrix');
+        
+        if (!permissionsData.length || !rolesData.length) {
+            container.innerHTML = '<p class="text-muted">Данные не загружены</p>';
+            return;
+        }
+        
+        const table = document.createElement('table');
+        table.className = 'table table-sm table-bordered';
+        
+        // Заголовок таблицы
+        let header = '<thead><tr><th>Право доступа</th>';
+        rolesData.forEach(role => {
+            header += `<th class="text-center">${role.role_name}</th>`;
+        });
+        header += '</tr></thead>';
+        
+        // Тело таблицы
+        let body = '<tbody>';
+        permissionsData.forEach(permission => {
+            body += `<tr><td><strong>${permission}</strong></td>`;
+            rolesData.forEach(role => {
+                const hasPermission = role.permissions.includes(permission);
+                body += `<td class="text-center">
+                    <i class="fas ${hasPermission ? 'fa-check text-success' : 'fa-times text-muted'}"></i>
+                </td>`;
+            });
+            body += '</tr>';
+        });
+        body += '</tbody>';
+        
+        table.innerHTML = header + body;
+        container.innerHTML = '';
+        container.appendChild(table);
+    }
+    
+    // Показ модала создания пользователя
+    function showCreateUserModal() {
+        const modal = new bootstrap.Modal(document.getElementById('createUserModal'));
+        document.getElementById('createUserForm').reset();
+        modal.show();
+    }
+    
+    // Показ модала создания роли
+    function showCreateRoleModal() {
+        const modal = new bootstrap.Modal(document.getElementById('createRoleModal'));
+        document.getElementById('createRoleForm').reset();
+        modal.show();
+    }
+    
+    // Обновление селекторов ролей
+    function updateRoleSelectors() {
+        const selector = document.getElementById('newUserRole');
+        selector.innerHTML = '<option value="">Выберите роль</option>' +
+            rolesData.map(role => `<option value="${role.role_id}">${role.role_name}</option>`).join('');
+    }
+    
+    // Обновление чекбоксов прав доступа
+    function updatePermissionsCheckboxes() {
+        const container = document.getElementById('permissionsCheckboxes');
+        container.innerHTML = permissionsData.map(permission => `
+            <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="perm_${permission}" value="${permission}">
+                <label class="form-check-label" for="perm_${permission}">
+                    ${permission}
+                </label>
+            </div>
+        `).join('');
+    }
+    
+    // Создание пользователя
+    async function createUser() {
+        const username = document.getElementById('newUserName').value;
+        const roleId = document.getElementById('newUserRole').value;
+        const password = document.getElementById('newUserPassword').value;
+        
+        if (!username || !roleId || !password) {
+            showNotification('Заполните все поля', 'warning');
+            return;
+        }
+        
+        try {
+            const response = await fetch('/api/security/users', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    username: username,
+                    role_id: roleId,
+                    password: password
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                showNotification('Пользователь создан', 'success');
+                bootstrap.Modal.getInstance(document.getElementById('createUserModal')).hide();
+                await loadUsers();
+            } else {
+                showNotification(result.message, 'danger');
+            }
+        } catch (error) {
+            console.error('Ошибка создания пользователя:', error);
+            showNotification('Ошибка создания пользователя', 'danger');
+        }
+    }
+    
+    // Создание роли
+    async function createRole() {
+        const roleName = document.getElementById('newRoleName').value;
+        const description = document.getElementById('newRoleDescription').value;
+        const permissions = Array.from(document.querySelectorAll('#permissionsCheckboxes input:checked')).map(cb => cb.value);
+        
+        if (!roleName || !permissions.length) {
+            showNotification('Укажите название роли и выберите права доступа', 'warning');
+            return;
+        }
+        
+        try {
+            const response = await fetch('/api/security/roles', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    role_name: roleName,
+                    description: description,
+                    permissions: permissions
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                showNotification('Роль создана', 'success');
+                bootstrap.Modal.getInstance(document.getElementById('createRoleModal')).hide();
+                await loadRoles();
+            } else {
+                showNotification(result.message, 'danger');
+            }
+        } catch (error) {
+            console.error('Ошибка создания роли:', error);
+            showNotification('Ошибка создания роли', 'danger');
+        }
+    }
+    
+    // Переключение статуса пользователя
+    async function toggleUserStatus(userId, activate) {
+        try {
+            const response = await fetch(`/api/security/users/${userId}/status`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    is_active: activate
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                showNotification(`Пользователь ${activate ? 'активирован' : 'заблокирован'}`, 'success');
+                await loadUsers();
+            } else {
+                showNotification(result.message, 'danger');
+            }
+        } catch (error) {
+            console.error('Ошибка изменения статуса:', error);
+            showNotification('Ошибка изменения статуса пользователя', 'danger');
+        }
+    }
+    
+    // Заглушки для функций редактирования (можно реализовать позже)
+    function editUser(userId) {
+        showNotification('Функция редактирования пользователя в разработке', 'info');
+    }
+    
+    function editRole(roleId) {
+        showNotification('Функция редактирования роли в разработке', 'info');
+    }
+    
+    // Вспомогательные функции
+    function formatTime(timestamp) {
+        if (!timestamp) return '--';
+        return new Date(timestamp).toLocaleString('ru-RU');
+    }
+    
+    function showNotification(message, type = 'info') {
+        const alertClass = `alert-${type}`;
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert ${alertClass} alert-dismissible fade show position-fixed`;
+        alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 10000; max-width: 300px;';
+        alertDiv.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        
+        document.body.appendChild(alertDiv);
+        
+        setTimeout(() => {
+            if (alertDiv.parentNode) {
+                alertDiv.parentNode.removeChild(alertDiv);
+            }
+        }, 5000);
+    }
+</script>
+{% endblock %}

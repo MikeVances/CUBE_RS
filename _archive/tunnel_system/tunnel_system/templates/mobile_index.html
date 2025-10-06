@@ -1,0 +1,228 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>КУБ-1063 Mobile - Мои фермы</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .card { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); margin-bottom: 1rem; }
+        .farm-card { cursor: pointer; transition: transform 0.2s; }
+        .farm-card:hover { transform: translateY(-2px); }
+        .status-online { color: #28a745; }
+        .status-offline { color: #dc3545; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container">
+            <span class="navbar-brand">🏭 КУБ-1063 Mobile</span>
+            <a href="/logout" class="btn btn-outline-light btn-sm">Выйти</a>
+        </div>
+    </nav>
+    
+    <div class="container py-4">
+        <div id="farmsContainer">
+            <div class="text-center py-5">
+                <div class="spinner-border" role="status"></div>
+                <p class="mt-2">Загрузка ферм...</p>
+            </div>
+        </div>
+        
+        <!-- Модальное окно с данными фермы -->
+        <div class="modal fade" id="farmModal" tabindex="-1">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="farmModalTitle">Данные фермы</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body" id="farmModalBody">
+                        <!-- Данные фермы будут загружены здесь -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let farms = [];
+        let currentFarmId = null;
+        
+        // Загрузка списка ферм
+        async function loadFarms() {
+            try {
+                const response = await fetch('/api/farms');
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    farms = data.farms;
+                    displayFarms();
+                } else {
+                    document.getElementById('farmsContainer').innerHTML = 
+                        '<div class="alert alert-danger">Ошибка загрузки ферм</div>';
+                }
+            } catch (error) {
+                console.error('Ошибка:', error);
+                document.getElementById('farmsContainer').innerHTML = 
+                    '<div class="alert alert-danger">Ошибка подключения</div>';
+            }
+        }
+        
+        // Отображение списка ферм
+        function displayFarms() {
+            const container = document.getElementById('farmsContainer');
+            
+            if (farms.length === 0) {
+                container.innerHTML = '<div class="alert alert-info">У вас пока нет ферм</div>';
+                return;
+            }
+            
+            let html = '<div class="row">';
+            
+            farms.forEach(farm => {
+                const isOnline = Date.now() / 1000 - farm.last_seen < 600; // 10 минут
+                const statusClass = isOnline ? 'status-online' : 'status-offline';
+                const statusText = isOnline ? 'Онлайн' : 'Офлайн';
+                
+                html += `
+                    <div class="col-md-6 col-lg-4 mb-3">
+                        <div class="card farm-card" onclick="connectToFarm('${farm.farm_id}')">
+                            <div class="card-body">
+                                <h5 class="card-title">${farm.farm_name}</h5>
+                                <p class="card-text text-muted">ID: ${farm.farm_id}</p>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <small class="${statusClass}">● ${statusText}</small>
+                                    <small class="text-muted">${new Date(farm.last_seen * 1000).toLocaleString('ru-RU')}</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += '</div>';
+            container.innerHTML = html;
+        }
+        
+        // Подключение к ферме
+        async function connectToFarm(farmId) {
+            const farm = farms.find(f => f.farm_id === farmId);
+            if (!farm) return;
+            
+            currentFarmId = farmId;
+            
+            // Показываем модальное окно с индикатором загрузки
+            document.getElementById('farmModalTitle').textContent = farm.farm_name;
+            document.getElementById('farmModalBody').innerHTML = `
+                <div class="text-center py-4">
+                    <div class="spinner-border" role="status"></div>
+                    <p class="mt-2">Подключение к ферме...</p>
+                </div>
+            `;
+            
+            const modal = new bootstrap.Modal(document.getElementById('farmModal'));
+            modal.show();
+            
+            try {
+                // Устанавливаем P2P соединение
+                const connectResponse = await fetch(`/api/connect/${farmId}`, {
+                    method: 'POST'
+                });
+                
+                const connectResult = await connectResponse.json();
+                
+                if (connectResult.status === 'success') {
+                    // Соединение установлено, загружаем данные
+                    await loadFarmData(farmId);
+                } else {
+                    document.getElementById('farmModalBody').innerHTML = `
+                        <div class="alert alert-danger">
+                            ${connectResult.message || 'Ошибка подключения к ферме'}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Ошибка подключения:', error);
+                document.getElementById('farmModalBody').innerHTML = `
+                    <div class="alert alert-danger">Ошибка подключения к ферме</div>
+                `;
+            }
+        }
+        
+        // Загрузка данных фермы
+        async function loadFarmData(farmId) {
+            try {
+                const response = await fetch(`/api/farm/${farmId}/data`);
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    displayFarmData(data.data);
+                } else {
+                    document.getElementById('farmModalBody').innerHTML = `
+                        <div class="alert alert-warning">Нет данных от фермы</div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Ошибка загрузки данных:', error);
+                document.getElementById('farmModalBody').innerHTML = `
+                    <div class="alert alert-danger">Ошибка получения данных</div>
+                `;
+            }
+        }
+        
+        // Отображение данных фермы
+        function displayFarmData(data) {
+            const html = `
+                <div class="row">
+                    <div class="col-6 text-center">
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <h3 class="text-primary">${data.temp_inside}°C</h3>
+                                <small class="text-muted">Температура</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-6 text-center">
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <h3 class="text-info">${data.humidity}%</h3>
+                                <small class="text-muted">Влажность</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-6 text-center mt-2">
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <h3 class="text-warning">${data.co2}</h3>
+                                <small class="text-muted">CO₂ (ppm)</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-6 text-center mt-2">
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <h3 class="text-success">Онлайн</h3>
+                                <small class="text-muted">Статус</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <small class="text-muted">
+                        Последнее обновление: ${new Date(data.timestamp * 1000).toLocaleString('ru-RU')}
+                    </small>
+                </div>
+            `;
+            
+            document.getElementById('farmModalBody').innerHTML = html;
+        }
+        
+        // Загружаем фермы при загрузке страницы
+        document.addEventListener('DOMContentLoaded', loadFarms);
+    </script>
+</body>
+</html>

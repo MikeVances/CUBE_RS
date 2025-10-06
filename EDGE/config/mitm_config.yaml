@@ -1,0 +1,36 @@
+# MITM Protection Configuration for EDGE
+mitm_protection:
+  enabled: true
+  certificate_pinning:
+    enabled: true
+    pin_type: "pubkey-sha256"
+    fail_on_pin_mismatch: true
+    pins_config_path: "/etc/cube_gateway/cert_pins.json"
+    
+  mutual_tls:
+    enabled: false  # Включить в продакшене
+    ca_config_path: "/etc/cube_gateway/ca_config.json"
+    client_cert_path: "/etc/cube_gateway/certs/clients/edge-{device_id}.crt"
+    client_key_path: "/etc/cube_gateway/certs/clients/edge-{device_id}.key"
+    ca_cert_path: "/etc/cube_gateway/certs/ca.crt"
+    
+  ssl_verification:
+    verify_ssl: true
+    check_hostname: true
+    ssl_version: "TLSv1_2"
+    ciphers: "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS"
+    
+  connection:
+    timeout: 30
+    max_retries: 3
+    backoff_factor: 1.0
+    
+  security_headers:
+    user_agent: "CUBE_RS_EDGE/1.0.0"
+    connection: "keep-alive"
+    
+  development_mode:
+    # В development режиме некоторые проверки ослаблены
+    allow_localhost: true
+    allow_private_ips: true
+    skip_certificate_expiry_check: false

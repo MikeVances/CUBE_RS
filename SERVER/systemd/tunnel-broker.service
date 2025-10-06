@@ -1,0 +1,43 @@
+[Unit]
+Description=EDGE Tunnel Broker Server
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=tunnel
+Group=tunnel
+WorkingDirectory=/opt/edge-server
+ExecStart=/usr/bin/python3 resilient_tunnel_broker.py --host 0.0.0.0 --port 8080
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=30
+RestartSec=5
+Restart=always
+
+# Environment
+Environment=BROKER_HOST=0.0.0.0
+Environment=BROKER_PORT=8080
+Environment=DATABASE_PATH=/opt/edge-server/data/tunnel_broker.db
+Environment=LOG_LEVEL=INFO
+Environment=WEBSOCKET_PORT=8081
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/edge-server/data /opt/edge-server/logs
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tunnel-broker
+
+[Install]
+WantedBy=multi-user.target

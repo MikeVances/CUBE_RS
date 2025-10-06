@@ -1,0 +1,3592 @@
+#!/usr/bin/env python3
+"""
+Telegram Bot для управления системой КУБ-1063
+Использует централизованный конфиг-менеджер для всех настроек.
+"""
+
+import atexit
+import asyncio
+import logging
+import os
+import sqlite3
+import sys
+import time
+from contextlib import suppress
+from pathlib import Path
+from typing import Optional, Tuple
+
+# Импорт централизованного конфиг-менеджера и безопасности  
+try:
+    from ..config_manager import get_config
+    from ..log_filter import setup_secure_logging
+    from ..security_manager import log_security_event
+
+    config = get_config()
+    SECURITY_AVAILABLE = True
+except ImportError as e:
+    if "security_manager" in str(e) or "log_filter" in str(e):
+        from ..config_manager import get_config
+
+        config = get_config()
+        SECURITY_AVAILABLE = False
+        logging.warning(
+            "⚠️ Модули безопасности недоступны - логирование безопасности отключено"
+        )
+    else:
+        logging.error(
+            "❌ Не удалось импортировать ConfigManager. Убедитесь что установлен PyYAML."
+        )
+        sys.exit(1)
+
+from core.telegram.bot_permissions import (
+    check_command_rate_limit,
+    check_user_permission,
+)
+from core.telegram.bot_utils import (
+    build_back_menu,
+    build_confirmation_menu,
+    build_main_menu,
+    build_stats_menu,
+    decode_active_alarms,
+    error_message,
+    format_sensor_data,
+    loading_message,
+    md_escape,
+    send_typing_action,
+    success_message,
+    truncate_text,
+    warning_message,
+)
+
+# Telegram Bot imports
+from telegram import Update
+from telegram.error import TimedOut
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+
+# Наши модули
+from core.telegram.bot_database import TelegramBotDB
+from core.device_registry import DeviceRegistry
+from core.utils.paths import resolve_under_root
+
+# Настройка логирования из конфига
+log_file = config.config_dir / "logs" / "telegram.log"
+log_file.parent.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=getattr(logging, config.system.log_level),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler(log_file, encoding="utf-8"), logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
+
+# КРИТИЧНО: Настройка безопасного логирования для предотвращения утечки токенов
+if SECURITY_AVAILABLE:
+    # Устанавливаем фильтр секретов для всех логгеров
+    security_filter = setup_secure_logging()
+    logger.info("🔐 Установлен фильтр безопасности для логов")
+else:
+    # Fallback: просто отключаем подробное логирование
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+    logging.getLogger("telegram.request").setLevel(logging.WARNING)
+
+
+BOT_LOCK_PATH = Path(resolve_under_root("data/telegram_bot.lock"))
+
+
+def _display_name(user) -> str:
+    try:
+        value = getattr(user, "first_name", None) or getattr(user, "username", None)
+        if not value:
+            value = str(getattr(user, "id", ""))
+        return md_escape(value)
+    except Exception:
+        return md_escape(str(getattr(user, "id", "")))
+
+
+def _mention(user) -> str:
+    username = getattr(user, "username", None)
+    if username:
+        return f"@{md_escape(username)}"
+    return md_escape(str(getattr(user, "id", "")))
+
+
+def _read_lock_pid() -> Optional[int]:
+    try:
+        return int(BOT_LOCK_PATH.read_text().strip())
+    except Exception:
+        return None
+
+
+def _acquire_bot_lock() -> Tuple[bool, Optional[int]]:
+    """Try to acquire exclusive lock to ensure single bot instance."""
+    BOT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    current_pid = os.getpid()
+
+    while True:
+        try:
+            fd = os.open(BOT_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            existing_pid = _read_lock_pid()
+            if existing_pid and existing_pid != current_pid:
+                try:
+                    os.kill(existing_pid, 0)
+                except OSError:
+                    with suppress(FileNotFoundError):
+                        BOT_LOCK_PATH.unlink()
+                    continue  # stale lock, retry acquisition
+                else:
+                    return False, existing_pid
+            else:
+                with suppress(FileNotFoundError):
+                    BOT_LOCK_PATH.unlink()
+                continue
+        else:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(str(current_pid))
+            return True, None
+
+
+def _release_bot_lock():
+    try:
+        if BOT_LOCK_PATH.exists() and _read_lock_pid() == os.getpid():
+            BOT_LOCK_PATH.unlink()
+    except Exception:
+        logger.debug("Не удалось удалить lock-файл Telegram бота", exc_info=True)
+
+
+class KUBTelegramBot:
+    """Telegram Bot для управления КУБ-1063 с централизованной конфигурацией"""
+
+    def __init__(self, token: str):
+        self.token = token
+        self.config = config  # Используем глобальный конфиг-менеджер
+
+        # Подключаем Device Registry для работы с устройствами
+        self.device_registry = DeviceRegistry()
+        self.bot_db = TelegramBotDB()
+
+        # Telegram Application
+        self.application = None
+        self._bot_started = False
+        self._shutdown_event = asyncio.Event()
+
+        # Локальное состояние для уведомлений об авариях
+        self._last_alarm_count = 0
+        self._last_warning_count = 0
+        self._last_alarm_notify_ts = 0
+        # Оптимистичный режим после сброса: не больше 35 секунд показываем реле как ВЫКЛ
+        self._optimistic_clear_until: dict[int, float] = {}
+        # Управление звуковыми пингами
+        self._sound_ping_delete_after = 25  # сек
+
+        logger.info(
+            f"✅ Загружено {len(self.config.telegram.admin_users)} администраторов"
+        )
+        logger.info("🤖 KUBTelegramBot с UX улучшениями инициализирован")
+
+    def request_shutdown(self) -> None:
+        """Инициировать мягкое завершение работы бота."""
+        self._shutdown_event.set()
+
+    # =======================================================================
+    # РАБОТА С ДАННЫМИ ЧЕРЕЗ SQLite (вместо прямого RS485)
+    # =======================================================================
+
+    async def get_current_data_from_db(self):
+        """Читаем текущие данные из SQLite (заполняется основной системой)"""
+        try:
+            import aiosqlite
+
+            # Используем путь к БД с данными (не commands)
+            db_path = self.config.database.file
+            logger.debug(f"🔍 Подключение к БД: {db_path}")
+
+            async with aiosqlite.connect(db_path) as conn:
+                # Проверим какие таблицы есть в БД
+                tables_cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = await tables_cursor.fetchall()
+                logger.debug(f"🔍 Таблицы в БД {db_path}: {[t[0] for t in tables]}")
+                
+                cursor = await conn.execute(
+                    """
+                    SELECT temp_inside, temp_target, humidity, co2, nh3, pressure,
+                           ventilation_level, ventilation_target, active_alarms,
+                           active_warnings, updated_at,
+                           digital_outputs_1, digital_outputs_2, digital_outputs_3
+                    FROM latest_data WHERE id=1
+                """
+                )
+                row = await cursor.fetchone()
+                if row:
+                    data = {
+                        "temp_inside": row[0] if row[0] is not None else None,
+                        "temp_target": row[1] if row[1] is not None else None,
+                        "humidity": row[2] if row[2] is not None else None,
+                        "co2": row[3] if row[3] is not None else None,
+                        "nh3": row[4] if row[4] is not None else None,
+                        "pressure": row[5] if row[5] is not None else None,
+                        "ventilation_level": row[6] if row[6] is not None else None,
+                        "ventilation_target": row[7] if row[7] is not None else None,
+                        "active_alarms": row[8] if row[8] is not None else 0,
+                        "active_warnings": row[9] if row[9] is not None else 0,
+                        "updated_at": row[10],
+                        "digital_outputs_1": row[11] if len(row) > 11 else None,
+                        "digital_outputs_2": row[12] if len(row) > 12 else None,
+                        "digital_outputs_3": row[13] if len(row) > 13 else None,
+                        "connection_status": "connected" if row[10] else "disconnected",
+                    }
+                    # Вычисляем состояние аварийного реле по конфигурации, если включено
+                    try:
+                        ar = getattr(self.config, "alarm_relay", None)
+                        if ar and getattr(ar, "enabled", False):
+                            reg = str(getattr(ar, "register", "0x0082")).lower()
+                            reg_to_key = {
+                                "0x0081": "digital_outputs_1",
+                                "0x0082": "digital_outputs_2",
+                                "0x00a2": "digital_outputs_3",
+                            }
+                            key = reg_to_key.get(reg)
+                            bit = int(getattr(ar, "bit", 7))
+                            val = data.get(key) if key else None
+                            if isinstance(val, int) and 0 <= bit <= 15:
+                                data["alarm_relay"] = bool((val >> bit) & 1)
+                                data["alarm_relay_label"] = getattr(
+                                    ar, "label", "Реле аварии"
+                                )
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ Ошибка вычисления состояния аварийного реле: {e}"
+                        )
+                    return data
+                return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения данных из БД: {e}")
+            return None
+
+    async def get_recent_sensor_recovery(self, minutes: int = 15) -> dict[str, bool]:
+        """Проверяет за последние N минут: были ли пропадания показаний и затем восстановление.
+        Возвращает словарь по датчикам: {'co2': True/False, 'humidity': ..., 'nh3': ...}
+        """
+        result = {"co2": False, "humidity": False, "nh3": False}
+        try:
+            import aiosqlite
+
+            # Используем путь к БД из конфигурации
+            db_path = self.config.database.file
+
+            async with aiosqlite.connect(db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                for field in ("co2", "humidity", "nh3"):
+                    # Берем выборку за период, смотрим был ли None и затем последние значения не None
+                    cursor = await conn.execute(
+                        f"SELECT {field} as v FROM sensor_data WHERE timestamp > datetime('now', '-' || ? || ' minutes') ORDER BY timestamp ASC",
+                        (minutes,),
+                    )
+                    rows = await cursor.fetchall()
+                    if not rows:
+                        continue
+                    had_none = any(r["v"] is None for r in rows)
+                    last_v = next((r["v"] for r in reversed(rows) if True), None)
+                    if had_none and last_v is not None:
+                        result[field] = True
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка анализа восстановления датчиков: {e}")
+        return result
+
+    # =======================
+    # Оценка причин аварии и нейтрализации
+    # =======================
+    async def compute_alarm_assessment(self, data: dict[str, any]) -> dict[str, any]:
+        """Возвращает оценку причин аварий и факта нейтрализации.
+        Использует БИТЫ аварий (0x00C0–0x00C3) как первичный источник истины.
+        Никаких уставок не записываем и не интерпретируем — если бит активен, причина АКТИВНА.
+        Для сенсоров без битов (CO₂/NH₃) используем их статусы break/error.
+        """
+        result = {
+            "items": [],  # [{title, neutralized(bool), details}]
+            "all_neutralized": False,
+        }
+        try:
+            mask = int(data.get("active_alarms", 0) or 0)
+            humidity = data.get("humidity")
+            hum_status = data.get("humidity_status")
+            pressure_status = data.get("pressure_status")
+            co2 = data.get("co2")
+            co2_status = data.get("co2_status")
+            nh3_status = data.get("nh3_status")
+
+            # Сенсоры: обрывы/ошибки → нейтрализация, если status=ok (или было восстановление)
+            recovery = await self.get_recent_sensor_recovery(minutes=15)
+
+            def add(title: str, neutralized: bool, details: str):
+                result["items"].append(
+                    {
+                        "title": title,
+                        "neutralized": bool(neutralized),
+                        "details": details,
+                    }
+                )
+
+            # Температура высокая/низкая — только по битам: если бит активен, причина активна
+            if ((mask >> 35) & 1) == 1:  # высокая внутр. температура
+                add("Высокая внутренняя температура", False, "бит аварии активен")
+            if ((mask >> 36) & 1) == 1 or (
+                (mask >> 57) & 1
+            ) == 1:  # низкая внутр. температура
+                add("Низкая внутренняя температура", False, "бит аварии активен")
+
+            # Влажность высокая
+            if ((mask >> 37) & 1) == 1:
+                add("Высокая влажность", False, f"статус={hum_status}, H={humidity}")
+
+            # Давление высокое/низкое
+            if ((mask >> 38) & 1) == 1:
+                add(
+                    "Высокое отрицательное давление", False, f"статус={pressure_status}"
+                )
+            if ((mask >> 39) & 1) == 1:
+                add("Низкое отрицательное давление", False, f"статус={pressure_status}")
+
+            # Обрывы датчиков
+            if ((mask >> 40) & 1) == 1:
+                ok = (hum_status == "ok") or recovery.get("humidity", False)
+                add("Обрыв датчика влажности", ok, f"статус={hum_status}")
+            if ((mask >> 41) & 1) == 1:
+                ok = (pressure_status == "ok") or recovery.get("pressure", False)
+                add(
+                    "Обрыв датчика отрицательного давления",
+                    ok,
+                    f"статус={pressure_status}",
+                )
+            # Температуры T1/T2/Tнаруж — нет отдельных статусов, считаем по исчезновению бита (здесь proxy=False)
+            if ((mask >> 42) & 1) == 1:
+                add(
+                    "Обрыв датчика внутренней температуры 1",
+                    False,
+                    "Оценка по показаниям датчика недоступна",
+                )
+            if ((mask >> 43) & 1) == 1:
+                add(
+                    "Обрыв датчика внутренней температуры 2",
+                    False,
+                    "Оценка по показаниям датчика недоступна",
+                )
+            if ((mask >> 44) & 1) == 1:
+                add(
+                    "Обрыв датчика наружной температуры",
+                    False,
+                    "Оценка по показаниям датчика недоступна",
+                )
+
+            # Сенсоры без битов — CO₂/NH₃: используем статусы
+            if co2_status in ("break", "error"):
+                ok = (co2_status == "ok") or recovery.get("co2", False)
+                add("Ошибка/обрыв датчика CO₂", ok, f"статус={co2_status}")
+            if nh3_status in ("break", "error"):
+                ok = (nh3_status == "ok") or recovery.get("nh3", False)
+                add("Ошибка/обрыв датчика NH₃", ok, f"статус={nh3_status}")
+
+            # Итог: если список пуст (битов активных нет), но аварийное реле ВКЛ — можно предложить сброс
+            if not result["items"] and (data.get("alarm_relay") is True):
+                result["items"].append(
+                    {
+                        "title": "Аварийное реле активно",
+                        "neutralized": False,
+                        "details": "Причина не определена по данным",
+                    }
+                )
+
+            # Считаем нейтрализовано по битам: если маска == 0 И нет сенсорных ошибок CO₂/NH₃
+            sensor_errors = (co2_status in ("break", "error")) or (
+                nh3_status in ("break", "error")
+            )
+            result["all_neutralized"] = (mask == 0) and not sensor_errors
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка оценки причин аварии: {e}")
+            return result
+
+    def add_write_command_to_db(self, register: int, value: int, user_info: str):
+        """Добавляем команду записи в очередь (выполнит основная система)"""
+        try:
+            import sqlite3
+            import uuid
+            from datetime import datetime
+
+            command_id = str(uuid.uuid4())[:8]
+            db_path = resolve_under_root(self.config.database.commands_db)
+
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS write_commands (
+                        id TEXT PRIMARY KEY,
+                        register INTEGER NOT NULL,
+                        value INTEGER NOT NULL,
+                        user_info TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        scheduled_at TIMESTAMP,
+                        executed_at TIMESTAMP,
+                        status TEXT DEFAULT 'pending',
+                        attempts INTEGER DEFAULT 0,
+                        max_attempts INTEGER DEFAULT 3,
+                        priority INTEGER DEFAULT 0,
+                        error_message TEXT,
+                        execution_time_ms INTEGER
+                    )
+                """
+                )
+
+                conn.execute(
+                    """
+                    INSERT INTO write_commands
+                    (id, register, value, user_info, created_at, status, priority)
+                    VALUES (?, ?, ?, ?, ?, 'pending', 1)
+                """,
+                    (
+                        command_id,
+                        register,
+                        value,
+                        user_info,
+                        datetime.now().isoformat(),
+                    ),
+                )
+                conn.commit()
+
+            logger.info(
+                f"📝 Команда записи добавлена: reg=0x{register:04X}, val={value}, id={command_id}"
+            )
+            return True, command_id
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления команды: {e}")
+            return False, str(e)
+
+    # =======================================================================
+    # ОБРАБОТЧИКИ КОМАНД
+    # =======================================================================
+
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /start - обработка приглашений и защита от незарегистрированных пользователей"""
+        user = update.effective_user
+
+        # Логирование события безопасности
+        if SECURITY_AVAILABLE:
+            log_security_event(
+                "BOT_START_ATTEMPT",
+                user_id=user.id,
+                details={
+                    "username": user.username,
+                    "first_name": user.first_name,
+                    "has_args": bool(context.args),
+                },
+            )
+
+        # Показываем печатание
+        await send_typing_action(update, context)
+
+        # Проверяем, есть ли приглашение в сообщении
+        invitation_code = None
+        if context.args:
+            # Ищем код приглашения в формате invite_XXXXXXXX
+            for arg in context.args:
+                if arg.startswith("invite_"):
+                    invitation_code = arg.replace("invite_", "")
+                    break
+
+        # Проверяем, зарегистрирован ли пользователь
+        existing_user = self.bot_db.get_user(user.id)
+
+        if existing_user:
+            # Пользователь уже зарегистрирован - показываем главное меню
+            access_level = self.bot_db.get_user_access_level(user.id)
+            menu = build_main_menu(access_level)
+            # Если есть активные аварии/реле – добавим кнопку ACK (тихий режим)
+            try:
+                alarms_cnt = int((data or {}).get("active_alarms", 0) or 0)
+                relay_on = bool((data or {}).get("alarm_relay"))
+                if alarms_cnt > 0 or relay_on:
+                    from telegram import InlineKeyboardButton
+
+                    kb = menu.inline_keyboard
+                    kb.append(
+                        [
+                            InlineKeyboardButton(
+                                "🤫 Тихий режим 45 мин", callback_data="ack_alarms"
+                            )
+                        ]
+                    )
+            except Exception:
+                pass
+
+            welcome_text = (
+                f"👋 С возвращением, {_display_name(user)}!\n\n"
+                f"**КУБ-1063 Control Bot**\n"
+                f"🔐 Ваш уровень доступа: **{md_escape(access_level)}**\n\n"
+                "Выберите действие в меню ниже ⬇️"
+            )
+
+            await update.message.reply_text(
+                welcome_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+            self.bot_db.log_user_command(user.id, "start", None, True)
+            return
+
+        # Проверяем, является ли пользователь админом в ConfigManager
+        if user.id in self.config.telegram.admin_users:
+            # Автоматически регистрируем админа
+            self.bot_db.register_user(
+                telegram_id=user.id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                access_level="admin",
+            )
+            logger.info(f"🔑 Админ {user.id} автоматически зарегистрирован")
+            
+            # Показываем главное меню для админа
+            menu = build_main_menu("admin")
+            await update.message.reply_text(
+                "✅ **Добро пожаловать, администратор!**\n\n"
+                "Вы автоматически получили права администратора.\n"
+                "Используйте меню ниже для управления системой.",
+                reply_markup=menu,
+                parse_mode="Markdown",
+            )
+            self.bot_db.log_user_command(user.id, "start", None, True)
+            return
+
+        # Новый пользователь - требуется приглашение
+        if not invitation_code:
+            # Нет приглашения - отклоняем доступ
+            await update.message.reply_text(
+                "🔒 **Доступ ограничен**\n\n"
+                "Для использования бота необходимо приглашение.\n"
+                "Обратитесь к администратору системы КУБ-1063 за ссылкой-приглашением.\n\n"
+                "📋 **Как получить доступ:**\n"
+                "1. Попросите администратора создать приглашение\n"
+                "2. Перейдите по ссылке-приглашению\n"
+                "3. Получите доступ к системе",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Есть код приглашения - проверяем его
+        try:
+            import datetime
+            import sqlite3
+
+            conn = sqlite3.connect(config.database.commands_db)
+            cursor = conn.cursor()
+
+            # Ищем приглашение
+            cursor.execute(
+                """
+                SELECT invitation_code, invited_by, access_level, expires_at, used_by
+                FROM user_invitations
+                WHERE invitation_code = ?
+            """,
+                (invitation_code,),
+            )
+
+            invitation = cursor.fetchone()
+
+            if not invitation:
+                conn.close()
+                await update.message.reply_text(
+                    "❌ **Недействительное приглашение**\n\n"
+                    "Код приглашения не найден или устарел.\n"
+                    "Попросите новое приглашение у администратора.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            code, invited_by, level, expires_at_str, used_by = invitation
+
+            # Проверяем, не использовано ли приглашение
+            if used_by:
+                conn.close()
+                await update.message.reply_text(
+                    "❌ **Приглашение уже использовано**\n\n"
+                    "Это приглашение уже было активировано.\n"
+                    "Попросите новое приглашение у администратора.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Проверяем срок действия
+            expires_at = datetime.datetime.fromisoformat(expires_at_str)
+            if datetime.datetime.now() > expires_at:
+                conn.close()
+                await update.message.reply_text(
+                    "⏰ **Приглашение истекло**\n\n"
+                    "Срок действия приглашения истёк.\n"
+                    "Попросите новое приглашение у администратора.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Приглашение действительно - регистрируем пользователя
+            self.bot_db.register_user(
+                telegram_id=user.id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                access_level=level,
+            )
+
+            # Отмечаем приглашение как использованное
+            cursor.execute(
+                """
+                UPDATE user_invitations
+                SET used_by = ?, used_at = ?
+                WHERE invitation_code = ?
+            """,
+                (user.id, datetime.datetime.now().isoformat(), invitation_code),
+            )
+
+            conn.commit()
+            conn.close()
+
+            # Получаем информацию о пригласившем
+            inviter_info = self.bot_db.get_user(invited_by)
+            inviter_name = (
+                inviter_info.get("username", "Администратор")
+                if inviter_info
+                else "Администратор"
+            )
+
+            menu = build_main_menu(level)
+
+            level_names = {
+                "user": "👤 User (Пользователь)",
+                "operator": "⚙️ Operator (Оператор)",
+                "engineer": "🔧 Engineer (Инженер)",
+            }
+
+            welcome_text = (
+                f"🎉 **Добро пожаловать в КУБ-1063 Control Bot!**\n\n"
+                f"👋 Привет, {_display_name(user)}!\n\n"
+                f"✅ **Регистрация успешна**\n"
+                f"🔐 **Уровень доступа:** {md_escape(level_names.get(level, level))}\n"
+                f"👤 **Приглашение от:** @{md_escape(inviter_name)}\n\n"
+                f"**Ваши возможности:**\n"
+                f"• Мониторинг датчиков КУБ-1063\n"
+                f"• Просмотр текущих данных\n"
+                f"• Управление системой (по уровню доступа)\n\n"
+                "Выберите действие в меню ниже ⬇️"
+            )
+
+            await update.message.reply_text(
+                welcome_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+            self.bot_db.log_user_command(
+                user.id, "start", f"invite_{invitation_code}", True
+            )
+            logger.info(
+                f"✅ Новый пользователь {user.id} (@{user.username}) зарегистрирован по приглашению {invitation_code}"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки приглашения: {e}")
+            await update.message.reply_text(
+                error_message(f"Ошибка обработки приглашения: {str(e)}"),
+                parse_mode="Markdown",
+            )
+
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /status - показать текущие данные"""
+        user = update.effective_user
+
+        # Проверяем права доступа
+        if not check_user_permission(user.id, "read", self.bot_db):
+            await update.message.reply_text(
+                error_message("У вас нет прав для чтения данных"), parse_mode="Markdown"
+            )
+            return
+
+        try:
+            await send_typing_action(update, context)
+
+            # Читаем данные из SQLite
+            data = await self.get_current_data_from_db()
+
+            if data:
+                status_text = format_sensor_data(data)
+                # Добавляем оценку причин аварии и нейтрализации
+                assess = await self.compute_alarm_assessment(data)
+                if assess["items"]:
+                    status_text += "\n**🧯 Анализ аварии:**\n"
+                    for it in assess["items"][:5]:
+                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                    if assess["all_neutralized"] and data.get("alarm_relay") is True:
+                        status_text += (
+                            "\n✅ Причины устранены — можно сбросить реле аварии."
+                        )
+                # Подсказка: датчики восстановились, а аварии/реле ещё активны → предложить сброс
+                recovery = await self.get_recent_sensor_recovery(minutes=15)
+                relay_on = (
+                    bool(data.get("alarm_relay")) if "alarm_relay" in data else False
+                )
+                alarms_cnt = int(data.get("active_alarms", 0) or 0)
+                recovered_sensors = [
+                    name.upper() for name, ok in recovery.items() if ok
+                ]
+                if recovered_sensors and (relay_on or alarms_cnt > 0):
+                    rec_str = ", ".join(recovered_sensors)
+                    status_text += (
+                        f"\n\nℹ️ Обнаружено восстановление датчиков: {rec_str}.\n"
+                        f"Можно выполнить сброс аварий (кнопка ниже)."
+                    )
+            else:
+                status_text = error_message(
+                    "Нет данных от КУБ-1063\n\n"
+                    "Запустите основную систему:\n"
+                    "`python tools/start_all_services.py`"
+                )
+
+            access_level = self.bot_db.get_user_access_level(user.id)
+            badges = {}
+            if data:
+                badges = {
+                    "alarms": int(data.get("active_alarms", 0) or 0),
+                    "warnings": int(data.get("active_warnings", 0) or 0),
+                }
+            menu = build_main_menu(access_level, badges=badges)
+
+            status_text = truncate_text(status_text, 4000)
+
+            await update.message.reply_text(
+                status_text, parse_mode="Markdown", reply_markup=menu
+            )
+
+            self.bot_db.log_user_command(user.id, "read", None, True)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статуса: {e}")
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await update.message.reply_text(
+                error_message(f"Ошибка получения данных: {str(e)}"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+
+    async def cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /reset — сброс аварий (для operator+)"""
+        user = update.effective_user
+
+        # Проверка прав и лимитов
+        if not check_user_permission(user.id, "reset_alarms", self.bot_db):
+            await update.message.reply_text(
+                error_message("У вас нет прав для сброса аварий"), parse_mode="Markdown"
+            )
+            return
+        allowed, rate_msg = check_command_rate_limit(user.id, self.bot_db)
+        if not allowed:
+            await update.message.reply_text(
+                error_message(rate_msg), parse_mode="Markdown"
+            )
+            return
+
+        try:
+            await update.message.reply_text(
+                loading_message("Выполняется сброс аварий..."), parse_mode="Markdown"
+            )
+            user_info = f"telegram_user_{user.id}_{user.username or user.first_name}"
+            success, result = self.add_write_command_to_db(0x0020, 1, user_info)
+            access_level = self.bot_db.get_user_access_level(user.id)
+            data = await self.get_current_data_from_db() or {}
+            badges = {
+                "alarms": int((data or {}).get("active_alarms", 0) or 0),
+                "warnings": int((data or {}).get("active_warnings", 0) or 0),
+            }
+            menu = build_main_menu(access_level, badges=badges)
+            if success:
+                await update.message.reply_text(
+                    success_message(
+                        f"Команда сброса отправлена. ID: `{result}`\nОжидайте 5–15 секунд."
+                    ),
+                    reply_markup=menu,
+                    parse_mode="Markdown",
+                )
+                self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", True)
+                # Плановая проверка результата через 12 сек
+                try:
+                    self.application.job_queue.run_once(
+                        self._post_reset_check_job,
+                        when=12,
+                        data={"chat_id": update.effective_chat.id, "user_id": user.id},
+                    )
+                except Exception as jerr:
+                    logger.warning(
+                        f"⚠️ Не удалось запланировать проверку после сброса: {jerr}"
+                    )
+            else:
+                await update.message.reply_text(
+                    error_message(f"Не удалось отправить команду: {result}"),
+                    reply_markup=menu,
+                    parse_mode="Markdown",
+                )
+                self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", False)
+        except Exception as e:
+            logger.error(f"❌ Ошибка /reset: {e}")
+            await update.message.reply_text(
+                error_message(str(e)), parse_mode="Markdown"
+            )
+
+    async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /stats - статистика системы"""
+        user = update.effective_user
+
+        if not check_user_permission(user.id, "read", self.bot_db):
+            await update.message.reply_text(
+                error_message("У вас нет прав для чтения статистики"),
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            await send_typing_action(update, context)
+
+            # Простая статистика без UnifiedKUBSystem
+            stats_text = "📈 **СТАТИСТИКА СИСТЕМЫ КУБ-1063**\n\n"
+
+            # Получаем информацию из базы
+            data = await self.get_current_data_from_db()
+            if data:
+                stats_text += f"🔄 **Последнее обновление:** `{data.get('updated_at', 'неизвестно')}`\n"
+                stats_text += f"🌡️ **Текущая температура:** `{data.get('temp_inside', 0):.1f}°C`\n"
+                stats_text += f"💧 **Влажность:** `{data.get('humidity', 0):.1f}%`\n"
+                stats_text += (
+                    f"🚨 **Активные аварии:** `{data.get('active_alarms', 0)}`\n"
+                )
+            else:
+                stats_text += "❌ Нет данных от основной системы\n"
+
+            # Получаем статистику пользователя
+            user_stats = self.bot_db.get_user_stats(user.id)
+
+            if user_stats:
+                stats_text += "\n**👤 ВАША СТАТИСТИКА:**\n"
+                stats_text += (
+                    f"• Всего команд: `{user_stats.get('total_commands', 0)}`\n"
+                )
+                stats_text += f"• За сегодня: `{user_stats.get('commands_today', 0)}`\n"
+                stats_text += (
+                    f"• Успешность: `{user_stats.get('success_rate', 0):.1f}%`\n"
+                )
+
+            access_level = self.bot_db.get_user_access_level(user.id)
+            menu = build_stats_menu(access_level)
+
+            stats_text = truncate_text(stats_text, 4000)
+
+            await update.message.reply_text(
+                stats_text, parse_mode="Markdown", reply_markup=menu
+            )
+
+            self.bot_db.log_user_command(user.id, "stats", None, True)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики: {e}")
+            await update.message.reply_text(
+                error_message(f"Ошибка получения статистики: {str(e)}"),
+                parse_mode="Markdown",
+            )
+
+    # =======================================================================
+    # УПРАВЛЕНИЕ РОЛЯМИ ПОЛЬЗОВАТЕЛЕЙ
+    # =======================================================================
+
+    async def cmd_promote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /promote - повышение пользователя (только админы)"""
+        user = update.effective_user
+
+        # Логирование попытки изменения прав
+        if SECURITY_AVAILABLE:
+            log_security_event(
+                "PRIVILEGE_ESCALATION_ATTEMPT",
+                user_id=user.id,
+                details={
+                    "username": user.username,
+                    "args": context.args,
+                    "is_admin": user.id in self.config.telegram.admin_users,
+                },
+                level="WARNING"
+                if user.id not in self.config.telegram.admin_users
+                else "INFO",
+            )
+
+        # Проверяем права админа (временная отладка)
+        logger.info(f"🔍 DEBUG: user.id={user.id}, type={type(user.id)}")
+        logger.info(f"🔍 DEBUG: admin_users={self.config.telegram.admin_users}")
+        logger.info(f"🔍 DEBUG: admin_types={[type(x) for x in self.config.telegram.admin_users]}")
+        logger.info(f"🔍 DEBUG: user.id in admin_users: {user.id in self.config.telegram.admin_users}")
+        
+        if user.id not in self.config.telegram.admin_users:
+            await update.message.reply_text("❌ У вас нет прав администратора")
+            return
+
+        try:
+            args = context.args
+            if len(args) < 2:
+                await update.message.reply_text(
+                    "📖 Использование: `/promote @username уровень`\n\n"
+                    "Доступные уровни:\n"
+                    "• `user` - только чтение\n"
+                    "• `operator` - чтение + сброс аварий\n"
+                    "• `admin` - полный доступ\n"
+                    "• `engineer` - максимальный доступ",
+                    parse_mode="Markdown",
+                )
+                return
+
+            username = args[0].replace("@", "")
+            new_level = args[1].lower()
+
+            if new_level not in ["user", "operator", "admin", "engineer"]:
+                await update.message.reply_text("❌ Неверный уровень доступа")
+                return
+
+            # Ищем пользователя по username
+            target_user = self.bot_db.find_user_by_username(username)
+            if not target_user:
+                await update.message.reply_text(f"❌ Пользователь @{username} не найден")
+                return
+
+            # Обновляем уровень доступа
+            success = self.bot_db.set_user_access_level(
+                target_user["telegram_id"], new_level
+            )
+
+            if success:
+                await update.message.reply_text(
+                    f"✅ Пользователь @{username} повышен до уровня `{new_level}`",
+                    parse_mode="Markdown",
+                )
+                logger.info(f"🔝 Админ {user.id} повысил @{username} до {new_level}")
+            else:
+                await update.message.reply_text("❌ Ошибка обновления прав доступа")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка команды promote: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+    async def cmd_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /users - список пользователей (только админы)"""
+        user = update.effective_user
+
+        if user.id not in self.config.telegram.admin_users:
+            await update.message.reply_text("❌ У вас нет прав администратора")
+            return
+
+        try:
+            users = self.bot_db.get_all_users()
+
+            if not users:
+                await update.message.reply_text("📋 Пользователи не найдены")
+                return
+
+            text = "👥 **СПИСОК ПОЛЬЗОВАТЕЛЕЙ:**\n\n"
+
+            for user_data in users:
+                username = user_data.get("username", "нет")
+                first_name = user_data.get("first_name", "")
+                access_level = user_data.get("access_level", "user")
+                is_active = user_data.get("is_active", True)
+
+                status = "✅" if is_active else "❌"
+
+                text += f"{status} **{first_name}** (@{username})\n"
+                text += f"   ID: `{user_data['telegram_id']}`\n"
+                text += f"   Доступ: `{access_level}`\n\n"
+
+            # Разбиваем длинное сообщение на части
+            if len(text) > 4000:
+                parts = [text[i : i + 4000] for i in range(0, len(text), 4000)]
+                for part in parts:
+                    await update.message.reply_text(part, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(text, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка команды users: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+    async def cmd_approve(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /approve <ID> — активировать пользователя (только админы)."""
+        user = update.effective_user
+        if user.id not in self.config.telegram.admin_users:
+            await update.message.reply_text("❌ У вас нет прав администратора")
+            return
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "📝 Использование: /approve <TELEGRAM_ID>\nПолучить ID можно через /users",
+            )
+            return
+        try:
+            target_id = int(args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Укажите числовой TELEGRAM_ID")
+            return
+        ok = self.bot_db.activate_user(target_id)
+        if ok:
+            await update.message.reply_text(f"✅ Пользователь {target_id} активирован")
+        else:
+            await update.message.reply_text("❌ Не удалось активировать пользователя")
+
+    async def cmd_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /revoke <ID> — деактивировать пользователя (только админы)."""
+        user = update.effective_user
+        if user.id not in self.config.telegram.admin_users:
+            await update.message.reply_text("❌ У вас нет прав администратора")
+            return
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "📝 Использование: /revoke <TELEGRAM_ID>\nПолучить ID можно через /users",
+            )
+            return
+        try:
+            target_id = int(args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Укажите числовой TELEGRAM_ID")
+            return
+        ok = self.bot_db.deactivate_user(target_id)
+        if ok:
+            await update.message.reply_text(f"🔒 Пользователь {target_id} деактивирован")
+        else:
+            await update.message.reply_text("❌ Не удалось деактивировать пользователя")
+
+    async def cmd_demote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /demote <ID|@username> [level] — понизить права (только админы)."""
+        admin = update.effective_user
+        if admin.id not in self.config.telegram.admin_users:
+            await update.message.reply_text("❌ У вас нет прав администратора")
+            return
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "📝 Использование: /demote <TELEGRAM_ID|@username> [level]\n"
+                "По умолчанию level=user",
+            )
+            return
+        target = args[0]
+        new_level = args[1].lower() if len(args) > 1 else "user"
+        if new_level not in ("user", "operator"):
+            new_level = "user"
+        target_id: Optional[int] = None
+        if target.startswith("@"):
+            username = target.lstrip("@")
+            try:
+                u = self.bot_db.find_user_by_username(username)
+                target_id = u.get("telegram_id") if u else None
+            except Exception:
+                target_id = None
+        else:
+            try:
+                target_id = int(target)
+            except ValueError:
+                target_id = None
+        if not target_id:
+            await update.message.reply_text("❌ Пользователь не найден")
+            return
+        ok = self.bot_db.set_user_access_level(target_id, new_level)
+        if ok:
+            await update.message.reply_text(
+                f"✅ Пользователь {target_id} понижен до `{new_level}`",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text("❌ Не удалось изменить уровень доступа")
+
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /help - справка"""
+        user = update.effective_user
+
+        await send_typing_action(update, context)
+
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        help_text = (
+            "ℹ️ **Справка по КУБ-1063 Control Bot**\n\n"
+            "Используйте кнопки меню для навигации и действий. Команды не требуются.\n\n"
+            "**🔘 КНОПКИ МЕНЮ:**\n"
+            "• 📊 Показания — текущие данные с датчиков\n"
+            "• 🔄 Обновить — получить свежие данные\n"
+            "• 📈 Статистика — статистика системы\n"
+            "• 🏠 Главное меню — возврат в главное меню\n"
+        )
+
+        if user.id in self.config.telegram.admin_users or access_level in [
+            "admin",
+            "engineer",
+        ]:
+            help_text += (
+                "**👑 Администрирование:**\n"
+                "• Управление пользователями и правами — через меню: \n"
+                "  Настройки → Управление пользователями\n\n"
+            )
+
+        help_text += f"**🔐 ВАШ УРОВЕНЬ ДОСТУПА:** `{access_level}`\n"
+
+        menu = build_main_menu(access_level)
+
+        await update.message.reply_text(
+            help_text, reply_markup=menu, parse_mode="Markdown"
+        )
+
+    async def cmd_switch_level(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Команда /switch_level - временное переключение уровня доступа"""
+        user = update.effective_user
+
+        # Проверяем, что пользователь имеет высокий уровень доступа
+        current_level = self.bot_db.get_user_access_level(user.id)
+        if current_level not in ["admin", "engineer"]:
+            await update.message.reply_text(
+                "❌ У вас недостаточно прав для переключения уровня доступа",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Получаем аргументы команды
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "📝 **Использование:** `/switch_level <уровень> [часы]`\n\n"
+                "**Доступные уровни:**\n"
+                "• `user` — базовый уровень\n"
+                "• `operator` — операторский уровень\n"
+                "• `engineer` — инженерный уровень\n"
+                "• `admin` — администраторский уровень\n\n"
+                "**Примеры:**\n"
+                "• `/switch_level user` — переключиться на user на 24 часа\n"
+                "• `/switch_level operator 2` — переключиться на operator на 2 часа\n"
+                "• `/switch_level restore` — восстановить оригинальный уровень",
+                parse_mode="Markdown",
+            )
+            return
+
+        target_level = args[0].lower()
+        duration_hours = int(args[1]) if len(args) > 1 else 24
+
+        try:
+            # Специальная команда для восстановления
+            if target_level == "restore":
+                success = self.bot_db.restore_user_original_level(user.id)
+                if success:
+                    new_level = self.bot_db.get_user_access_level(user.id)
+                    await update.message.reply_text(
+                        f"🔄 **Восстановлен оригинальный уровень доступа**\n\n"
+                        f"Текущий уровень: `{new_level}`",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    await update.message.reply_text(
+                        "❌ Ошибка восстановления уровня доступа"
+                    )
+                return
+
+            # Проверяем валидность целевого уровня
+            valid_levels = ["user", "operator", "engineer", "admin"]
+            if target_level not in valid_levels:
+                await update.message.reply_text(
+                    f"❌ Неверный уровень: `{target_level}`\n"
+                    f"Доступные: {', '.join(valid_levels)}",
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Устанавливаем временный уровень
+            success = self.bot_db.set_user_temporary_level(
+                user.id, target_level, duration_hours
+            )
+            if success:
+                level_info = self.bot_db.get_user_level_info(user.id)
+                await update.message.reply_text(
+                    f"🕐 **Временный уровень доступа установлен**\n\n"
+                    f"Новый уровень: `{target_level}`\n"
+                    f"Длительность: {duration_hours} час(ов)\n"
+                    f"Оригинальный уровень: `{level_info.get('original_level')}`\n\n"
+                    f"Используйте `/switch_level restore` для восстановления.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text("❌ Ошибка установки временного уровня")
+
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат времени. Укажите число часов."
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка переключения уровня: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+    async def cmd_level_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /level_info - информация о текущем уровне доступа"""
+        user = update.effective_user
+
+        try:
+            level_info = self.bot_db.get_user_level_info(user.id)
+            if not level_info:
+                await update.message.reply_text("❌ Пользователь не найден в системе")
+                return
+
+            current_level = level_info.get("current_level")
+            original_level = level_info.get("original_level")
+            is_temporary = level_info.get("is_temporary")
+            temp_expires = level_info.get("temp_expires")
+
+            info_text = "🔐 **Информация о вашем уровне доступа**\n\n"
+            info_text += f"**Текущий уровень:** `{current_level}`\n"
+
+            if is_temporary and original_level:
+                info_text += f"**Оригинальный уровень:** `{original_level}`\n"
+                info_text += "**Статус:** Временный\n"
+                if temp_expires:
+                    info_text += f"**Истекает:** {temp_expires}\n"
+                info_text += (
+                    "\n💡 Используйте `/switch_level restore` для восстановления."
+                )
+            else:
+                info_text += "**Статус:** Постоянный\n"
+
+            # Показываем текущие права
+            permissions = self.bot_db.get_access_permissions(current_level)
+            if permissions:
+                info_text += "\n**🔓 Ваши права:**\n"
+                if permissions.get("can_read"):
+                    info_text += "• ✅ Чтение данных\n"
+                if permissions.get("can_write"):
+                    info_text += "• ✅ Запись команд\n"
+                if permissions.get("can_reset_alarms"):
+                    info_text += "• ✅ Сброс аварий\n"
+
+            await update.message.reply_text(info_text, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения информации об уровне: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+    async def cmd_block_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /block_user - блокировка пользователя"""
+        user = update.effective_user
+
+        # Логирование попытки блокировки пользователя
+        if SECURITY_AVAILABLE:
+            log_security_event(
+                "USER_BLOCK_ATTEMPT",
+                user_id=user.id,
+                details={"username": user.username, "args": context.args},
+                level="WARNING",
+            )
+
+        # Проверяем права доступа
+        access_level = self.bot_db.get_user_access_level(user.id)
+        if access_level not in ["engineer", "admin"]:
+            await update.message.reply_text(
+                "❌ У вас недостаточно прав для блокировки пользователей",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Получаем аргументы команды
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "📝 Заблокировать пользователя можно через меню:\n"
+                "Настройки → Управление пользователями → Заблокировать пользователя",
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            target_user_id = int(args[0])
+
+            # Проверяем, что пользователь не блокирует самого себя
+            if target_user_id == user.id:
+                await update.message.reply_text(
+                    "❌ Вы не можете заблокировать самого себя"
+                )
+                return
+
+            # Блокируем пользователя
+            success = self.bot_db.deactivate_user(target_user_id)
+
+            if success:
+                # Получаем информацию о заблокированном пользователе
+                target_user = self.bot_db.get_user(target_user_id)
+                target_username = (
+                    target_user.get("username", "Unknown") if target_user else "Unknown"
+                )
+                target_username_md = md_escape(target_username)
+
+                await update.message.reply_text(
+                    f"🔒 **Пользователь заблокирован**\n\n"
+                    f"👤 **Пользователь:** @{target_username_md} (ID: {target_user_id})\n"
+                    f"👮‍♂️ **Заблокировал:** {_mention(user)}\n\n"
+                    f"Пользователь больше не сможет использовать бота до разблокировки.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Ошибка блокировки пользователя. Возможно, пользователь не найден."
+                )
+
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат ID пользователя. Укажите числовой ID."
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка блокировки пользователя: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+    async def cmd_unblock_user(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Команда /unblock_user - разблокировка пользователя"""
+        user = update.effective_user
+
+        # Проверяем права доступа
+        access_level = self.bot_db.get_user_access_level(user.id)
+        if access_level not in ["engineer", "admin"]:
+            await update.message.reply_text(
+                "❌ У вас недостаточно прав для разблокировки пользователей",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Получаем аргументы команды
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "📝 **Использование:** `/unblock_user ID_пользователя`\n\n"
+                "**Пример:** `/unblock_user 123456789`\n\n"
+                "Используйте меню **Настройки → Управление пользователями → Разблокировать пользователя** "
+                "для получения списка заблокированных пользователей.",
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            target_user_id = int(args[0])
+
+            # Разблокируем пользователя (устанавливаем is_active = 1)
+            try:
+                with sqlite3.connect(config.database.commands_db) as conn:
+                    cursor = conn.execute(
+                        """
+                        UPDATE telegram_users
+                        SET is_active = 1, last_active = CURRENT_TIMESTAMP
+                        WHERE telegram_id = ?
+                    """,
+                        (target_user_id,),
+                    )
+
+                    success = cursor.rowcount > 0
+            except Exception as db_error:
+                logger.error(f"❌ Ошибка базы данных при разблокировке: {db_error}")
+                success = False
+
+            if success:
+                # Получаем информацию о разблокированном пользователе
+                target_user = self.bot_db.get_user(target_user_id)
+                target_username = (
+                    target_user.get("username", "Unknown") if target_user else "Unknown"
+                )
+                target_username_md = md_escape(target_username)
+
+                await update.message.reply_text(
+                    f"✅ **Пользователь разблокирован**\n\n"
+                    f"👤 **Пользователь:** @{target_username_md} (ID: {target_user_id})\n"
+                    f"👮‍♂️ **Разблокировал:** {_mention(user)}\n\n"
+                    f"Пользователь снова может использовать бота.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Ошибка разблокировки пользователя. Возможно, пользователь не найден или уже активен."
+                )
+
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат ID пользователя. Укажите числовой ID."
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка разблокировки пользователя: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+    # =======================================================================
+    # ОБРАБОТЧИКИ CALLBACK QUERY (INLINE КНОПКИ)
+    # =======================================================================
+
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик inline кнопок"""
+        query = update.callback_query
+        await query.answer()
+
+        data = query.data
+
+        try:
+            await send_typing_action(query, context)
+
+            if data == "show_status":
+                await self._handle_show_status(query, context)
+            elif data == "refresh_status":
+                await self._handle_refresh_status(query, context)
+            elif data == "show_stats":
+                await self._handle_show_stats(query, context)
+            elif data == "refresh_stats":
+                await self._handle_refresh_stats(query, context)
+            elif data == "reset_alarms":
+                await self._handle_reset_alarms(query, context)
+            elif data == "reset_alarms_confirmed":
+                await self._handle_confirm_reset_alarms(query, context)
+            elif data == "ack_alarms":
+                await self._handle_ack_alarms(query, context)
+            elif data == "main_menu":
+                await self._handle_main_menu(query, context)
+            elif data == "show_help":
+                await self._handle_show_help(query, context)
+            elif data == "settings":
+                await self._handle_settings(query, context)
+
+            # НОВЫЕ ОБРАБОТЧИКИ МЕНЮ НАСТРОЕК
+            elif data == "manage_users":
+                await self._handle_manage_users(query, context)
+            elif data == "switch_level_menu":
+                await self._handle_switch_level_menu(query, context)
+            elif data == "system_config":
+                await self._handle_system_config(query, context)
+            elif data == "system_logs":
+                await self._handle_system_logs(query, context)
+            elif data == "permissions_config":
+                await self._handle_permissions_config(query, context)
+            elif data == "backup_config":
+                await self._handle_backup_config(query, context)
+
+            # УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
+            elif data == "list_users":
+                await self._handle_list_users(query, context)
+            elif data == "invite_user":
+                await self._handle_invite_user(query, context)
+            elif data == "block_user":
+                await self._handle_block_user(query, context)
+            elif data == "unblock_user":
+                await self._handle_unblock_user(query, context)
+            elif data == "change_permissions":
+                await self._handle_change_permissions(query, context)
+            elif data == "user_stats":
+                await self._handle_user_stats(query, context)
+
+            # ПЕРЕКЛЮЧЕНИЕ УРОВНЕЙ
+            elif data.startswith("temp_level_"):
+                level = data.replace("temp_level_", "")
+                await self._handle_temp_level(query, context, level)
+            elif data == "restore_level":
+                await self._handle_restore_level(query, context)
+            elif data == "level_info_menu":
+                await self._handle_level_info_menu(query, context)
+
+            # ИНТЕРАКТИВНОЕ УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
+            elif data.startswith("promote_user_"):
+                user_id = int(data.replace("promote_user_", ""))
+                await self._handle_promote_user_selected(query, context, user_id)
+            elif data.startswith("block_user_"):
+                user_id = int(data.replace("block_user_", ""))
+                await self._handle_block_user_selected(query, context, user_id)
+            elif data.startswith("unblock_user_"):
+                user_id = int(data.replace("unblock_user_", ""))
+                await self._handle_unblock_user_selected(query, context, user_id)
+            elif data.startswith("set_level_"):
+                parts = data.replace("set_level_", "").split("_")
+                user_id = int(parts[0])
+                new_level = parts[1]
+                await self._handle_set_user_level(query, context, user_id, new_level)
+            elif data.startswith("invite_level_"):
+                level = data.replace("invite_level_", "")
+                await self._handle_invite_level_selected(query, context, level)
+            elif data.startswith("confirm_invite_"):
+                level = data.replace("confirm_invite_", "")
+                await self._handle_confirm_invite(query, context, level)
+            elif data.startswith("copy_link_"):
+                await query.answer(
+                    "📋 Ссылка готова к копированию! Нажмите на неё выше ☝️",
+                    show_alert=True,
+                )
+            elif data == "promote_users":
+                await self._handle_change_permissions(query, context)
+
+            else:
+                await query.edit_message_text(
+                    error_message("Неизвестная команда"), parse_mode="Markdown"
+                )
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки callback {data}: {e}")
+            access_level = self.bot_db.get_user_access_level(query.from_user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message(f"Ошибка выполнения команды: {str(e)}"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+
+    async def _handle_main_menu(self, query, context):
+        """Показать главное меню"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+        menu = build_main_menu(access_level)
+
+        await query.edit_message_text(
+            "🏠 **Главное меню**\n\nВыберите действие:",
+            reply_markup=menu,
+            parse_mode="Markdown",
+        )
+
+    async def _handle_show_status(self, query, context):
+        """Показать статус"""
+        await self._handle_refresh_status(query, context)
+
+    async def _handle_refresh_status(self, query, context):
+        """Обновление статуса из SQLite базы"""
+        user = query.from_user
+
+        if not check_user_permission(user.id, "read", self.bot_db):
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message("У вас нет прав для чтения данных"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            # Читаем данные из SQLite
+            data = await self.get_current_data_from_db()
+
+            if data:
+                # Оптимистичный режим: если после сброса прошло <35с, считаем реле ВЫКЛ
+                try:
+                    import time as _t
+
+                    deadline = self._optimistic_clear_until.get(query.message.chat_id)
+                    if deadline and _t.time() < deadline:
+                        data["alarm_relay"] = False
+                except Exception:
+                    pass
+                status_text = format_sensor_data(data)
+                assess = await self.compute_alarm_assessment(data)
+                if assess["items"]:
+                    status_text += "\n**🧯 Анализ аварии:**\n"
+                    for it in assess["items"][:5]:
+                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                    if assess["all_neutralized"] and data.get("alarm_relay") is True:
+                        status_text += (
+                            "\n✅ Причины устранены — можно сбросить реле аварии."
+                        )
+            else:
+                status_text = error_message(
+                    "Нет данных от КУБ-1063\n\n"
+                    "Возможные причины:\n"
+                    "• Основная система не запущена\n"
+                    "• Нет связи с контроллером\n\n"
+                    "Запустите: `python tools/start_all_services.py`"
+                )
+
+            access_level = self.bot_db.get_user_access_level(user.id)
+            menu = build_main_menu(access_level)
+
+            status_text = truncate_text(status_text, 4000)
+
+            # Проверяем, изменился ли контент перед редактированием
+            try:
+                await query.edit_message_text(
+                    status_text, reply_markup=menu, parse_mode="Markdown"
+                )
+                # Запоминаем master‑message id для чата (обновили существующее)
+                try:
+                    self.bot_db.set_last_message_id(
+                        query.message.chat_id, query.message.message_id
+                    )
+                except Exception:
+                    pass
+            except Exception as edit_error:
+                if "message is not modified" in str(edit_error).lower():
+                    # Сообщение не изменилось, просто отправляем ответ без редактирования
+                    await query.answer("🔄 Данные обновлены", show_alert=False)
+                else:
+                    raise edit_error
+
+            self.bot_db.log_user_command(user.id, "read", None, data is not None)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления статуса: {e}")
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message(f"Ошибка получения данных: {str(e)}"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+
+    async def _handle_show_stats(self, query, context):
+        """Показать статистику"""
+        await self._handle_refresh_stats(query, context)
+
+    async def _handle_refresh_stats(self, query, context):
+        """Обновление статистики"""
+        user = query.from_user
+
+        if not check_user_permission(user.id, "read", self.bot_db):
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message("У вас нет прав для чтения статистики"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            # Простая статистика
+            stats_text = "📈 **СТАТИСТИКА СИСТЕМЫ КУБ-1063**\n\n"
+
+            data = await self.get_current_data_from_db()
+            if data:
+                stats_text += f"🔄 **Последнее обновление:** `{data.get('updated_at', 'неизвестно')}`\n"
+                stats_text += (
+                    f"🌡️ **Температура:** `{data.get('temp_inside', 0):.1f}°C`\n"
+                )
+                stats_text += f"💧 **Влажность:** `{data.get('humidity', 0):.1f}%`\n"
+            else:
+                stats_text += "❌ Нет данных от основной системы\n"
+
+            user_stats = self.bot_db.get_user_stats(user.id)
+            if user_stats:
+                stats_text += "\n**👤 ВАША СТАТИСТИКА:**\n"
+                stats_text += (
+                    f"• Всего команд: `{user_stats.get('total_commands', 0)}`\n"
+                )
+
+            access_level = self.bot_db.get_user_access_level(user.id)
+            menu = build_stats_menu(access_level)
+
+            stats_text = truncate_text(stats_text, 4000)
+
+            # Проверяем, изменился ли контент перед редактированием
+            try:
+                await query.edit_message_text(
+                    stats_text, reply_markup=menu, parse_mode="Markdown"
+                )
+            except Exception as edit_error:
+                if "message is not modified" in str(edit_error).lower():
+                    # Сообщение не изменилось, просто отправляем ответ без редактирования
+                    await query.answer("📈 Статистика обновлена", show_alert=False)
+                else:
+                    raise edit_error
+
+            self.bot_db.log_user_command(user.id, "stats", None, True)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики: {e}")
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message(f"Ошибка получения статистики: {str(e)}"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+
+    async def _handle_reset_alarms(self, query, context):
+        """Запрос подтверждения сброса аварий"""
+        user = query.from_user
+
+        if not check_user_permission(user.id, "reset_alarms", self.bot_db):
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message("У вас нет прав для сброса аварий"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+            return
+
+        confirmation_menu = build_confirmation_menu(
+            "reset_alarms_confirmed", "main_menu"
+        )
+
+        await query.edit_message_text(
+            warning_message(
+                "Вы уверены, что хотите сбросить все аварии?\n\nЭто действие нельзя отменить!"
+            ),
+            reply_markup=confirmation_menu,
+            parse_mode="Markdown",
+        )
+
+    async def _handle_confirm_reset_alarms(self, query, context):
+        """Подтвержденный сброс аварий через систему команд"""
+        user = query.from_user
+
+        if not check_user_permission(user.id, "reset_alarms", self.bot_db):
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message("У вас нет прав для сброса аварий"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            # Показываем процесс выполнения
+            await query.edit_message_text(
+                loading_message("Выполняется сброс аварий..."), parse_mode="Markdown"
+            )
+
+            # Добавляем команду сброса в очередь (регистр 0x0020, значение 1)
+            user_info = f"telegram_user_{user.id}_{user.username or user.first_name}"
+            success, result = self.add_write_command_to_db(0x0020, 1, user_info)
+
+            access_level = self.bot_db.get_user_access_level(user.id)
+            data = await self.get_current_data_from_db() or {}
+            badges = {
+                "alarms": int((data or {}).get("active_alarms", 0) or 0),
+                "warnings": int((data or {}).get("active_warnings", 0) or 0),
+            }
+            menu = build_main_menu(access_level, badges=badges)
+
+            if success:
+                logger.info(
+                    "[RESET] Команда сброса добавлена в очередь успешно (id=%s)", result
+                )
+                await query.edit_message_text(
+                    success_message(
+                        f"🔄 Команда сброса аварий отправлена!\n\nID команды: `{result}`\n\nВыполнение может занять несколько секунд."
+                    ),
+                    reply_markup=menu,
+                    parse_mode="Markdown",
+                )
+                self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", True)
+                # Включаем оптимистичный режим (до 35 сек реле считаем ВЫКЛ)
+                try:
+                    chat_id = query.message.chat_id
+                    import time as _t
+
+                    self._optimistic_clear_until[chat_id] = _t.time() + 35
+                    logger.info(
+                        "[RESET] Включен оптимистичный режим для chat_id=%s до %s",
+                        chat_id,
+                        int(self._optimistic_clear_until[chat_id]),
+                    )
+                    # Перерисуем мастер‑сообщение, если знаем его id
+                    state = self.bot_db.get_bot_state(chat_id)
+                    mid = state.get("last_message_id")
+                    if mid:
+                        data2 = await self.get_current_data_from_db() or {}
+                        data2["alarm_relay"] = False
+                        status_text2 = format_sensor_data(data2)
+                        assess2 = await self.compute_alarm_assessment(data2)
+                        if assess2["items"]:
+                            status_text2 += "\n**🧯 Анализ аварии:**\n"
+                            for it in assess2["items"][:5]:
+                                status_text2 += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                            if assess2["all_neutralized"]:
+                                status_text2 += "\n✅ Причины устранены — можно сбросить реле аварии."
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=mid,
+                            text=truncate_text(status_text2, 4000),
+                            parse_mode="Markdown",
+                        )
+                        logger.info(
+                            "[RESET] Мастер‑сообщение обновлено в оптимистичном режиме (chat_id=%s, mid=%s)",
+                            chat_id,
+                            mid,
+                        )
+                except Exception as _e:
+                    logger.warning(
+                        f"⚠️ Не удалось перерисовать статус (оптимистично): {_e}"
+                    )
+                # Плановая проверка результата через 12 сек
+                try:
+                    self.application.job_queue.run_once(
+                        self._post_reset_check_job,
+                        when=12,
+                        data={"chat_id": query.message.chat_id, "user_id": user.id},
+                    )
+                except Exception as jerr:
+                    logger.warning(
+                        f"⚠️ Не удалось запланировать проверку после сброса: {jerr}"
+                    )
+            else:
+                await query.edit_message_text(
+                    error_message(f"Ошибка отправки команды:\n{result}"),
+                    reply_markup=menu,
+                    parse_mode="Markdown",
+                )
+                self.bot_db.log_user_command(user.id, "reset_alarms", "0x0020", False)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка сброса аварий: {e}")
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message(f"Ошибка: {str(e)}"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+
+    async def _alarm_watch_job(self, context: ContextTypes.DEFAULT_TYPE):
+        """Фоновая задача: оповещение об авариях"""
+        try:
+            data = await self.get_current_data_from_db()
+            if not data:
+                return
+            alarms = int(data.get("active_alarms", 0) or 0)
+            warns = int(data.get("active_warnings", 0) or 0)
+            now = int(time.time())
+            # Условия уведомления: появление/рост аварий или периодическое напоминание раз в 15 минут
+            changed = alarms > 0 and (alarms != self._last_alarm_count)
+            periodic = alarms > 0 and (now - self._last_alarm_notify_ts >= 15 * 60)
+            cleared = self._last_alarm_count > 0 and alarms == 0
+            logger.debug(
+                "[ALARM_WATCH] alarms=%s warns=%s changed=%s periodic=%s cleared=%s",
+                alarms,
+                warns,
+                changed,
+                periodic,
+                cleared,
+            )
+
+            if changed or periodic:
+                # Кому отправлять: админам и операторам
+                recipients = set(self.config.telegram.admin_users or [])
+                try:
+                    users = self.bot_db.get_all_users()
+                    for u in users:
+                        lvl = u.get("access_level") or "user"
+                        if u.get("is_active", 1) and lvl in (
+                            "operator",
+                            "engineer",
+                            "admin",
+                        ):
+                            recipients.add(int(u.get("telegram_id")))
+                except Exception:
+                    pass
+                if recipients:
+                    # Подготовим мастер‑сообщение (редактируемое)
+                    try:
+                        status_text = format_sensor_data(data)
+                        assess = await self.compute_alarm_assessment(data)
+                        if assess["items"]:
+                            status_text += "\n**🧯 Анализ аварии:**\n"
+                            for it in assess["items"][:5]:
+                                status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                    except Exception as _e:
+                        logger.warning(f"⚠️ Ошибка подготовки текста аварии: {_e}")
+                        status_text = (
+                            f"🚨 Обнаружены активные аварии: {alarms}\n"
+                            f"⚠️ Предупреждения: {warns}"
+                        )
+                    for uid in recipients:
+                        try:
+                            # Пытаемся отредактировать мастер‑сообщение, чтобы не плодить новые
+                            state = self.bot_db.get_bot_state(uid)
+                            mid = state.get("last_message_id")
+                            if mid:
+                                access_level = self.bot_db.get_user_access_level(uid)
+                                menu = build_main_menu(access_level)
+                                await context.bot.edit_message_text(
+                                    chat_id=uid,
+                                    message_id=mid,
+                                    text=truncate_text(status_text, 4000),
+                                    reply_markup=menu,
+                                    parse_mode="Markdown",
+                                )
+                            else:
+                                # Создадим первое мастер‑сообщение для чата
+                                sent = await context.bot.send_message(
+                                    chat_id=uid,
+                                    text=truncate_text(status_text, 4000),
+                                    parse_mode="Markdown",
+                                )
+                                self.bot_db.set_last_message_id(uid, sent.message_id)
+                            # Звуковой пинг только при появлении аварий (если не включен тихий режим)
+                            try:
+                                if not self.bot_db.is_ack_active(uid):
+                                    await self._send_sound_ping(
+                                        context, uid, f"🚨 Аварии: {alarms}"
+                                    )
+                            except Exception:
+                                pass
+                        except Exception as send_err:
+                            logger.warning(
+                                f"⚠️ Не удалось обновить мастер‑сообщение {uid}: {send_err}"
+                            )
+                    self._last_alarm_notify_ts = now
+            elif cleared:
+                # Сообщаем об устранении — обновляя мастер‑сообщение, не создавая новые
+                recipients = set(self.config.telegram.admin_users or [])
+                try:
+                    users = self.bot_db.get_all_users()
+                    for u in users:
+                        lvl = u.get("access_level") or "user"
+                        if u.get("is_active", 1) and lvl in (
+                            "operator",
+                            "engineer",
+                            "admin",
+                        ):
+                            recipients.add(int(u.get("telegram_id")))
+                except Exception:
+                    pass
+                status_text = format_sensor_data(data)
+                assess = await self.compute_alarm_assessment(data)
+                if assess["items"]:
+                    status_text += "\n**🧯 Анализ аварии:**\n"
+                    for it in assess["items"][:5]:
+                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+                status_text += "\n✅ Аварии устранены"
+                for uid in recipients:
+                    try:
+                        state = self.bot_db.get_bot_state(uid)
+                        mid = state.get("last_message_id")
+                        access_level = self.bot_db.get_user_access_level(uid)
+                        menu = build_main_menu(access_level)
+                        if mid:
+                            await context.bot.edit_message_text(
+                                chat_id=uid,
+                                message_id=mid,
+                                text=truncate_text(status_text, 4000),
+                                reply_markup=menu,
+                                parse_mode="Markdown",
+                            )
+                            logger.debug(
+                                "[ALARM_WATCH] Обновлено мастер‑сообщение (uid=%s, mid=%s)",
+                                uid,
+                                mid,
+                            )
+                        else:
+                            sent = await context.bot.send_message(
+                                chat_id=uid,
+                                text=truncate_text(status_text, 4000),
+                                parse_mode="Markdown",
+                            )
+                            self.bot_db.set_last_message_id(uid, sent.message_id)
+                        # Без отдельного сообщения: всё отрисовано в мастер‑сообщении
+                    except Exception as send_err:
+                        logger.warning(
+                            f"⚠️ Не удалось обновить мастер‑сообщение {uid}: {send_err}"
+                        )
+            else:
+                # Нет изменений, но проверим восстановление датчиков и активное реле/аварии
+                recovery = await self.get_recent_sensor_recovery(minutes=15)
+                recovered = [k.upper() for k, v in recovery.items() if v]
+                if (
+                    recovered
+                    and (active_alarms_val := data.get("active_alarms")) is not None
+                ):
+                    relay_on = (
+                        bool(data.get("alarm_relay"))
+                        if "alarm_relay" in data
+                        else False
+                    )
+                    alarms_cnt = int(active_alarms_val or 0)
+                    if relay_on or alarms_cnt > 0:
+                        recipients = set(self.config.telegram.admin_users or [])
+                        try:
+                            users = self.bot_db.get_all_users()
+                            for u in users:
+                                lvl = u.get("access_level") or "user"
+                                if u.get("is_active", 1) and lvl in (
+                                    "operator",
+                                    "engineer",
+                                    "admin",
+                                ):
+                                    recipients.add(int(u.get("telegram_id")))
+                        except Exception:
+                            pass
+                        if recipients:
+                            text = (
+                                f"ℹ️ Датчики восстановились: {', '.join(recovered)};"
+                                f" аварии/реле ещё активны. Рекомендуем выполнить сброс из меню."
+                            )
+                            # Обновляем мастер‑сообщение краткой подсказкой
+                            for uid in recipients:
+                                try:
+                                    state = self.bot_db.get_bot_state(uid)
+                                    mid = state.get("last_message_id")
+                                    access_level = self.bot_db.get_user_access_level(
+                                        uid
+                                    )
+                                    menu = build_main_menu(access_level)
+                                    if mid:
+                                        await context.bot.edit_message_text(
+                                            chat_id=uid,
+                                            message_id=mid,
+                                            text=truncate_text(text, 4000),
+                                            reply_markup=menu,
+                                            parse_mode="Markdown",
+                                        )
+                                    else:
+                                        sent = await context.bot.send_message(
+                                            chat_id=uid,
+                                            text=truncate_text(text, 4000),
+                                            parse_mode="Markdown",
+                                        )
+                                        self.bot_db.set_last_message_id(
+                                            uid, sent.message_id
+                                        )
+                                    # Подсказку даём только в мастер‑сообщении, без отдельного пинга
+                                except Exception as send_err:
+                                    logger.warning(
+                                        f"⚠️ Не удалось обновить мастер‑сообщение {uid}: {send_err}"
+                                    )
+
+            self._last_alarm_count = alarms
+            self._last_warning_count = warns
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка фонового мониторинга аварий: {e}")
+
+    async def _post_reset_check_job(self, context: ContextTypes.DEFAULT_TYPE):
+        """Проверить, снялись ли аварии после сброса, и уведомить пользователя"""
+        try:
+            data = await self.get_current_data_from_db() or {}
+            alarms = int(data.get("active_alarms", 0) or 0)
+            relay_on = bool(data.get("alarm_relay")) if "alarm_relay" in data else False
+            chat_id = (context.job.data or {}).get("chat_id")
+            if not chat_id:
+                return
+            # Подготовим текущее представление статуса для мастер‑сообщения
+            # Оптимистичное окно: если активно — считаем реле ВЫКЛ для рендера
+            try:
+                import time as _t
+
+                deadline = self._optimistic_clear_until.get(chat_id)
+                optimistic = bool(deadline and _t.time() < deadline)
+            except Exception:
+                optimistic = False
+            data_for_render = dict(data)
+            if optimistic:
+                data_for_render["alarm_relay"] = False
+
+            status_text = format_sensor_data(data_for_render)
+            assess = await self.compute_alarm_assessment(data_for_render)
+            if assess["items"]:
+                status_text += "\n**🧯 Анализ аварии:**\n"
+                for it in assess["items"][:5]:
+                    status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
+            # Итоговая подпись об успехе/остатке
+            if optimistic or (alarms == 0 and not relay_on):
+                status_text += "\n✅ Аварии сняты"
+            else:
+                if alarms > 0 or relay_on:
+                    tail = []
+                    if alarms > 0:
+                        tail.append(f"Аварии: {alarms}")
+                    if relay_on:
+                        tail.append("реле аварии ВКЛ")
+                    status_text += "\n❗ " + ", ".join(tail)
+
+            # Обновляем мастер‑сообщение вместо отправки нового
+            try:
+                state = self.bot_db.get_bot_state(chat_id)
+                mid = state.get("last_message_id")
+                access_level = self.bot_db.get_user_access_level(chat_id) or "user"
+                menu = build_main_menu(access_level)
+                if mid:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=mid,
+                        text=truncate_text(status_text, 4000),
+                        reply_markup=menu,
+                        parse_mode="Markdown",
+                    )
+                else:
+                    sent = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=truncate_text(status_text, 4000),
+                        parse_mode="Markdown",
+                    )
+                    self.bot_db.set_last_message_id(chat_id, sent.message_id)
+            except Exception as e_edit:
+                logger.warning(
+                    f"⚠️ Не удалось обновить мастер‑сообщение в пост‑проверке: {e_edit}"
+                )
+            # Пинга здесь не шлём — избегаем лишних сообщений в ленте
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка проверки после сброса: {e}")
+
+    async def _handle_ack_alarms(self, query, context):
+        """Включить тихий режим (ACK) для текущего чата на 45 минут"""
+        try:
+            chat_id = query.message.chat_id
+            self.bot_db.set_ack_until(chat_id, minutes=45)
+            await query.answer("🤫 Тихий режим включён на 45 минут", show_alert=True)
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка установки тихого режима: {e}")
+            await query.answer("❌ Не удалось включить тихий режим", show_alert=True)
+
+    async def _delete_message_job(self, context: ContextTypes.DEFAULT_TYPE):
+        """Удаляет вспомогательное пинг‑сообщение"""
+        try:
+            data = context.job.data or {}
+            await context.bot.delete_message(
+                chat_id=data["chat_id"], message_id=data["message_id"]
+            )
+        except Exception as e:
+            logger.debug(f"[PING] Не удалось удалить пинг‑сообщение: {e}")
+
+    async def _send_sound_ping(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        text: str,
+        delete_after: Optional[int] = None,
+    ):
+        """Отправляет короткий звуковой пинг и по таймеру удаляет его, чтобы не захламлять ленту."""
+        try:
+            sent = await context.bot.send_message(
+                chat_id=chat_id, text=text, disable_notification=False
+            )
+            da = (
+                delete_after
+                if delete_after is not None
+                else self._sound_ping_delete_after
+            )
+            if (
+                hasattr(self, "application")
+                and self.application
+                and self.application.job_queue
+                and da > 0
+            ):
+                self.application.job_queue.run_once(
+                    self._delete_message_job,
+                    when=da,
+                    data={"chat_id": chat_id, "message_id": sent.message_id},
+                )
+        except Exception as e:
+            logger.debug(f"[PING] Ошибка отправки звукового пинга: {e}")
+
+    def get_recent_write_commands(self, limit: int = 5):
+        """Последние команды записи из очереди"""
+        try:
+            with sqlite3.connect(config.database.commands_db) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    """
+                    SELECT id, register, value, status, created_at, executed_at, error_message
+                    FROM write_commands
+                    ORDER BY datetime(created_at) DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения очереди команд: {e}")
+            return []
+
+    async def cmd_alarms(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /alarms — сводка по авариям/предупреждениям"""
+        user = update.effective_user
+        try:
+            data = await self.get_current_data_from_db() or {}
+            alarms = int(data.get("active_alarms", 0) or 0)
+            warns = int(data.get("active_warnings", 0) or 0)
+            updated = data.get("updated_at") or "—"
+            txt = f"🧭 Сводка аварий\n\n🚨 Аварии: {alarms}\n⚠️ Предупреждения: {warns}\n⏱ Обновлено: {updated}"
+            # Детализация известных аварий по битам
+            if isinstance(data.get("active_alarms"), int) and data.get("active_alarms"):
+                details = decode_active_alarms(int(data["active_alarms"]), max_items=12)
+                if details:
+                    txt += "\n\nИзвестные аварии:\n" + "\n".join(
+                        f"• {d}" for d in details
+                    )
+            if alarms > 0:
+                txt += "\n\nДля сброса используйте кнопку в меню (operator+)."
+            access_level = self.bot_db.get_user_access_level(user.id)
+            menu = build_main_menu(
+                access_level, badges={"alarms": alarms, "warnings": warns}
+            )
+            await update.message.reply_text(txt, reply_markup=menu)
+            self.bot_db.log_user_command(user.id, "alarms", None, True)
+        except Exception as e:
+            logger.error(f"❌ Ошибка /alarms: {e}")
+            await update.message.reply_text(
+                error_message(str(e)), parse_mode="Markdown"
+            )
+
+    async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /queue — последние команды записи"""
+        user = update.effective_user
+        try:
+            cmds = self.get_recent_write_commands(limit=5)
+            if not cmds:
+                await update.message.reply_text("📭 Очередь команд пуста")
+                return
+            lines = ["📝 Последние команды записи:"]
+            for c in cmds:
+                cid = str(c.get("id"))[:8]
+                reg = int(c.get("register", 0) or 0)
+                val = c.get("value")
+                st = c.get("status")
+                created = c.get("created_at") or ""
+                icon = (
+                    "✅"
+                    if st == "completed"
+                    else ("⏳" if st in ("pending", "executing") else "❌")
+                )
+                lines.append(f"{icon} {cid} — 0x{reg:04X}={val} [{st}] ({created})")
+            await update.message.reply_text("\n".join(lines))
+            self.bot_db.log_user_command(user.id, "queue", None, True)
+        except Exception as e:
+            logger.error(f"❌ Ошибка /queue: {e}")
+            await update.message.reply_text(
+                error_message(str(e)), parse_mode="Markdown"
+            )
+
+    async def cmd_whoami(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /whoami — информация о пользователе и доступах"""
+        user = update.effective_user
+        try:
+            info = self.bot_db.get_user_level_info(user.id) or {}
+            level = info.get("current_level", "user")
+            perms = self.bot_db.get_access_permissions(level) or {}
+            allowed, msg = check_command_rate_limit(user.id, self.bot_db)
+            txt = [
+                "👤 Ваш профиль",
+                f"ID: `{user.id}`",
+                f"Уровень: `{level}`"
+                + (" (временный)" if info.get("is_temporary") else ""),
+            ]
+            if info.get("temp_expires"):
+                txt.append(f"Истекает: {info.get('temp_expires')}")
+            txt.append("\nПрава:")
+            if perms.get("can_read"):
+                txt.append("• ✅ Чтение")
+            if perms.get("can_write"):
+                txt.append("• ✅ Запись")
+            if perms.get("can_reset_alarms"):
+                txt.append("• ✅ Сброс аварий")
+            txt.append(f"\nЛимит команд: {msg}")
+            await update.message.reply_text("\n".join(txt), parse_mode="Markdown")
+            self.bot_db.log_user_command(user.id, "whoami", None, True)
+        except Exception as e:
+            logger.error(f"❌ Ошибка /whoami: {e}")
+            await update.message.reply_text(
+                error_message(str(e)), parse_mode="Markdown"
+            )
+
+    async def _handle_show_help(self, query, context):
+        """Показать справку через callback"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        help_text = (
+            "ℹ️ **Справка по КУБ-1063 Control Bot**\n\n"
+            "**🔘 КНОПКИ МЕНЮ:**\n"
+            "• 📊 Показания — текущие данные с датчиков\n"
+            "• 🔄 Обновить — получить свежие данные\n"
+            "• 📈 Статистика — статистика системы\n"
+            "• 🏠 Главное меню — возврат в главное меню\n"
+        )
+
+        if access_level in ("operator", "admin", "engineer"):
+            help_text += "• 🚨 Сброс аварий — сброс активных аварий\n"
+
+        if access_level in ("admin", "engineer"):
+            help_text += "• ⚙️ Настройки — управление системой\n"
+
+        help_text += f"\n**🔐 ВАШ ДОСТУП:** `{access_level}`\n"
+        help_text += "\n💡 **Совет:** Кнопки быстрее команд!"
+
+        menu = build_main_menu(access_level)
+
+        await query.edit_message_text(
+            help_text, reply_markup=menu, parse_mode="Markdown"
+        )
+
+    async def _handle_settings(self, query, context):
+        """Настройки системы"""
+        user = query.from_user
+
+        # Проверяем базовые права доступа
+        if not check_user_permission(user.id, "read", self.bot_db):
+            access_level = self.bot_db.get_user_access_level(user.id)
+            back_menu = build_back_menu(access_level)
+            await query.edit_message_text(
+                error_message("У вас нет прав для настроек"),
+                reply_markup=back_menu,
+                parse_mode="Markdown",
+            )
+            return
+
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        # Получаем информацию о пользователе для отображения
+        user_info = self.bot_db.get_user(user.id)
+        username = user_info.get("username", "Unknown") if user_info else "Unknown"
+
+        settings_text = (
+            f"⚙️ **НАСТРОЙКИ СИСТЕМЫ**\n\n"
+            f"👤 **Пользователь:** @{username}\n"
+            f"🔐 **Уровень доступа:** `{access_level}`\n\n"
+            f"Выберите раздел настроек:"
+        )
+
+        from core.telegram.bot_utils import build_settings_menu
+
+        menu = build_settings_menu(access_level)
+
+        try:
+            await query.edit_message_text(
+                settings_text, reply_markup=menu, parse_mode="Markdown"
+            )
+        except Exception as edit_error:
+            if "message is not modified" in str(edit_error).lower():
+                await query.answer("⚙️ Меню настроек открыто", show_alert=False)
+            else:
+                raise edit_error
+
+    # =======================================================================
+    # НОВЫЕ ОБРАБОТЧИКИ МЕНЮ НАСТРОЕК
+    # =======================================================================
+
+    async def _handle_manage_users(self, query, context):
+        """Управление пользователями"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["operator", "engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для управления пользователями", show_alert=True
+            )
+            return
+
+        users_text = (
+            f"👥 **УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ**\n\n"
+            f"🔐 **Ваш уровень:** `{access_level}`\n\n"
+            f"Выберите действие:"
+        )
+
+        from core.telegram.bot_utils import build_user_management_menu
+
+        menu = build_user_management_menu(access_level)
+
+        try:
+            await query.edit_message_text(
+                users_text, reply_markup=menu, parse_mode="Markdown"
+            )
+        except Exception as edit_error:
+            if "message is not modified" in str(edit_error).lower():
+                await query.answer("👥 Управление пользователями", show_alert=False)
+            else:
+                raise edit_error
+
+    async def _handle_switch_level_menu(self, query, context):
+        """Меню переключения уровня доступа"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для переключения уровня", show_alert=True
+            )
+            return
+
+        # Упрощенный текст без проверки временных уровней (методы еще не загружены)
+        switch_text = (
+            f"🔄 **ПЕРЕКЛЮЧЕНИЕ УРОВНЯ ДОСТУПА**\n\n"
+            f"📊 **Текущий уровень:** `{access_level}`\n\n"
+            f"⚠️ **Временно недоступно:** Методы переключения уровней будут активны после полной перезагрузки системы.\n\n"
+            f"Используйте команды:\n"
+            f"• `/switch_level user` - переключиться на user\n"
+            f"• `/switch_level restore` - восстановить уровень\n"
+            f"• `/level_info` - информация об уровне"
+        )
+
+        from core.telegram.bot_utils import build_switch_level_menu
+
+        menu = build_switch_level_menu(access_level)
+
+        try:
+            await query.edit_message_text(
+                switch_text, reply_markup=menu, parse_mode="Markdown"
+            )
+        except Exception as edit_error:
+            if "message is not modified" in str(edit_error).lower():
+                await query.answer("🔄 Переключение уровня", show_alert=False)
+            else:
+                raise edit_error
+
+    async def _handle_list_users(self, query, context):
+        """Список пользователей"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["operator", "engineer", "admin"]:
+            await query.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        try:
+            all_users = self.bot_db.get_all_users()
+
+            users_text = f"👤 **СПИСОК ПОЛЬЗОВАТЕЛЕЙ** (всего: {len(all_users)})\n\n"
+
+            for user_data in all_users[:10]:  # Показываем первых 10 пользователей
+                username = user_data.get("username") or "Без username"
+                first_name = user_data.get("first_name") or "Без имени"
+                user_access_level = user_data.get("access_level", "user")
+                is_active = user_data.get("is_active", True)
+
+                status_emoji = "✅" if is_active else "❌"
+                level_emoji = {
+                    "user": "👤",
+                    "operator": "👷",
+                    "engineer": "🔧",
+                    "admin": "👑",
+                }.get(user_access_level, "❓")
+
+                users_text += (
+                    f"{status_emoji} {level_emoji} **{first_name}** (@{username})\n"
+                )
+                users_text += f"   ID: `{user_data['telegram_id']}` | Уровень: `{user_access_level}`\n\n"
+
+            if len(all_users) > 10:
+                users_text += f"... и еще {len(all_users) - 10} пользователей\n"
+
+            from core.telegram.bot_utils import build_user_management_menu
+
+            menu = build_user_management_menu(access_level)
+
+            await query.edit_message_text(
+                users_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения списка пользователей: {e}")
+            await query.answer(
+                "❌ Ошибка получения списка пользователей", show_alert=True
+            )
+
+    async def _handle_temp_level(self, query, context, level):
+        """Установка временного уровня"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["engineer", "admin"]:
+            await query.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        # Временная заглушка - методы еще не загружены
+        await query.answer(
+            f"⚠️ Функция временно недоступна. Используйте команду: /switch_level {level}",
+            show_alert=True,
+        )
+
+    async def _handle_restore_level(self, query, context):
+        """Восстановление оригинального уровня"""
+        user = query.from_user
+
+        # Временная заглушка - методы еще не загружены
+        await query.answer(
+            "⚠️ Функция временно недоступна. Используйте команду: /switch_level restore",
+            show_alert=True,
+        )
+
+    async def _handle_level_info_menu(self, query, context):
+        """Информация о текущем уровне доступа"""
+        user = query.from_user
+
+        # Упрощенная информация без новых методов
+        try:
+            current_level = self.bot_db.get_user_access_level(user.id)
+
+            info_text = "ℹ️ **ИНФОРМАЦИЯ ОБ УРОВНЕ ДОСТУПА**\n\n"
+            info_text += f"📊 **Текущий уровень:** `{current_level}`\n"
+            info_text += "⚡ **Статус:** Постоянный\n"
+
+            # Показываем права доступа
+            permissions = self.bot_db.get_access_permissions(current_level)
+            if permissions:
+                info_text += "\n🔓 **Ваши права:**\n"
+                if permissions.get("can_read"):
+                    info_text += "• ✅ Чтение данных\n"
+                if permissions.get("can_write"):
+                    info_text += "• ✅ Запись команд\n"
+                if permissions.get("can_reset_alarms"):
+                    info_text += "• ✅ Сброс аварий\n"
+
+            info_text += "\n💡 **Команды переключения:**\n"
+            info_text += "• `/switch_level user` - временно стать user\n"
+            info_text += "• `/level_info` - подробная информация\n"
+
+            from core.telegram.bot_utils import build_switch_level_menu
+
+            menu = build_switch_level_menu(current_level)
+
+            await query.edit_message_text(
+                info_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения информации об уровне: {e}")
+            await query.answer("❌ Ошибка получения информации", show_alert=True)
+
+    # Настройки системы (сводка конфигурации)
+    async def _handle_system_config(self, query, context):
+        try:
+            from core.config_manager import get_config
+
+            cfg = get_config()
+            data = await self.get_current_data_from_db() or {}
+            do1 = data.get("digital_outputs_1")
+            do2 = data.get("digital_outputs_2")
+            do3 = data.get("digital_outputs_3")
+            # Alarm relay summary
+            ar = getattr(cfg, "alarm_relay", None)
+            if ar and getattr(ar, "enabled", False):
+                reg = str(getattr(ar, "register", "0x0082"))
+                bit = int(getattr(ar, "bit", 7))
+                relay_state = data.get("alarm_relay")
+                ar_text = f"Включено ({reg}, бит {bit}) — текущее: {'ВКЛ' if relay_state else 'ВЫКЛ'}"
+            else:
+                ar_text = "Отключено"
+            # Sensors
+            sensors = getattr(cfg, "sensors", {}) or {}
+            sensors_lines = []
+            for key, enabled in sensors.items():
+                sensors_lines.append(f"• {key}: {'вкл' if enabled else 'выкл'}")
+            # System outputs
+            outputs = getattr(cfg, "system_outputs", []) or []
+            if outputs:
+                reg_map = {"0x0081": do1, "0x0082": do2, "0x00a2": do3, "0x00A2": do3}
+                out_lines = []
+                for o in outputs:
+                    if not o.enabled:
+                        continue
+                    val = reg_map.get(str(o.register))
+                    state = None
+                    if isinstance(val, int):
+                        try:
+                            state = ((val >> int(o.bit)) & 1) == 1
+                        except Exception:
+                            state = None
+                    out_lines.append(
+                        f"• {o.label}: {'ВКЛ' if state else ('ВЫКЛ' if state is not None else '—')}"
+                    )
+                outputs_text = "\n".join(out_lines) if out_lines else "—"
+            else:
+                outputs_text = "—"
+            text = (
+                "⚙️ **НАСТРОЙКИ СИСТЕМЫ (сводка)**\n\n"
+                f"🔐 Аварийное реле: {ar_text}\n\n"
+                f"🧩 Датчики (вывод в UI):\n"
+                + ("\n".join(sensors_lines) or "—")
+                + "\n\n"
+                f"🧲 Системные выходы:\n{outputs_text}\n\n"
+                "Изменение настроек из бота пока отключено (read‑only)."
+            )
+            from core.telegram.bot_utils import build_settings_menu
+
+            menu = build_settings_menu(
+                self.bot_db.get_user_access_level(query.from_user.id)
+            )
+            await query.edit_message_text(
+                text, reply_markup=menu, parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка показа настроек: {e}")
+            await query.answer("❌ Ошибка отображения настроек", show_alert=True)
+
+    # Системные логи/сводка (краткий технический отчёт)
+    async def _handle_system_logs(self, query, context):
+        try:
+            data = await self.get_current_data_from_db() or {}
+            alarms = int(data.get("active_alarms", 0) or 0)
+            warns = int(data.get("active_warnings", 0) or 0)
+            relay_on = bool(data.get("alarm_relay")) if "alarm_relay" in data else False
+            updated = data.get("updated_at") or "—"
+            # Очередь команд записи
+            recent = self.get_recent_write_commands(limit=5)
+            lines = []
+            for c in recent:
+                cid = str(c.get("id"))[:8]
+                reg = int(c.get("register", 0) or 0)
+                st = c.get("status")
+                when = c.get("executed_at") or c.get("created_at") or ""
+                icon = (
+                    "✅"
+                    if st == "completed"
+                    else ("⏳" if st in ("pending", "executing") else "❌")
+                )
+                lines.append(f"{icon} {cid} 0x{reg:04X} [{st}] {when}")
+            queue_text = "\n".join(lines) if lines else "—"
+            text = (
+                "📋 **Системная сводка**\n\n"
+                f"⏱ Обновлено: `{updated}`\n"
+                f"🚨 Аварии: {alarms} | ⚠️ Предупреждения: {warns} | {('Реле ВКЛ' if relay_on else 'Реле ВЫКЛ')}\n\n"
+                f"📝 Последние команды записи:\n{queue_text}"
+            )
+            from core.telegram.bot_utils import build_settings_menu
+
+            menu = build_settings_menu(
+                self.bot_db.get_user_access_level(query.from_user.id)
+            )
+            await query.edit_message_text(
+                text, reply_markup=menu, parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка показа сводки логов: {e}")
+            await query.answer("❌ Ошибка отображения сводки", show_alert=True)
+
+    async def _handle_permissions_config(self, query, context):
+        await query.answer("🔐 Управление правами - в разработке", show_alert=True)
+
+    async def _handle_backup_config(self, query, context):
+        await query.answer("💾 Резервные копии - в разработке", show_alert=True)
+
+    async def _handle_invite_user(self, query, context):
+        """Приглашение пользователя - выбор уровня доступа"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["operator", "engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для приглашения пользователей", show_alert=True
+            )
+            return
+
+        invite_text = (
+            f"➕ **ПРИГЛАШЕНИЕ ПОЛЬЗОВАТЕЛЯ**\n\n"
+            f"🔐 **Ваш уровень:** `{access_level}`\n\n"
+            f"Выберите уровень доступа для нового пользователя:\n\n"
+            f"**Доступные уровни:**\n"
+            f"• **👤 User** - только чтение данных\n"
+            f"• **⚙️ Operator** - чтение + запись команд\n"
+            f"• **🔧 Engineer** - расширенные функции\n\n"
+            f"После выбора будет создана уникальная ссылка-приглашение."
+        )
+
+        from core.telegram.bot_utils import build_invitation_level_menu
+
+        menu = build_invitation_level_menu()
+
+        try:
+            await query.edit_message_text(
+                invite_text, reply_markup=menu, parse_mode="Markdown"
+            )
+        except Exception as edit_error:
+            if "message is not modified" in str(edit_error).lower():
+                await query.answer("➕ Приглашение пользователя", show_alert=False)
+            else:
+                raise edit_error
+
+    async def _handle_block_user(self, query, context):
+        """Блокировка пользователя"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для блокировки пользователей", show_alert=True
+            )
+            return
+
+        try:
+            all_users = self.bot_db.get_all_users()
+            active_users = [u for u in all_users if u.get("is_active", True)]
+
+            if not active_users:
+                await query.answer(
+                    "❌ Нет активных пользователей для блокировки", show_alert=True
+                )
+                return
+
+            block_text = (
+                "🔒 **БЛОКИРОВКА ПОЛЬЗОВАТЕЛЯ**\n\n"
+                "**Нажмите на пользователя для блокировки:**\n\n"
+                "⚠️ **Внимание:** Заблокированный пользователь не сможет использовать бота до разблокировки."
+            )
+
+            from core.telegram.bot_utils import build_user_list_menu
+
+            menu = build_user_list_menu(active_users, "block", access_level)
+
+            await query.edit_message_text(
+                block_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения списка для блокировки: {e}")
+            await query.answer(
+                "❌ Ошибка получения списка пользователей", show_alert=True
+            )
+
+    async def _handle_unblock_user(self, query, context):
+        """Разблокировка пользователя"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для разблокировки пользователей", show_alert=True
+            )
+            return
+
+        try:
+            all_users = self.bot_db.get_all_users()
+            blocked_users = [u for u in all_users if not u.get("is_active", True)]
+
+            if not blocked_users:
+                unblock_text = (
+                    "✅ **РАЗБЛОКИРОВКА ПОЛЬЗОВАТЕЛЯ**\n\n"
+                    "🎉 **Все пользователи активны!**\n\n"
+                    "В системе нет заблокированных пользователей."
+                )
+
+                from core.telegram.bot_utils import build_user_management_menu
+
+                menu = build_user_management_menu(access_level)
+
+                await query.edit_message_text(
+                    unblock_text, reply_markup=menu, parse_mode="Markdown"
+                )
+            else:
+                unblock_text = (
+                    "✅ **РАЗБЛОКИРОВКА ПОЛЬЗОВАТЕЛЯ**\n\n"
+                    "**Нажмите на пользователя для разблокировки:**"
+                )
+
+                from core.telegram.bot_utils import build_user_list_menu
+
+                menu = build_user_list_menu(blocked_users, "unblock", access_level)
+
+                await query.edit_message_text(
+                    unblock_text, reply_markup=menu, parse_mode="Markdown"
+                )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения списка для разблокировки: {e}")
+            await query.answer(
+                "❌ Ошибка получения списка пользователей", show_alert=True
+            )
+
+    async def _handle_change_permissions(self, query, context):
+        """Изменение прав пользователей"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level != "admin":
+            await query.answer(
+                "❌ Только администраторы могут изменять права", show_alert=True
+            )
+            return
+
+        try:
+            all_users = self.bot_db.get_all_users()
+
+            if not all_users:
+                await query.answer("❌ Пользователи не найдены", show_alert=True)
+                return
+
+            permissions_text = (
+                "👑 **ИЗМЕНЕНИЕ ПРАВ ПОЛЬЗОВАТЕЛЕЙ**\n\n"
+                "**Нажмите на пользователя для изменения его прав:**\n\n"
+                "**Доступные уровни:**\n"
+                "• 👤 `user` - только чтение\n"
+                "• 👷 `operator` - чтение + запись\n"
+                "• 🔧 `engineer` - расширенные функции\n"
+                "• 👑 `admin` - полный доступ"
+            )
+
+            from core.telegram.bot_utils import build_user_list_menu
+
+            menu = build_user_list_menu(all_users, "promote", access_level)
+
+            await query.edit_message_text(
+                permissions_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения информации о правах: {e}")
+            await query.answer("❌ Ошибка получения информации", show_alert=True)
+
+    async def _handle_user_stats(self, query, context):
+        """Статистика пользователей"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["operator", "engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для просмотра статистики", show_alert=True
+            )
+            return
+
+        try:
+            all_users = self.bot_db.get_all_users()
+
+            if not all_users:
+                await query.answer("❌ Пользователи не найдены", show_alert=True)
+                return
+
+            # Подсчитываем статистику
+            total_users = len(all_users)
+            active_users = sum(1 for u in all_users if u.get("is_active", True))
+            inactive_users = total_users - active_users
+
+            # Статистика по уровням доступа
+            level_stats = {}
+            for user_data in all_users:
+                level = user_data.get("access_level", "user")
+                level_stats[level] = level_stats.get(level, 0) + 1
+
+            stats_text = "📊 **СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ**\n\n"
+            stats_text += f"👥 **Всего пользователей:** {total_users}\n"
+            stats_text += f"✅ **Активных:** {active_users}\n"
+            stats_text += f"❌ **Неактивных:** {inactive_users}\n\n"
+
+            stats_text += "**📊 По уровням доступа:**\n"
+            level_emojis = {"user": "👤", "operator": "👷", "engineer": "🔧", "admin": "👑"}
+            for level, count in level_stats.items():
+                emoji = level_emojis.get(level, "❓")
+                stats_text += f"{emoji} **{level.capitalize()}:** {count} чел.\n"
+
+            # Показываем последнюю активность
+            recent_users = [u for u in all_users if u.get("last_active")][:5]
+            if recent_users:
+                stats_text += "\n**🕐 Последняя активность:**\n"
+                for user_data in recent_users:
+                    username = user_data.get("username") or "Без username"
+                    last_active = user_data.get("last_active", "неизвестно")
+                    stats_text += f"• @{username} - {last_active}\n"
+
+            # Получаем детальную статистику от базы данных
+            stats_text += "\n**📈 Активность системы:**\n"
+
+            # Подсчитываем команды из истории
+            try:
+                import sqlite3
+
+                with sqlite3.connect(config.database.commands_db) as conn:
+                    cursor = conn.execute(
+                        "SELECT COUNT(*) FROM user_command_history WHERE timestamp > datetime('now', '-24 hours')"
+                    )
+                    commands_24h = cursor.fetchone()[0]
+
+                    cursor = conn.execute(
+                        "SELECT COUNT(*) FROM user_command_history WHERE timestamp > datetime('now', '-1 hour')"
+                    )
+                    commands_1h = cursor.fetchone()[0]
+
+                    stats_text += f"• Команд за час: {commands_1h}\n"
+                    stats_text += f"• Команд за сутки: {commands_24h}\n"
+            except:
+                stats_text += "• Статистика команд недоступна\n"
+
+            from core.telegram.bot_utils import build_user_management_menu
+
+            menu = build_user_management_menu(access_level)
+
+            await query.edit_message_text(
+                stats_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики пользователей: {e}")
+            await query.answer("❌ Ошибка получения статистики", show_alert=True)
+
+    # =======================================================================
+    # ИНТЕРАКТИВНЫЕ ОБРАБОТЧИКИ УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ
+    # =======================================================================
+
+    async def _handle_promote_user_selected(self, query, context, user_id: int):
+        """Обработка выбора пользователя для изменения прав"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level != "admin":
+            await query.answer(
+                "❌ Только администраторы могут изменять права", show_alert=True
+            )
+            return
+
+        try:
+            # Получаем информацию о выбранном пользователе
+            target_user = self.bot_db.get_user(user_id)
+            if not target_user:
+                await query.answer("❌ Пользователь не найден", show_alert=True)
+                return
+
+            target_username = target_user.get("username", "Без username")
+            target_first_name = target_user.get("first_name", "Без имени")
+            current_level = target_user.get("access_level", "user")
+
+            # Не позволяем изменять права самому себе
+            if user_id == user.id:
+                await query.answer(
+                    "❌ Вы не можете изменить свои собственные права", show_alert=True
+                )
+                return
+
+            level_emojis = {"user": "👤", "operator": "👷", "engineer": "🔧", "admin": "👑"}
+            current_emoji = level_emojis.get(current_level, "❓")
+
+            promote_text = (
+                f"👑 **ИЗМЕНЕНИЕ ПРАВ ПОЛЬЗОВАТЕЛЯ**\n\n"
+                f"**Выбранный пользователь:**\n"
+                f"{current_emoji} **{target_first_name}** (@{target_username})\n"
+                f"**Текущий уровень:** `{current_level}`\n\n"
+                f"**Выберите новый уровень доступа:**"
+            )
+
+            from core.telegram.bot_utils import build_level_selection_menu
+
+            menu = build_level_selection_menu(user_id, current_level)
+
+            await query.edit_message_text(
+                promote_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка выбора пользователя для изменения прав: {e}")
+            await query.answer("❌ Ошибка обработки запроса", show_alert=True)
+
+    async def _handle_set_user_level(
+        self, query, context, user_id: int, new_level: str
+    ):
+        """Установка нового уровня доступа пользователю"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level != "admin":
+            await query.answer(
+                "❌ Только администраторы могут изменять права", show_alert=True
+            )
+            return
+
+        try:
+            # Получаем информацию о пользователе
+            target_user = self.bot_db.get_user(user_id)
+            if not target_user:
+                await query.answer("❌ Пользователь не найден", show_alert=True)
+                return
+
+            target_username = target_user.get("username", "Без username")
+            target_first_name = target_user.get("first_name", "Без имени")
+            old_level = target_user.get("access_level", "user")
+
+            # Обновляем уровень доступа напрямую в базе данных
+            try:
+                with sqlite3.connect(config.database.commands_db) as conn:
+                    cursor = conn.execute(
+                        """
+                        UPDATE telegram_users
+                        SET access_level = ?, last_active = CURRENT_TIMESTAMP
+                        WHERE telegram_id = ?
+                    """,
+                        (new_level, user_id),
+                    )
+
+                    success = cursor.rowcount > 0
+            except Exception as db_error:
+                logger.error(f"❌ Ошибка базы данных при изменении уровня: {db_error}")
+                success = False
+
+            if success:
+                level_emojis = {
+                    "user": "👤",
+                    "operator": "👷",
+                    "engineer": "🔧",
+                    "admin": "👑",
+                }
+                old_emoji = level_emojis.get(old_level, "❓")
+                new_emoji = level_emojis.get(new_level, "❓")
+
+                success_text = (
+                    f"✅ **ПРАВА ПОЛЬЗОВАТЕЛЯ ИЗМЕНЕНЫ**\n\n"
+                    f"**Пользователь:** {target_first_name} (@{target_username})\n"
+                    f"**Изменение:** {old_emoji} `{old_level}` → {new_emoji} `{new_level}`\n"
+                    f"**Изменил:** @{user.username or 'Unknown'}\n\n"
+                    f"Изменения вступили в силу немедленно."
+                )
+
+                from core.telegram.bot_utils import build_user_management_menu
+
+                menu = build_user_management_menu(access_level)
+
+                await query.edit_message_text(
+                    success_text, reply_markup=menu, parse_mode="Markdown"
+                )
+
+                await query.answer("✅ Права пользователя изменены", show_alert=False)
+            else:
+                await query.answer(
+                    "❌ Ошибка изменения прав пользователя", show_alert=True
+                )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки уровня пользователя: {e}")
+            await query.answer("❌ Ошибка обработки запроса", show_alert=True)
+
+    async def _handle_block_user_selected(self, query, context, user_id: int):
+        """Обработка выбора пользователя для блокировки"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для блокировки пользователей", show_alert=True
+            )
+            return
+
+        # Проверяем, что пользователь не блокирует самого себя
+        if user_id == user.id:
+            await query.answer(
+                "❌ Вы не можете заблокировать самого себя", show_alert=True
+            )
+            return
+
+        try:
+            # Получаем информацию о пользователе
+            target_user = self.bot_db.get_user(user_id)
+            if not target_user:
+                await query.answer("❌ Пользователь не найден", show_alert=True)
+                return
+
+            target_username = target_user.get("username", "Без username")
+            target_first_name = target_user.get("first_name", "Без имени")
+
+            # Блокируем пользователя
+            success = self.bot_db.deactivate_user(user_id)
+
+            if success:
+                block_text = (
+                    f"🔒 **ПОЛЬЗОВАТЕЛЬ ЗАБЛОКИРОВАН**\n\n"
+                    f"**Пользователь:** {target_first_name} (@{target_username})\n"
+                    f"**Заблокировал:** @{user.username or 'Unknown'}\n\n"
+                    f"Пользователь больше не сможет использовать бота до разблокировки."
+                )
+
+                from core.telegram.bot_utils import build_user_management_menu
+
+                menu = build_user_management_menu(access_level)
+
+                await query.edit_message_text(
+                    block_text, reply_markup=menu, parse_mode="Markdown"
+                )
+
+                await query.answer("🔒 Пользователь заблокирован", show_alert=False)
+            else:
+                await query.answer("❌ Ошибка блокировки пользователя", show_alert=True)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка блокировки пользователя: {e}")
+            await query.answer("❌ Ошибка обработки запроса", show_alert=True)
+
+    async def _handle_unblock_user_selected(self, query, context, user_id: int):
+        """Обработка выбора пользователя для разблокировки"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для разблокировки пользователей", show_alert=True
+            )
+            return
+
+        try:
+            # Получаем информацию о пользователе
+            target_user = self.bot_db.get_user(user_id)
+            if not target_user:
+                await query.answer("❌ Пользователь не найден", show_alert=True)
+                return
+
+            target_username = target_user.get("username", "Без username")
+            target_first_name = target_user.get("first_name", "Без имени")
+
+            # Разблокируем пользователя
+            try:
+                with sqlite3.connect(config.database.commands_db) as conn:
+                    cursor = conn.execute(
+                        """
+                        UPDATE telegram_users
+                        SET is_active = 1, last_active = CURRENT_TIMESTAMP
+                        WHERE telegram_id = ?
+                    """,
+                        (user_id,),
+                    )
+
+                    success = cursor.rowcount > 0
+            except Exception as db_error:
+                logger.error(f"❌ Ошибка базы данных при разблокировке: {db_error}")
+                success = False
+
+            if success:
+                unblock_text = (
+                    f"✅ **ПОЛЬЗОВАТЕЛЬ РАЗБЛОКИРОВАН**\n\n"
+                    f"**Пользователь:** {target_first_name} (@{target_username})\n"
+                    f"**Разблокировал:** @{user.username or 'Unknown'}\n\n"
+                    f"Пользователь снова может использовать бота."
+                )
+
+                from core.telegram.bot_utils import build_user_management_menu
+
+                menu = build_user_management_menu(access_level)
+
+                await query.edit_message_text(
+                    unblock_text, reply_markup=menu, parse_mode="Markdown"
+                )
+
+                await query.answer("✅ Пользователь разблокирован", show_alert=False)
+            else:
+                await query.answer(
+                    "❌ Ошибка разблокировки пользователя", show_alert=True
+                )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка разблокировки пользователя: {e}")
+            await query.answer("❌ Ошибка обработки запроса", show_alert=True)
+
+    # =======================================================================
+    # ЗАПУСК БЕЗ КОНФЛИКТОВ
+    # =======================================================================
+
+    async def start_bot(self):
+        """Исправленный запуск бота БЕЗ создания собственной системы RS485"""
+        try:
+            logger.info("🚀 Инициализация Telegram Bot (без RS485)...")
+            logging.getLogger("telegram.ext.Updater").setLevel(logging.WARNING)
+
+            # Инициализируем только базы данных
+            from modbus.modbus_storage import init_db
+
+            init_db()
+
+            # Создаём приложение Telegram
+            self.application = Application.builder().token(self.token).build()
+
+            # Регистрируем обработчики команд
+            self.application.add_handler(CommandHandler("start", self.cmd_start))
+            self.application.add_handler(CommandHandler("status", self.cmd_status))
+            self.application.add_handler(CommandHandler("stats", self.cmd_stats))
+            self.application.add_handler(CommandHandler("help", self.cmd_help))
+            # Управление авариями
+            self.application.add_handler(CommandHandler("reset", self.cmd_reset))
+            self.application.add_handler(CommandHandler("alarms", self.cmd_alarms))
+            self.application.add_handler(CommandHandler("queue", self.cmd_queue))
+            self.application.add_handler(CommandHandler("whoami", self.cmd_whoami))
+            # Управление пользователями
+            # Admin management — only via inline buttons (no slash commands)
+
+            # УПРАВЛЕНИЕ РОЛЯМИ
+            # self.application.add_handler(CommandHandler("promote", self.cmd_promote))
+            # self.application.add_handler(CommandHandler("users", self.cmd_users))
+
+            # ПЕРЕКЛЮЧЕНИЕ УРОВНЕЙ ДОСТУПА
+            self.application.add_handler(
+                CommandHandler("switch_level", self.cmd_switch_level)
+            )
+            self.application.add_handler(
+                CommandHandler("level_info", self.cmd_level_info)
+            )
+
+            # БЛОКИРОВКА ПОЛЬЗОВАТЕЛЕЙ
+            self.application.add_handler(
+                CommandHandler("block_user", self.cmd_block_user)
+            )
+            self.application.add_handler(
+                CommandHandler("unblock_user", self.cmd_unblock_user)
+            )
+
+            # Обработчик кнопок
+            self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+
+            logger.info("🚀 Запуск Telegram Bot...")
+
+            # Инициализируем приложение
+            await self.application.initialize()
+            await self.application.start()
+
+            # Запускаем polling вручную для лучшего контроля
+            await self.application.updater.start_polling(drop_pending_updates=True)
+            update_task = getattr(self.application.updater, "_fetcher_task", None)
+            network_retry_task = getattr(self.application.updater, "_network_loop_retry", None)
+            logger.debug(
+                "Updater internals: fetcher_task=%s, network_retry=%s, update_fetcher=%s",
+                update_task,
+                network_retry_task,
+                getattr(self.application.updater, "_update_fetcher", None),
+            )
+
+            # Фоновая задача мониторинга аварий
+            try:
+                self.application.job_queue.run_repeating(
+                    self._alarm_watch_job, interval=40, first=10, name="alarm_watch"
+                )
+                logger.info("🛰️ Запущен фоновый мониторинг аварий")
+            except Exception as jerr:
+                logger.warning(f"⚠️ Не удалось запустить фоновый мониторинг: {jerr}")
+
+            logger.info("🤖 Бот запущен и ждет сообщения...")
+            self._bot_started = True
+
+            # Проверяем истекшие временные уровни доступа (временно отключено)
+            try:
+                expired_count = self.bot_db.check_and_restore_expired_levels()
+                if expired_count > 0:
+                    logger.info(
+                        f"⏰ Восстановлено {expired_count} истекших временных уровней доступа"
+                    )
+            except AttributeError:
+                logger.info(
+                    "⚠️ Методы переключения уровней будут доступны после полной перезагрузки системы"
+                )
+
+            try:
+                # Ждем пока не поступит команда остановки
+                await self._shutdown_event.wait()
+            except asyncio.CancelledError:
+                logger.debug("🛑 Cancellation received, инициируем остановку бота")
+                self._shutdown_event.set()
+            except KeyboardInterrupt:
+                logger.info("🛑 Получен сигнал остановки...")
+            finally:
+                self._shutdown_event.set()
+                if self.application:
+                    # Останавливаем job queue, чтобы прекратить фоновые логи до остановки приложения
+                    try:
+                        if self.application.job_queue:
+                            await asyncio.shield(
+                                self.application.job_queue.stop(wait=False)
+                            )
+                    except Exception as jq_err:
+                        logger.debug(
+                            "⚠️ Не удалось корректно остановить JobQueue: %s", jq_err
+                        )
+
+                    # Отправляем уведомление о том, что сервис остановлен
+                    if self._bot_started:
+                        try:
+                            await asyncio.shield(self._notify_system_stopped())
+                        except Exception as notify_err:
+                            logger.warning(
+                                f"⚠️ Не удалось отправить уведомление об остановке: {notify_err}"
+                            )
+                        finally:
+                            self._bot_started = False
+
+                    try:
+                        await self.application.stop()
+                    except Exception as app_stop_err:
+                        logger.warning(
+                            f"⚠️ Ошибка остановки Telegram application: {app_stop_err}"
+                        )
+
+                    try:
+                        await self.application.updater.stop()
+                    except TimedOut:
+                        logger.debug(
+                            "⌛ Остановка polling завершилась по таймауту, пропускаем"
+                        )
+                    except Exception as stop_err:
+                        logger.warning(
+                            f"⚠️ Ошибка остановки Telegram updater: {stop_err}"
+                        )
+
+                    with suppress(Exception):
+                        await self.application.shutdown()
+
+                    try:
+                        if update_task and not update_task.done():
+                            update_task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await asyncio.shield(update_task)
+                        if network_retry_task and not network_retry_task.done():
+                            network_retry_task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await asyncio.shield(network_retry_task)
+                        update_fetcher = getattr(
+                            self.application.updater, "_update_fetcher", None
+                        )
+                        if hasattr(update_fetcher, "cancel"):
+                            try:
+                                update_fetcher.cancel()
+                            except Exception:
+                                pass
+                    except Exception as update_err:
+                        logger.debug(
+                            "⚠️ Ошибка ожидания завершения update_fetcher: %s", update_err
+                        )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка запуска бота: {e}")
+            raise
+
+    def _collect_management_chat_ids(self) -> set[int]:
+        """Собирает список чатов, которым нужно отправлять служебные уведомления."""
+        recipients: set[int] = set()
+
+        for raw_id in self.config.telegram.admin_users or []:
+            try:
+                recipients.add(int(raw_id))
+            except (TypeError, ValueError):
+                logger.debug(f"⚠️ Некорректный admin id в конфигурации: {raw_id}")
+
+        try:
+            for user in self.bot_db.get_all_users():
+                level = (user.get("access_level") or "user").lower()
+                if user.get("is_active", 1) and level in {"operator", "engineer", "admin"}:
+                    try:
+                        recipients.add(int(user.get("telegram_id")))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as err:
+            logger.warning(f"⚠️ Не удалось получить список пользователей для уведомления: {err}")
+
+        return recipients
+
+    async def _notify_system_stopped(self) -> None:
+        """Отправляет управление в Telegram о том, что EDGE-сервис остановлен."""
+        if not self.application:
+            return
+
+        recipients = self._collect_management_chat_ids()
+        if not recipients:
+            logger.debug("ℹ️ Нет чатов для уведомления об остановке")
+            return
+
+        text = (
+            "🛑 EDGE узел остановлен\n\n"
+            "Связь с контроллером временно отключена."
+        )
+
+        for chat_id in recipients:
+            try:
+                state = self.bot_db.get_bot_state(chat_id)
+                message_id = state.get("last_message_id") if state else None
+                access_level = self.bot_db.get_user_access_level(chat_id)
+                menu = build_main_menu(access_level)
+
+                if message_id:
+                    await self.application.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=truncate_text(text, 4000),
+                        reply_markup=menu,
+                        parse_mode="Markdown",
+                    )
+                else:
+                    sent = await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=truncate_text(text, 4000),
+                        parse_mode="Markdown",
+                    )
+                    self.bot_db.set_last_message_id(chat_id, sent.message_id)
+            except Exception as send_err:
+                logger.warning(
+                    f"⚠️ Не удалось уведомить чат {chat_id} об остановке: {send_err}"
+                )
+
+    async def _handle_invite_level_selected(self, query, context, level: str):
+        """Обработка выбора уровня доступа для приглашения"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["operator", "engineer", "admin"]:
+            await query.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        # Проверяем доступность выбранного уровня
+        if level == "engineer" and access_level not in ["engineer", "admin"]:
+            await query.answer(
+                "❌ Недостаточно прав для создания Engineer приглашения", show_alert=True
+            )
+            return
+
+        level_names = {
+            "user": "User (Пользователь)",
+            "operator": "Operator (Оператор)",
+            "engineer": "Engineer (Инженер)",
+        }
+
+        confirmation_text = (
+            f"✅ **ПОДТВЕРЖДЕНИЕ ПРИГЛАШЕНИЯ**\n\n"
+            f"🎯 **Уровень доступа:** `{level_names.get(level, level)}`\n"
+            f"⏰ **Срок действия:** 24 часа\n"
+            f"👤 **Приглашает:** @{user.username}\n\n"
+            f"Создать уникальную ссылку-приглашение?"
+        )
+
+        from core.telegram.bot_utils import build_invitation_confirmation_menu
+
+        menu = build_invitation_confirmation_menu(level)
+
+        try:
+            await query.edit_message_text(
+                confirmation_text, reply_markup=menu, parse_mode="Markdown"
+            )
+        except Exception as edit_error:
+            if "message is not modified" in str(edit_error).lower():
+                await query.answer("✅ Подтверждение приглашения", show_alert=False)
+            else:
+                raise edit_error
+
+    async def _handle_confirm_invite(self, query, context, level: str):
+        """Создание приглашения и генерация уникальной ссылки"""
+        user = query.from_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+
+        if access_level not in ["operator", "engineer", "admin"]:
+            await query.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        try:
+            # Получаем имя бота для создания ссылки
+            bot_username = (
+                self.application.bot.username
+                if hasattr(self, "application") and hasattr(self.application, "bot")
+                else "your_bot"
+            )
+
+            # Временно создаём приглашение напрямую в базе (методы загрузятся после перезапуска)
+            import datetime
+            import sqlite3
+            import uuid
+
+            invitation_code = str(uuid.uuid4())[:8].upper()
+            expires_at = datetime.datetime.now() + datetime.timedelta(hours=24)
+
+            # Прямая вставка в базу данных
+            conn = sqlite3.connect(config.database.commands_db)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                INSERT INTO user_invitations (invitation_code, invited_by, access_level, expires_at)
+                VALUES (?, ?, ?, ?)
+            """,
+                (invitation_code, user.id, level, expires_at.isoformat()),
+            )
+
+            conn.commit()
+            conn.close()
+
+            # Генерируем ссылку
+            invite_link = f"https://t.me/{bot_username}?start=invite_{invitation_code}"
+
+            level_names = {
+                "user": "👤 User",
+                "operator": "⚙️ Operator",
+                "engineer": "🔧 Engineer",
+            }
+
+            # Первое сообщение - информация о приглашении
+            info_text = (
+                f"🎉 **ПРИГЛАШЕНИЕ СОЗДАНО**\n\n"
+                f"📋 **Детали:**\n"
+                f"• **Код:** `{invitation_code}`\n"
+                f"• **Уровень:** {level_names.get(level, level)}\n"
+                f"• **Срок действия:** 24 часа\n"
+                f"• **Создал:** @{user.username}\n\n"
+                f"📤 **Ссылка отправлена в следующем сообщении для удобного копирования**"
+            )
+
+            from core.telegram.bot_utils import build_user_management_menu
+
+            menu = build_user_management_menu(access_level)
+
+            await query.edit_message_text(
+                info_text, reply_markup=menu, parse_mode="Markdown"
+            )
+
+            # Второе сообщение - только ссылка с кнопками для отправки
+            link_text = (
+                f"🔗 **Ссылка-приглашение:**\n\n"
+                f"{invite_link}\n\n"
+                f"📱 **Нажмите на ссылку выше для копирования**\n"
+                f"📤 **Или используйте кнопки ниже для отправки**"
+            )
+
+            from core.telegram.bot_utils import build_invitation_share_menu
+
+            share_menu = build_invitation_share_menu(invite_link, access_level)
+
+            await query.message.reply_text(
+                link_text, reply_markup=share_menu, parse_mode="Markdown"
+            )
+
+            logger.info(
+                f"✅ Создано приглашение {invitation_code} для уровня {level} пользователем {user.id}"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания приглашения: {e}")
+            from core.telegram.bot_utils import build_user_management_menu
+
+            menu = build_user_management_menu(access_level)
+
+            await query.edit_message_text(
+                error_message(f"Ошибка создания приглашения: {str(e)}"),
+                reply_markup=menu,
+                parse_mode="Markdown",
+            )
+
+
+async def run_telegram_bot(token: str):
+    """Entry point used by start.py to run the Telegram bot."""
+    acquired, existing_pid = _acquire_bot_lock()
+    if not acquired:
+        logger.error(
+            "🚫 Telegram бот уже запущен другим процессом (PID %s). Текущий экземпляр не будет запущен.",
+            existing_pid,
+        )
+        return
+
+    atexit.register(_release_bot_lock)
+
+    bot = KUBTelegramBot(token)
+    try:
+        await bot.start_bot()
+    except asyncio.CancelledError:
+        bot.request_shutdown()
+        raise
+    finally:
+        _release_bot_lock()
+
+
+# =============================================================================
+# ОСНОВНАЯ ФУНКЦИЯ
+# =============================================================================
+
+
+def main():
+    """Основная функция запуска"""
+    print("🤖 TELEGRAM BOT ДЛЯ КУБ-1063 (ЦЕНТРАЛИЗОВАННАЯ КОНФИГУРАЦИЯ)")
+    print("=" * 60)
+
+    # Получаем токен через конфиг-менеджер
+    token = config.telegram.token
+
+    if not token:
+        print("❌ Токен не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+        return
+
+    try:
+        asyncio.run(run_telegram_bot(token))
+    except KeyboardInterrupt:
+        print("\n🛑 Получен сигнал остановки...")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+
+
+if __name__ == "__main__":
+    main()

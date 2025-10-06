@@ -1,0 +1,200 @@
+# Production конфигурация для EDGE узла
+# Оптимизированная для стабильной работы на ферме
+
+system:
+  environment: production
+  log_level: INFO
+  startup_timeout: 120  # Увеличено для production
+  shutdown_timeout: 30  # Корректное завершение
+  max_memory_mb: 512    # Ограничение памяти
+  
+# Настройки RS485 для продакшена
+rs485:
+  port: /dev/tty.usbserial-2130   # Обычно в продакшене
+  baudrate: 9600
+  parity: N
+  databits: 8
+  stopbits: 1
+  timeout: 5.0          # Увеличенный таймаут
+  slave_id: 1
+  window_duration: 10   # Больше для стабильности
+  cooldown_duration: 20
+
+# Modbus TCP сервер для продакшена
+modbus_tcp:
+  port: 6001
+  timeout: 10.0         # Больше таймаут
+  max_connections: 5    # Меньше соединений для стабильности
+  keepalive: true
+  no_delay: true
+
+# База данных для продакшена
+database:
+  file: /var/lib/cube_edge/kub_data.db
+  commands_db: /var/lib/cube_edge/kub_commands.db
+  timeout: 15
+  journal_mode: WAL
+  synchronous: NORMAL
+  backup_interval_hours: 6
+  max_size_mb: 1024
+  
+# Сервисы для продакшена
+services:
+  gateway_enabled: true
+  dashboard_enabled: false      # Отключаем в продакшене
+  telegram_enabled: true
+  websocket_enabled: false     # Только если нужно
+  mqtt_enabled: true          # Включаем для IoT
+  
+  # Порты для продакшена
+  health_api_port: 8090
+  websocket_port: 8000
+  mqtt_port: 1883
+
+# Алармы и мониторинг
+alarm_relay:
+  enabled: true
+  register: '0x0082'
+  bit: 7
+  label: 'Аварийное реле'
+  auto_reset_minutes: 5
+
+# Датчики для мониторинга
+sensors:
+  temperature: true
+  humidity: true
+  co2: false
+  nh3: false
+  pressure: false
+  
+# Системные выходы для контроля
+system_outputs:
+  - enabled: true
+    register: '0x0081'
+    bit: 0
+    label: 'Вентиляторы базовые'
+    critical: true
+  - enabled: true
+    register: '0x0081'
+    bit: 1
+    label: 'Вентиляторы туннельные'
+    critical: true
+  - enabled: true
+    register: '0x0082'
+    bit: 0
+    label: 'Освещение'
+    critical: false
+
+# Полная карта регистров
+modbus_registers:
+  # Системная информация
+  software_version: "0x0301"
+  factory_number: "0x0302"
+  device_number: "0x0303"
+  
+  # Основные датчики
+  pressure: "0x0083"
+  humidity: "0x0084"
+  co2: "0x0085"
+  nh3: "0x0086"
+  
+  # Температурные датчики
+  temp_inside_1: "0x008D"
+  temp_inside_2: "0x008E"
+  temp_outside: "0x008F"
+  temp_inside_3: "0x0090"
+  temp_inside_4: "0x0091"
+  temp_inside: "0x00D5"      # Основная температура
+  temp_target: "0x00D4"      # Целевая температура
+  
+  # Управление
+  digital_outputs_1: "0x0081"
+  digital_outputs_2: "0x0082"
+  digital_outputs_3: "0x00A2"
+  
+  grv_base: "0x0087"
+  grv_tunnel: "0x0088"
+  damper: "0x0089"
+  
+  # Воздухозаборники
+  air_intake_1: "0x008A"
+  air_intake_2: "0x008B"
+  air_intake_tunnel: "0x008C"
+  air_intake_3: "0x0092"
+  air_intake_4: "0x0093"
+  
+  # Освещение
+  lighting_1: "0x0094"
+  lighting_2: "0x0095"
+  lighting_3: "0x0096"
+  lighting_4: "0x0097"
+  
+  # Аварии и предупреждения
+  active_alarms: "0x00C3"
+  registered_alarms: "0x00C7"
+  active_warnings: "0x00CB"
+  registered_warnings: "0x00CF"
+  
+  # Система вентиляции
+  ventilation_target: "0x00D0"
+  ventilation_level: "0x00D1"
+  ventilation_scheme: "0x00D2"
+  day_counter: "0x00D3"
+  temp_vent_activation: "0x00D6"
+
+# Настройки логирования для продакшена
+logging:
+  level: INFO
+  format: "%(asctime)s [%(name)s] %(levelname)s - %(message)s"
+  rotation: true
+  max_size_mb: 100
+  backup_count: 5
+  files:
+    main: /var/log/cube_edge/main.log
+    gateway: /var/log/cube_edge/gateway.log
+    telegram: /var/log/cube_edge/telegram.log
+    security: /var/log/cube_edge/security.log
+    system: /var/log/cube_edge/system.log
+    errors: /var/log/cube_edge/errors.log
+    
+# Production мониторинг
+monitoring:
+  health_check_interval: 30
+  metrics_retention_hours: 168  # 7 дней
+  alert_thresholds:
+    cpu_percent: 80
+    memory_percent: 85
+    disk_percent: 90
+    temperature_min: -10
+    temperature_max: 40
+    humidity_max: 95
+    co2_max: 5000
+    
+# Настройки безопасности
+security:
+  require_auth: true
+  rate_limiting: true
+  cors_enabled: false
+  allowed_origins: []
+  
+# Производительность
+performance:
+  read_interval: 5          # Секунды между чтениями
+  batch_size: 10           # Размер пакета для записи в БД
+  connection_pool: 3       # Размер пула соединений
+  cache_ttl: 60           # TTL кеша в секундах
+  
+# Backup и восстановление
+backup:
+  enabled: true
+  interval_hours: 6
+  keep_days: 30
+  compress: true
+  location: /var/backups/cube_edge/
+  
+# Автоматическое восстановление
+recovery:
+  auto_restart: true
+  max_failures: 3
+  failure_window_minutes: 15
+  restart_delay_seconds: 30

@@ -11,11 +11,15 @@ import logging
 import threading
 import time
 
-from pymodbus.datastore import (
-    ModbusSequentialDataBlock,
-    ModbusServerContext,
-    ModbusSlaveContext,
-)
+try:
+    from pymodbus.datastore import (
+        ModbusSequentialDataBlock,
+        ModbusServerContext,
+        ModbusSlaveContext,
+    )
+except ImportError:  # pymodbus >= 3.6 renamed ModbusSlaveContext → ModbusDeviceContext
+    from pymodbus.datastore import ModbusSequentialDataBlock, ModbusServerContext
+    from pymodbus.datastore.context import ModbusDeviceContext as ModbusSlaveContext
 from pymodbus.server import StartTcpServer
 
 # Импорт централизованного конфиг-менеджера
@@ -203,12 +207,27 @@ def main():
 
                 def data_callback(data):
                     logger.info(f"🔔 Callback вызван с данными: {data}")
-                    data_result[0] = data
+                    data_result[0] = data or {}
 
-                    # Сохраняем данные в SQLite сразу в callback
                     try:
-                        logger.info(f"🔍 Попытка сохранения данных: {list(data.keys())}")
-                        update_data(**data)
+                        raw = data_result[0]
+                        status = raw.get("connection_status") or (
+                            "connected" if raw else "error"
+                        )
+                        last_error = raw.get("error")
+                        payload = {
+                            k: v
+                            for k, v in raw.items()
+                            if k not in {"connection_status", "error", "last_error"}
+                        }
+
+                        update_data(
+                            device_id=1,
+                            slave_id=1,
+                            connection_status=status,
+                            last_error=last_error,
+                            **payload,
+                        )
                         logger.info("💾 Данные сохранены в БД")
                     except Exception as e:
                         logger.error(f"❌ Ошибка сохранения в БД: {e}")
@@ -238,6 +257,12 @@ def main():
                         logging.error(f"❌ Ошибка ретрансляции: {e}")
                 else:
                     logging.warning("⚠️ Нет связи с КУБ‑1063 или нет данных")
+                    update_data(
+                        device_id=1,
+                        slave_id=1,
+                        connection_status=(data or {}).get("connection_status", "error"),
+                        last_error=(data or {}).get("error", "timeout"),
+                    )
 
                 time.sleep(30)  # Увеличенный интервал опроса для записи данных
 

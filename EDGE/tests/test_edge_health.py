@@ -126,7 +126,7 @@ class TestModbusComponents:
                 )
                 tables = [row[0] for row in cursor.fetchall()]
                 
-                expected_tables = ['sensor_data', 'latest_data', 'device_status']
+                expected_tables = ['sensor_data', 'latest_data', 'registers_latest', 'registers_history']
                 for table in expected_tables:
                     assert table in tables, f"Таблица {table} не создана"
                     

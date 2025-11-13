@@ -4,12 +4,12 @@ devices:
   device_type: KUB-1063
   enabled: true
   location: Корпус №1
-  name: Корпус 1 - Вентиляция
+  name: Устройство 1
   slave_id: 1
 - description: Система обогрева для тестирования
   device_id: 2
   device_type: KUB-1112
   enabled: true
   location: Тестовая зона
-  name: Тестовый КУБ-1112 Обогрев
+  name: Устройство 2
   slave_id: 2

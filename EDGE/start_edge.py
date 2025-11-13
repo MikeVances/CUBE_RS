@@ -14,6 +14,9 @@ import yaml
 EDGE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(EDGE_DIR))
 
+# Ensure relative paths inside EDGE refer to the module directory (config/, etc.)
+os.chdir(EDGE_DIR)
+
 from core.config_manager import get_config, reload_config
 
 

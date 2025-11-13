@@ -164,6 +164,9 @@ class KUBTelegramBot:
 
         # Подключаем Device Registry для работы с устройствами
         self.device_registry = DeviceRegistry()
+        devices = self.device_registry.get_all_devices(enabled_only=True)
+        self.primary_device_id = devices[0].device_id if devices else 1
+        self.primary_device = devices[0] if devices else None
         self.bot_db = TelegramBotDB()
 
         # Telegram Application
@@ -207,15 +210,17 @@ class KUBTelegramBot:
                 tables_cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
                 tables = await tables_cursor.fetchall()
                 logger.debug(f"🔍 Таблицы в БД {db_path}: {[t[0] for t in tables]}")
-                
+                device_id = self.primary_device_id
                 cursor = await conn.execute(
                     """
                     SELECT temp_inside, temp_target, humidity, co2, nh3, pressure,
                            ventilation_level, ventilation_target, active_alarms,
                            active_warnings, updated_at,
                            digital_outputs_1, digital_outputs_2, digital_outputs_3
-                    FROM latest_data WHERE id=1
+                    FROM latest_data WHERE device_id=?
                 """
+                    ,
+                    (device_id,),
                 )
                 row = await cursor.fetchone()
                 if row:
@@ -280,8 +285,8 @@ class KUBTelegramBot:
                 for field in ("co2", "humidity", "nh3"):
                     # Берем выборку за период, смотрим был ли None и затем последние значения не None
                     cursor = await conn.execute(
-                        f"SELECT {field} as v FROM sensor_data WHERE timestamp > datetime('now', '-' || ? || ' minutes') ORDER BY timestamp ASC",
-                        (minutes,),
+                        f"SELECT {field} as v FROM sensor_data WHERE device_id = ? AND timestamp > datetime('now', '-' || ? || ' minutes') ORDER BY timestamp ASC",
+                        (self.primary_device_id, minutes),
                     )
                     rows = await cursor.fetchall()
                     if not rows:

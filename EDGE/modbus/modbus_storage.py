@@ -4,6 +4,8 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 from core.utils.paths import resolve_under_root
 
 
@@ -53,7 +55,7 @@ def _connect():
 _lock = threading.Lock()
 
 # Все регистры из Cube-1063_modbus registers.md (Input Registers)
-ALL_FIELDS = [
+ALL_FIELDS: list[str] = [
     "software_version",  # 0x0301
     "device_uid_hi",  # 0x0302
     "device_uid_lo",  # 0x0303
@@ -121,7 +123,11 @@ def _normalize_value_for_storage(key: str, value):
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS latest_data (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+    device_id INTEGER PRIMARY KEY,
+    slave_id INTEGER,
+    device_type TEXT,
+    connection_status TEXT DEFAULT 'unknown',
+    last_error TEXT,
     software_version TEXT,
     device_uid_hi INTEGER,
     device_uid_lo INTEGER,
@@ -158,6 +164,8 @@ CREATE TABLE IF NOT EXISTS latest_data (
 CREATE_HISTORY_SQL = """
 CREATE TABLE IF NOT EXISTS sensor_data (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id INTEGER NOT NULL,
+    slave_id INTEGER,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     software_version TEXT,
     device_uid_hi INTEGER,
@@ -194,16 +202,19 @@ CREATE TABLE IF NOT EXISTS sensor_data (
 # Key-Value storage for full register catalog (latest snapshot and history)
 CREATE_REG_LATEST_SQL = """
 CREATE TABLE IF NOT EXISTS registers_latest (
-    register INTEGER PRIMARY KEY,
+    device_id INTEGER NOT NULL,
+    register INTEGER NOT NULL,
     name TEXT,
     value TEXT,
-    updated_at TIMESTAMP
+    updated_at TIMESTAMP,
+    PRIMARY KEY (device_id, register)
 );
 """
 
 CREATE_REG_HISTORY_SQL = """
 CREATE TABLE IF NOT EXISTS registers_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id INTEGER NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     register INTEGER,
     name TEXT,
@@ -211,163 +222,257 @@ CREATE TABLE IF NOT EXISTS registers_history (
 );
 """
 
-INSERT_SQL = """
-INSERT OR IGNORE INTO latest_data (id, updated_at)
-VALUES (1, datetime('now'))
-"""
-
-SELECT_SQL = f"""
-SELECT {', '.join(ALL_FIELDS)}, updated_at FROM latest_data WHERE id = 1
-"""
+SELECT_SQL_TEMPLATE = f"SELECT {{columns}} FROM latest_data WHERE device_id = ?"
 
 
-def init_db():
+def init_db() -> None:
     with _lock, _connect() as conn:
-        cursor = conn.cursor()
-        cursor.execute(CREATE_SQL)
-        cursor.execute(CREATE_HISTORY_SQL)
-        cursor.execute(CREATE_REG_LATEST_SQL)
-        cursor.execute(CREATE_REG_HISTORY_SQL)
-        cursor.execute(INSERT_SQL)
+        conn.row_factory = sqlite3.Row
 
-        # Миграция: добавляем недостающие колонки статусов при обновлении
-        def _ensure_column(table: str, col: str, col_type: str):
-            cur = conn.execute(f"PRAGMA table_info({table})")
-            cols = [r[1] for r in cur.fetchall()]
-            if col not in cols:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+        _migrate_schema(conn)
 
-        for t in ("latest_data", "sensor_data"):
-            _ensure_column(t, "pressure_status", "TEXT")
-            _ensure_column(t, "humidity_status", "TEXT")
-            _ensure_column(t, "co2_status", "TEXT")
-            _ensure_column(t, "nh3_status", "TEXT")
-            _ensure_column(t, "device_uid_hi", "INTEGER")
-            _ensure_column(t, "device_uid_lo", "INTEGER")
-            _ensure_column(t, "device_uid", "TEXT")
+        conn.execute(CREATE_SQL)
+        conn.execute(CREATE_HISTORY_SQL)
+        conn.execute(CREATE_REG_LATEST_SQL)
+        conn.execute(CREATE_REG_HISTORY_SQL)
         conn.commit()
 
 
-def update_data(**kwargs):
-    """
-    Частичное обновление: меняем только переданные поля из ALL_FIELDS и всегда обновляем updated_at.
-    Пример: update_data(temp_inside=25.0, humidity=57.3)
-    Неуказанные поля остаются без изменений.
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Bring existing single-device schema to multi-device layout."""
+
+    def _table_columns(table: str) -> List[str]:
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        return [row[1] for row in cur.fetchall()]
+
+    # latest_data table migration
+    if _table_exists(conn, "latest_data"):
+        cols = _table_columns("latest_data")
+        if "device_id" not in cols:
+            conn.execute("ALTER TABLE latest_data RENAME TO latest_data_legacy")
+            conn.execute(CREATE_SQL)
+
+            cur = conn.execute("SELECT * FROM latest_data_legacy")
+            for row in cur.fetchall():
+                data = dict(row)
+                legacy_id = data.get("id", 1)
+                snapshot = {
+                    key: data.get(key) for key in ALL_FIELDS if key in data
+                }
+                _insert_or_update_latest(
+                    conn,
+                    device_id=legacy_id,
+                    slave_id=None,
+                    device_type=None,
+                    connection_status=data.get("connection_status", "unknown"),
+                    last_error=data.get("last_error"),
+                    payload=snapshot,
+                )
+
+            conn.execute("DROP TABLE latest_data_legacy")
+
+    # sensor_data migration
+    if _table_exists(conn, "sensor_data"):
+        cols = _table_columns("sensor_data")
+        if "device_id" not in cols:
+            conn.execute("ALTER TABLE sensor_data ADD COLUMN device_id INTEGER DEFAULT 1")
+        if "slave_id" not in cols:
+            conn.execute("ALTER TABLE sensor_data ADD COLUMN slave_id INTEGER")
+
+    # registers tables migration
+    if _table_exists(conn, "registers_latest"):
+        cols = _table_columns("registers_latest")
+        if "device_id" not in cols:
+            conn.execute("ALTER TABLE registers_latest RENAME TO registers_latest_legacy")
+            conn.execute(CREATE_REG_LATEST_SQL)
+
+            cur = conn.execute("SELECT * FROM registers_latest_legacy")
+            for row in cur.fetchall():
+                conn.execute(
+                    """
+                    INSERT INTO registers_latest (device_id, register, name, value, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id, register) DO UPDATE SET
+                        name = excluded.name,
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (1, row["register"], row["name"], row["value"], row["updated_at"]),
+                )
+            conn.execute("DROP TABLE registers_latest_legacy")
+
+    if _table_exists(conn, "registers_history"):
+        cols = _table_columns("registers_history")
+        if "device_id" not in cols:
+            conn.execute("ALTER TABLE registers_history ADD COLUMN device_id INTEGER DEFAULT 1")
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (table,)
+    )
+    return cur.fetchone() is not None
+
+
+def update_data(
+    *,
+    device_id: int,
+    slave_id: Optional[int] = None,
+    device_type: Optional[str] = None,
+    connection_status: Optional[str] = None,
+    last_error: Optional[str] = None,
+    **payload: Any,
+) -> None:
+    """Upsert latest snapshot for a particular device.
+
+    Unknown fields are ignored. Always bumps ``updated_at`` for the device.
     """
     import logging
 
+    if device_id is None:
+        raise ValueError("device_id is required for update_data")
+
     logging.info(
-        f"🔍 update_data вызван с {len(kwargs)} параметрами: {list(kwargs.keys())}"
+        "🔍 update_data(device_id=%s) с %d параметрами", device_id, len(payload)
     )
 
-    # Filter only known columns
-    cols = []
-    vals = []
-    normalized_kwargs: dict[str, object] = {}
+    normalized_kwargs: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if key in ALL_FIELDS:
+            normalized_kwargs[key] = _normalize_value_for_storage(key, value)
 
-    for k, v in kwargs.items():
-        if k in ALL_FIELDS:
-            normalized_value = _normalize_value_for_storage(k, v)
-            normalized_kwargs[k] = normalized_value
-            cols.append(f"{k} = ?")
-            vals.append(normalized_value)
-            logging.info(f"🔍 Добавлен параметр {k}={normalized_value}")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # If nothing to update, just bump the timestamp and exit
-    if not cols:
-        logging.info("🔍 Нет полей для обновления, обновляем только timestamp")
-        with _lock, _connect() as conn:
-            conn.execute(
-                "UPDATE latest_data SET updated_at = datetime('now') WHERE id = 1"
-            )
-            conn.commit()
-        return
-
-    cols.append("updated_at = ?")
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    vals.append(current_time)
-    set_clause = ", ".join(cols)
-
-    logging.info(f"🔍 SQL запрос: UPDATE latest_data SET {set_clause[:100]}...")
-
-    # Механизм безопасности: повторные попытки при блокировке
     max_retries = 3
     for attempt in range(max_retries):
         try:
             with _lock, _connect() as conn:
-                # Начинаем транзакцию
                 conn.execute("BEGIN IMMEDIATE;")
 
-                # Обновляем latest_data
-                conn.execute(f"UPDATE latest_data SET {set_clause} WHERE id = 1", vals)
-                logging.info("✅ latest_data обновлена")
+                _insert_or_update_latest(
+                    conn,
+                    device_id=device_id,
+                    slave_id=slave_id,
+                    device_type=device_type,
+                    connection_status=connection_status,
+                    last_error=last_error,
+                    payload=normalized_kwargs,
+                    updated_at=timestamp,
+                )
 
-                # Добавляем в историю sensor_data, если есть существенные данные
-                sensor_keys = [
-                    k
-                    for k in kwargs.keys()
-                    if k in ["temp_inside", "humidity", "co2", "pressure"]
-                ]
-                if sensor_keys:
-                    logging.info(
-                        f"🔍 Найдены ключи сенсоров: {sensor_keys}, добавляем в историю"
-                    )
+                _append_history_tx(
+                    conn,
+                    device_id=device_id,
+                    slave_id=slave_id,
+                    payload=normalized_kwargs,
+                    timestamp=timestamp,
+                )
 
-                    # Добавляем в историю В ТОМ ЖЕ соединении, чтобы избежать deadlock
-                    valid_data = {
-                        k: normalized_kwargs.get(k)
-                        for k in kwargs.keys()
-                        if k in ALL_FIELDS and normalized_kwargs.get(k) is not None
-                    }
-                    logging.info(
-                        f"🔍 Отфильтровано {len(valid_data)} валидных полей: {list(valid_data.keys())}"
-                    )
-
-                    if valid_data:
-                        columns = list(valid_data.keys())
-                        values = list(valid_data.values())
-                        placeholders = ", ".join(["?" for _ in values])
-                        columns_str = ", ".join(columns)
-
-                        sql = f"INSERT INTO sensor_data ({columns_str}) VALUES ({placeholders})"
-                        logging.info(f"🔍 SQL для истории: {sql[:100]}...")
-
-                        conn.execute(sql, values)
-                        logging.info("✅ Запись в sensor_data выполнена")
-
-                    logging.info("✅ Запись в историю выполнена")
-                else:
-                    logging.info("🔍 Ключи сенсоров не найдены, пропускаем историю")
-
-                # Обновляем KV‑снимок регистров на основе известной карты
                 try:
-                    _update_registers_snapshot_tx(conn, normalized_kwargs)
-                except Exception as e:
-                    logging.warning(f"⚠️ Не удалось обновить KV регистры: {e}")
+                    _update_registers_snapshot_tx(
+                        conn, normalized_kwargs, device_id=device_id, timestamp=timestamp
+                    )
+                except Exception as exc:  # noqa: BLE001 - логируем и продолжаем
+                    logging.warning(f"⚠️ Не удалось обновить KV регистры: {exc}")
 
                 conn.commit()
-                logging.info("✅ update_data завершена успешно")
-                break  # Успешное выполнение, выходим из цикла
+                logging.info("✅ update_data завершена успешно для device_id=%s", device_id)
+                return
 
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e) and attempt < max_retries - 1:
                 logging.warning(
-                    f"⚠️ БД заблокирована, попытка {attempt + 1}/{max_retries}"
+                    "⚠️ БД заблокирована (попытка %d/%d)", attempt + 1, max_retries
                 )
-                time.sleep(0.1 * (attempt + 1))  # Экспоненциальная задержка
+                time.sleep(0.1 * (attempt + 1))
                 continue
-            else:
-                logging.error(f"❌ Ошибка блокировки БД: {e}")
-                raise
-        except Exception as e:
-            logging.error(f"❌ Ошибка в update_data: {e}")
+            raise
+        except Exception:
+            import logging as _logging
             import traceback
 
-            logging.error(traceback.format_exc())
+            _logging.error("❌ Ошибка в update_data", exc_info=True)
+            _logging.error(traceback.format_exc())
             raise
 
 
-def _update_registers_snapshot_tx(conn: sqlite3.Connection, data: dict):
+def _insert_or_update_latest(
+    conn: sqlite3.Connection,
+    *,
+    device_id: int,
+    slave_id: Optional[int],
+    device_type: Optional[str],
+    connection_status: Optional[str],
+    last_error: Optional[str],
+    payload: Dict[str, Any],
+    updated_at: str,
+) -> None:
+    columns: List[str] = ["device_id", "updated_at"]
+    values: List[Any] = [device_id, updated_at]
+
+    def _push(column: str, value: Any) -> None:
+        if value is None:
+            return
+        columns.append(column)
+        values.append(value)
+
+    _push("slave_id", slave_id)
+    _push("device_type", device_type)
+    _push("connection_status", connection_status)
+    _push("last_error", last_error)
+
+    for field, value in payload.items():
+        columns.append(field)
+        values.append(value)
+
+    assignments = ", ".join(f"{col}=excluded.{col}" for col in columns if col != "device_id")
+    placeholders = ", ".join("?" for _ in columns)
+
+    sql = (
+        f"INSERT INTO latest_data ({', '.join(columns)}) "
+        f"VALUES ({placeholders}) "
+        f"ON CONFLICT(device_id) DO UPDATE SET {assignments}"
+    )
+
+    conn.execute(sql, values)
+
+
+def _append_history_tx(
+    conn: sqlite3.Connection,
+    *,
+    device_id: int,
+    slave_id: Optional[int],
+    payload: Dict[str, Any],
+    timestamp: str,
+) -> None:
+    if not payload:
+        return
+
+    columns: List[str] = ["device_id", "timestamp"]
+    values: List[Any] = [device_id, timestamp]
+
+    if slave_id is not None:
+        columns.append("slave_id")
+        values.append(slave_id)
+
+    for field, value in payload.items():
+        columns.append(field)
+        values.append(value)
+
+    placeholders = ", ".join("?" for _ in columns)
+    conn.execute(
+        f"INSERT INTO sensor_data ({', '.join(columns)}) VALUES ({placeholders})",
+        values,
+    )
+
+
+def _update_registers_snapshot_tx(
+    conn: sqlite3.Connection,
+    data: Dict[str, Any],
+    *,
+    device_id: int,
+    timestamp: str,
+):
     """Обновляет таблицу registers_latest и добавляет в registers_history в рамках активной транзакции.
 
     На вход подаём словарь данных вида name->value. Адреса регистров берём из конфигурации.
@@ -377,11 +482,18 @@ def _update_registers_snapshot_tx(conn: sqlite3.Connection, data: dict):
         # Получаем карту регистров из конфига (name -> addr string)
         from core.config_manager import get_config  # type: ignore
 
-        reg_meta = get_config().get_modbus_registers_meta()
+        cfg = get_config()
+        if hasattr(cfg, "get_modbus_registers_meta"):
+            reg_meta = cfg.get_modbus_registers_meta()
+        else:
+            reg_meta = {
+                name: {"address": address}
+                for name, address in cfg.get_all_modbus_registers().items()
+            }
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        rows_latest = []
-        rows_history = []
+        rows_latest: List[tuple[Any, ...]] = []
+        rows_history: List[tuple[Any, ...]] = []
 
         for name, meta in reg_meta.items():
             if name not in data:
@@ -395,15 +507,15 @@ def _update_registers_snapshot_tx(conn: sqlite3.Connection, data: dict):
                 continue
             # Приводим значение к строке для универсального хранения
             val_text = "" if value is None else str(value)
-            rows_latest.append((addr, name, val_text, now))
-            rows_history.append((addr, name, val_text))
+            rows_latest.append((device_id, addr, name, val_text, now))
+            rows_history.append((device_id, addr, name, val_text))
 
         if rows_latest:
             conn.executemany(
                 """
-                INSERT INTO registers_latest (register, name, value, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(register) DO UPDATE SET
+                INSERT INTO registers_latest (device_id, register, name, value, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(device_id, register) DO UPDATE SET
                     name=excluded.name,
                     value=excluded.value,
                     updated_at=excluded.updated_at
@@ -413,7 +525,7 @@ def _update_registers_snapshot_tx(conn: sqlite3.Connection, data: dict):
 
         if rows_history:
             conn.executemany(
-                "INSERT INTO registers_history (register, name, value) VALUES (?, ?, ?)",
+                "INSERT INTO registers_history (device_id, register, name, value) VALUES (?, ?, ?, ?)",
                 rows_history,
             )
 
@@ -423,92 +535,109 @@ def _update_registers_snapshot_tx(conn: sqlite3.Connection, data: dict):
         logging.warning(f"⚠️ KV обновление регистров пропущено: {e}")
 
 
-def read_registers_latest() -> list[dict]:
-    """Возвращает список всех доступных регистров (name, address, value, updated_at)."""
+def read_registers_latest(device_id: Optional[int] = None) -> List[dict]:
+    """Return latest register snapshot for a device (or the first device)."""
     with _lock, _connect() as conn:
         conn.row_factory = sqlite3.Row
-        cur = conn.execute(
-            "SELECT register, name, value, updated_at FROM registers_latest ORDER BY register"
-        )
+        if device_id is None:
+            cur = conn.execute(
+                "SELECT device_id, register, name, value, updated_at"
+                "  FROM registers_latest ORDER BY device_id, register"
+            )
+        else:
+            cur = conn.execute(
+                "SELECT device_id, register, name, value, updated_at"
+                "  FROM registers_latest WHERE device_id = ? ORDER BY register",
+                (device_id,),
+            )
         return [dict(r) for r in cur.fetchall()]
 
 
-def add_history_record(**kwargs):
-    """Добавляет запись в историческую таблицу sensor_data"""
-    import logging
+def add_history_record(*, device_id: int, slave_id: Optional[int] = None, **payload: Any) -> None:
+    """Public helper to append device history outside update_data."""
+    data = {
+        key: _normalize_value_for_storage(key, value)
+        for key, value in payload.items()
+        if key in ALL_FIELDS and value is not None
+    }
 
-    logging.info(f"🔍 add_history_record вызван с {len(kwargs)} параметрами")
-
-    # Filter only known columns
-    valid_data = {k: v for k, v in kwargs.items() if k in ALL_FIELDS and v is not None}
-    logging.info(
-        f"🔍 Отфильтровано {len(valid_data)} валидных полей: {list(valid_data.keys())}"
-    )
-
-    if not valid_data:
-        logging.warning("⚠️ Нет валидных данных для записи в историю")
+    if not data:
         return
 
-    columns = list(valid_data.keys())
-    values = list(valid_data.values())
-    placeholders = ", ".join(["?" for _ in values])
-    columns_str = ", ".join(columns)
-
-    sql = f"INSERT INTO sensor_data ({columns_str}) VALUES ({placeholders})"
-    logging.info(f"🔍 SQL для истории: {sql[:100]}...")
-
-    try:
-        with _lock, _connect() as conn:
-            conn.execute(sql, values)
-            conn.commit()
-            logging.info("✅ Запись в sensor_data выполнена")
-    except Exception as e:
-        logging.error(f"❌ Ошибка записи в sensor_data: {e}")
-        import traceback
-
-        logging.error(traceback.format_exc())
-        raise
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _lock, _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE;")
+        _append_history_tx(
+            conn,
+            device_id=device_id,
+            slave_id=slave_id,
+            payload=data,
+            timestamp=timestamp,
+        )
+        conn.commit()
 
 
-def read_data():
-    """Безопасное чтение данных с повторными попытками"""
+def read_data(device_id: Optional[int] = None) -> Dict[str, Any]:
+    """Read latest snapshot for a specific device (defaults to first)."""
+    columns = ["device_id", "slave_id", "device_type", "connection_status", "last_error"] + ALL_FIELDS + ["updated_at"]
+    query_columns = ", ".join(columns)
+    sql = SELECT_SQL_TEMPLATE.format(columns=query_columns)
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
             with _lock, _connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                cursor.execute(SELECT_SQL)
+                if device_id is None:
+                    cursor.execute(
+                        f"SELECT {query_columns} FROM latest_data ORDER BY device_id LIMIT 1"
+                    )
+                else:
+                    cursor.execute(sql, (device_id,))
                 row = cursor.fetchone()
                 if not row:
                     return {}
-                data = {f: row[f] for f in ALL_FIELDS}
-                updated_at = row["updated_at"]
+                data = dict(row)
+                updated_at = data.get("updated_at")
                 if isinstance(updated_at, datetime):
-                    updated_at = updated_at.isoformat()
-                data["updated_at"] = updated_at
+                    data["updated_at"] = updated_at.isoformat()
                 return data
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e) and attempt < max_retries - 1:
                 import logging
 
                 logging.warning(
-                    f"⚠️ БД заблокирована при чтении, попытка {attempt + 1}/{max_retries}"
+                    "⚠️ БД заблокирована при чтении, попытка %d/%d",
+                    attempt + 1,
+                    max_retries,
                 )
                 time.sleep(0.05 * (attempt + 1))
                 continue
-            else:
-                import logging
-
-                logging.error(f"❌ Ошибка чтения БД: {e}")
-                raise
-        except Exception as e:
+            raise
+        except Exception:
             import logging
 
-            logging.error(f"❌ Ошибка в read_data: {e}")
+            logging.error("❌ Ошибка в read_data", exc_info=True)
             raise
 
-    return {}  # Если все попытки неудачны
+    return {}
+
+
+def read_all_devices() -> List[Dict[str, Any]]:
+    """Return snapshots for all registered devices."""
+    with _lock, _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM latest_data ORDER BY device_id")
+        rows = cur.fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            updated_at = item.get("updated_at")
+            if isinstance(updated_at, datetime):
+                item["updated_at"] = updated_at.isoformat()
+            result.append(item)
+        return result
 
 
 def get_db_health():

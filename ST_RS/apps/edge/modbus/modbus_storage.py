@@ -502,7 +502,14 @@ def _update_registers_snapshot_tx(conn: sqlite3.Connection, data: dict):
         # 2) Загружаем карту регистров из конфигурации
         from core.config_manager import get_config  # type: ignore
 
-        reg_meta = get_config().get_modbus_registers_meta()
+        cfg = get_config()
+        if hasattr(cfg, "get_modbus_registers_meta"):
+            reg_meta = cfg.get_modbus_registers_meta()
+        else:
+            reg_meta = {
+                name: {"address": address}
+                for name, address in cfg.get_all_modbus_registers().items()
+            }
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         rows_latest = []

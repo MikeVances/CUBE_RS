@@ -152,7 +152,8 @@ class ConfigManager:
     """
 
     def __init__(self, config_dir: str = "config"):
-        self.config_dir = Path(config_dir)
+        resolved_dir = resolve_under_root(config_dir)
+        self.config_dir = Path(resolved_dir)
         self.config_dir.mkdir(exist_ok=True)
 
         # Load environment variables from .env file if it exists
@@ -676,6 +677,13 @@ class ConfigManager:
     def get_all_modbus_registers(self) -> dict[str, str]:
         """Все Modbus регистры"""
         return self.modbus_registers.copy()
+
+    def get_modbus_registers_meta(self) -> dict[str, dict[str, str]]:
+        """Метаданные регистров (для совместимости со старым API)."""
+        return {
+            name: {"address": address}
+            for name, address in self.modbus_registers.items()
+        }
 
     def is_service_enabled(self, service_name: str) -> bool:
         """Проверка включен ли сервис"""

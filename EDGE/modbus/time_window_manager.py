@@ -69,7 +69,8 @@ class TimeWindowManager:
         self.request_queue = queue.Queue()
         self.running = True
 
-        # Единственное переиспользуемое соединение
+        # Единственное переиспользуемое соединение (один serial port может иметь только одно подключение)
+        # Но мы будем динамически менять slave_id у reader'а для работы с разными устройствами
         self.shared_reader = None
         self.connection_lock = threading.Lock()
         self.connection_errors = 0
@@ -160,8 +161,8 @@ class TimeWindowManager:
                 logging.error(f"❌ Ошибка в менеджере временных окон: {e}")
                 time.sleep(1)
 
-    def _get_or_create_reader(self):
-        """Получить или создать переиспользуемое соединение"""
+    def _get_or_create_reader(self, slave_id=1):
+        """Получить или создать переиспользуемое соединение, настроив slave_id"""
         with self.connection_lock:
             if self.shared_reader is None:
                 last_error: Exception | None = None
@@ -170,8 +171,12 @@ class TimeWindowManager:
                         logging.info(
                             f"🔌 Создаем соединение к {self.serial_port} (попытка {attempt}/3)..."
                         )
+                        # Создаём Reader с дефолтным slave_id=1
+                        reader_kwargs = dict(self.reader_kwargs)
+                        reader_kwargs.pop("slave_id", None)
+
                         self.shared_reader = KUB1063Reader(
-                            port=self.serial_port, **self.reader_kwargs
+                            port=self.serial_port, slave_id=slave_id, **reader_kwargs
                         )
 
                         connection_result = threading.Event()
@@ -227,6 +232,12 @@ class TimeWindowManager:
                     raise ModbusConnectionError(
                         f"Ошибка создания соединения: {last_error}"
                     )
+
+            # Динамически меняем slave_id если он отличается
+            if self.shared_reader.slave_id != slave_id:
+                logging.debug(f"🔄 Переключение slave_id: {self.shared_reader.slave_id} → {slave_id}")
+                self.shared_reader.slave_id = slave_id
+
             return self.shared_reader
 
     def _close_reader(self):
@@ -282,10 +293,11 @@ class TimeWindowManager:
     def _process_request(self, request):
         """Обработка запроса к RS485 с переиспользуемым соединением"""
         start_time = time.time()
+        slave_id = request.get("slave_id", 1)  # Дефолт - устройство 1
 
         try:
-            # Получаем переиспользуемое соединение
-            reader = self._get_or_create_reader()
+            # Получаем переиспользуемое соединение с нужным slave_id
+            reader = self._get_or_create_reader(slave_id)
 
             if request["type"] == "read_all":
                 # Чтение всех данных БЕЗ закрытия соединения
@@ -314,45 +326,52 @@ class TimeWindowManager:
             ) / total_requests
 
         except (ModbusConnectionError, ModbusTimeoutError) as e:
-            logging.error(f"❌ Ошибка Modbus: {e}")
+            logging.error(f"❌ Ошибка Modbus (slave_id={slave_id}): {e}")
             # Закрываем соединение при ошибках для пересоздания
             self._close_reader()
             request["callback"](None)
 
         except Exception as e:
-            logging.error(f"❌ Неожиданная ошибка обработки запроса: {e}")
+            logging.error(f"❌ Неожиданная ошибка обработки запроса (slave_id={slave_id}): {e}")
             self.stats["last_error"] = str(e)
             request["callback"](None)
 
-    def request_read_all(self, callback):
-        """Запрос на чтение всех данных"""
-        request = {"type": "read_all", "callback": callback, "timestamp": time.time()}
+    def request_read_all(self, callback, slave_id=1):
+        """Запрос на чтение всех данных с устройства"""
+        request = {
+            "type": "read_all",
+            "callback": callback,
+            "slave_id": slave_id,
+            "timestamp": time.time()
+        }
         self.request_queue.put(request)
-        logging.info("📋 Запрос на чтение всех данных добавлен в очередь")
+        logging.info(f"📋 Запрос на чтение всех данных (slave_id={slave_id}) добавлен в очередь")
 
-    def request_read_register(self, register, callback):
-        """Запрос на чтение конкретного регистра"""
+    def request_read_register(self, register, callback, slave_id=1):
+        """Запрос на чтение конкретного регистра с устройства"""
         request = {
             "type": "read_register",
             "register": register,
             "callback": callback,
+            "slave_id": slave_id,
             "timestamp": time.time(),
         }
         self.request_queue.put(request)
-        logging.info(f"📋 Запрос на чтение регистра 0x{register:04X} добавлен в очередь")
+        logging.info(f"📋 Запрос на чтение регистра 0x{register:04X} (slave_id={slave_id}) добавлен в очередь")
 
-    def request_write_register(self, register, value, callback):
-        """Запрос на запись регистра"""
+    def request_write_register(self, register, value, callback, slave_id=1):
+        """Запрос на запись регистра на устройство"""
         request = {
             "type": "write_register",
             "register": register,
             "value": value,
             "callback": callback,
+            "slave_id": slave_id,
             "timestamp": time.time(),
         }
         self.request_queue.put(request)
         logging.info(
-            f"📋 Запрос на запись регистра 0x{register:04X}={value} добавлен в очередь"
+            f"📋 Запрос на запись регистра 0x{register:04X}={value} (slave_id={slave_id}) добавлен в очередь"
         )
 
     def get_window_status(self):
@@ -436,22 +455,22 @@ def stop_time_window_manager():
                 _time_window_manager = None
 
 
-def request_rs485_read_all(callback):
+def request_rs485_read_all(callback, slave_id=1):
     """Запрос на чтение всех данных через временные окна"""
     manager = get_time_window_manager()
-    manager.request_read_all(callback)
+    manager.request_read_all(callback, slave_id=slave_id)
 
 
-def request_rs485_read_register(register, callback):
+def request_rs485_read_register(register, callback, slave_id=1):
     """Запрос на чтение регистра через временные окна"""
     manager = get_time_window_manager()
-    manager.request_read_register(register, callback)
+    manager.request_read_register(register, callback, slave_id=slave_id)
 
 
-def request_rs485_write_register(register, value, callback):
+def request_rs485_write_register(register, value, callback, slave_id=1):
     """Запрос на запись регистра через временные окна"""
     manager = get_time_window_manager()
-    manager.request_write_register(register, value, callback)
+    manager.request_write_register(register, value, callback, slave_id=slave_id)
 
 
 def get_rs485_statistics():

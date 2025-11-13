@@ -17,11 +17,15 @@ import logging
 import threading
 import time
 
-from pymodbus.datastore import (
-    ModbusSequentialDataBlock,
-    ModbusServerContext,
-    ModbusSlaveContext,
-)
+try:
+    from pymodbus.datastore import (
+        ModbusSequentialDataBlock,
+        ModbusServerContext,
+        ModbusSlaveContext,
+    )
+except ImportError:  # pymodbus >= 3.6 renamed ModbusSlaveContext → ModbusDeviceContext
+    from pymodbus.datastore import ModbusSequentialDataBlock, ModbusServerContext
+    from pymodbus.datastore.context import ModbusDeviceContext as ModbusSlaveContext
 from pymodbus.server import StartTcpServer
 
 # Импорт централизованного конфиг-менеджера
@@ -182,8 +186,20 @@ def main():
         MODBUS_TCP_PORT = args.modbus_port
         config.modbus_tcp.port = args.modbus_port
 
-    logger.info("🚀 Запуск ШЛЮЗА 1: Modbus TCP ретранслятор для КУБ‑1063")
+    logger.info("🚀 Запуск MULTI-DEVICE Modbus TCP Gateway")
     logger.info(f"⚙️ Конфигурация: порт {MODBUS_TCP_PORT}, RS485: {SERIAL_PORT}")
+
+    # Загружаем реестр устройств
+    try:
+        from core.device_registry import get_device_registry
+        device_registry = get_device_registry()
+        devices = device_registry.get_all_devices(enabled_only=True)
+        logger.info(f"📋 Найдено {len(devices)} активных устройств в реестре")
+        for device in devices:
+            logger.info(f"  • {device.name} (slave_id={device.slave_id}, type={device.device_type.value})")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки реестра устройств: {e}")
+        return
 
     # Инициализация менеджера временных окон с нужным портом
     try:
@@ -218,55 +234,97 @@ def main():
     except Exception as e:
         logger.error(f"❌ Не удалось запустить Writer: {e}")
 
-    # Фоновый поток: периодически запрашиваем RS485 и обновляем datastore + БД
+    # Фоновый поток: периодически опрашиваем ВСЕ устройства и обновляем datastore + БД
     def update_loop():
-        logger.info("🔄 Запуск цикла ретрансляции данных")
+        logger.info("🔄 Запуск цикла ретрансляции данных для всех устройств")
 
         while True:
             try:
-                data_result = [None]
+                # Опрашиваем каждое устройство по очереди
+                for device in devices:
+                    device_name = device.name
+                    slave_id = device.slave_id
 
-                def data_callback(data):
-                    logger.info(f"🔔 Callback вызван с данными: {data}")
-                    data_result[0] = data
+                    logger.info(f"📡 Опрос устройства: {device_name} (slave_id={slave_id})")
 
-                    if data:
+                    data_result = [None]
+
+                    def data_callback(data, dev_name=device_name, dev_info=device):
+                        logger.info(
+                            "🔔 Callback для %s (slave_id=%s): %s",
+                            dev_name,
+                            dev_info.slave_id,
+                            data,
+                        )
+                        data_result[0] = data or {}
+
                         try:
-                            logger.info(
-                                f"🔍 Попытка сохранения данных: {list(data.keys())}"
+                            raw_payload = data_result[0] if data_result[0] else {}
+                            connection_status = raw_payload.get("connection_status") or (
+                                "connected" if raw_payload else "error"
                             )
-                            update_data(**data)
-                            logger.info("💾 Данные сохранены в БД")
+                            last_error = raw_payload.get("error")
+                            payload = {
+                                key: value
+                                for key, value in raw_payload.items()
+                                if key not in {"connection_status", "error", "last_error"}
+                            }
+
+                            update_data(
+                                device_id=dev_info.device_id,
+                                slave_id=dev_info.slave_id,
+                                device_type=dev_info.device_type.value,
+                                connection_status=connection_status,
+                                last_error=last_error,
+                                **payload,
+                            )
+                            logger.info("💾 Данные от %s сохранены в БД", dev_name)
                         except Exception as e:
-                            logger.error(f"❌ Ошибка сохранения в БД: {e}")
+                            logger.error(
+                                "❌ Ошибка сохранения данных от %s: %s", dev_name, e
+                            )
                             import traceback
 
                             logger.error(traceback.format_exc())
 
-                logging.info("📤 Отправка запроса в TimeWindowManager…")
-                request_rs485_read_all(data_callback)
+                    logging.info(f"📤 Отправка запроса для slave_id={slave_id}")
+                    request_rs485_read_all(data_callback, slave_id=slave_id)
 
-                # Ждём ответ общего запроса до 20 секунд
-                start_time = time.time()
-                while data_result[0] is None and time.time() - start_time < 20:
-                    time.sleep(0.1)
+                    # Ждём ответ до 20 секунд
+                    start_time = time.time()
+                    while data_result[0] is None and time.time() - start_time < 20:
+                        time.sleep(0.1)
 
-                data = data_result[0]
-                if data and data.get("connection_status") == "connected":
-                    logging.info(
-                        f"📊 Полученные данные: temp={data.get('temp_inside')}°C, humidity={data.get('humidity')}%, CO2={data.get('co2')}ppm"
-                    )
+                    data = data_result[0]
+                    if data and data.get("connection_status") == "connected":
+                        logging.info(
+                            f"📊 {device_name}: temp={data.get('temp_inside')}°C, humidity={data.get('humidity')}%, CO2={data.get('co2')}ppm"
+                        )
 
-                    try:
-                        # Ретранслируем регистры в Modbus TCP
-                        updated_count = read_and_retranslate_all_registers(store)
-                        logging.info(f"📡 Ретранслировано {updated_count} регистров")
-                    except Exception as e:
-                        logging.error(f"❌ Ошибка ретрансляции: {e}")
-                else:
-                    logging.warning("⚠️ Нет связи с КУБ‑1063 или нет данных")
+                        try:
+                            # Ретранслируем регистры в Modbus TCP
+                            # TODO: Учитывать slave_id при ретрансляции
+                            updated_count = read_and_retranslate_all_registers(store)
+                            logging.info(f"📡 {device_name}: ретранслировано {updated_count} регистров")
+                        except Exception as e:
+                            logging.error(f"❌ Ошибка ретрансляции для {device_name}: {e}")
+                    else:
+                        logging.warning(
+                            f"⚠️ Нет связи с {device_name} (slave_id={slave_id})"
+                        )
+                        update_data(
+                            device_id=device.device_id,
+                            slave_id=device.slave_id,
+                            device_type=device.device_type.value,
+                            connection_status="error",
+                            last_error="timeout",
+                        )
 
-                time.sleep(30)  # Увеличенный интервал опроса для записи данных
+                    # Небольшая пауза между устройствами
+                    time.sleep(2)
+
+                # Пауза перед следующим циклом опроса всех устройств
+                time.sleep(30)
 
             except Exception as e:
                 logging.error(f"❌ Ошибка в цикле ретрансляции: {e}")

@@ -539,7 +539,7 @@ class KUB1063Reader:
             | ((parts[3] & 0xFFFF) << 48)
         )
 
-    def read_all(self) -> dict[str, Any]:
+    def read_all(self, max_failures: int | None = None) -> dict[str, Any]:
         """Чтение всех регистров"""
         if not self.connect():
             return {}
@@ -548,6 +548,9 @@ class KUB1063Reader:
 
         success_count = 0
         total_count = len(REGISTER_MAP)
+
+        failures = 0
+        aborted = False
 
         try:
             for name, register in REGISTER_MAP.items():
@@ -571,9 +574,19 @@ class KUB1063Reader:
 
                 if parsed_value is not None:
                     success_count += 1
+                    failures = 0
                     logger.debug(f"✅ {name}: {parsed_value}")
                 else:
+                    failures += 1
                     logger.debug(f"❌ {name}: нет данных")
+
+                    if max_failures is not None and failures >= max_failures:
+                        logger.warning(
+                            "⚠️ Превышен лимит отсутствующих ответов (%s), прекращаем опрос",
+                            max_failures,
+                        )
+                        aborted = True
+                        break
 
                 # Небольшая пауза между запросами
                 time.sleep(0.1)
@@ -589,6 +602,9 @@ class KUB1063Reader:
                 pass
 
             data["success_rate"] = success_count / total_count
+            if aborted:
+                data["connection_status"] = "partial"
+                data.setdefault("error", "max_failures_exceeded")
             logger.info(f"📊 Успешно прочитано {success_count}/{total_count} регистров")
 
         except Exception as e:
@@ -601,7 +617,7 @@ class KUB1063Reader:
 
         return data
 
-    def read_all_keep_connection(self) -> dict[str, Any]:
+    def read_all_keep_connection(self, max_failures: int | None = None) -> dict[str, Any]:
         """Чтение всех регистров БЕЗ закрытия соединения (для TimeWindowManager)"""
         if not self.is_connected():
             if not self.connect():
@@ -611,6 +627,9 @@ class KUB1063Reader:
 
         success_count = 0
         total_count = len(REGISTER_MAP)
+
+        failures = 0
+        aborted = False
 
         try:
             for name, register in REGISTER_MAP.items():
@@ -632,14 +651,27 @@ class KUB1063Reader:
 
                 if parsed_value is not None:
                     success_count += 1
+                    failures = 0
                     logger.debug(f"✅ {name}: {parsed_value}")
                 else:
+                    failures += 1
                     logger.debug(f"❌ {name}: нет данных")
+
+                    if max_failures is not None and failures >= max_failures:
+                        logger.warning(
+                            "⚠️ Превышен лимит отсутствующих ответов (%s), прекращаем опрос",
+                            max_failures,
+                        )
+                        aborted = True
+                        break
 
                 # Небольшая пауза между запросами
                 time.sleep(0.05)  # Уменьшенная пауза для производительности
 
             data["success_rate"] = success_count / total_count
+            if aborted:
+                data["connection_status"] = "partial"
+                data.setdefault("error", "max_failures_exceeded")
             logger.debug(f"📊 Успешно прочитано {success_count}/{total_count} регистров")
 
         except Exception as e:

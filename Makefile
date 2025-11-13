@@ -188,7 +188,11 @@ _check-poetry:
 	@command -v poetry >/dev/null 2>&1 || { echo "❌ Poetry не установлен"; exit 1; }
 run-edge: ## Запуск только Edge (ферма)
 	@echo "🚀 Запуск Edge (RS485 + gateway + optional bot/dashboard)..."
-	@command -v poetry >/dev/null 2>&1 && poetry run python start_edge.py || python start_edge.py
+	@command -v poetry >/dev/null 2>&1 && poetry run python EDGE/start_edge.py || python EDGE/start_edge.py
+
+scan-slaves: ## Сканирование Modbus slave ID на RS485
+	@echo "🔍 Сканирование RS485 устройств..."
+	@command -v poetry >/dev/null 2>&1 && poetry run python EDGE/tools/scan_slave_ids.py $(ARGS) || python EDGE/tools/scan_slave_ids.py $(ARGS)
 
 run-server: ## Запуск только Server (поставщик)
 	@echo "🚀 Запуск Server (API + WS + optional bot)..."

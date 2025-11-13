@@ -12,15 +12,23 @@ from typing import Any, Optional
 try:  # pragma: no cover - import path differences in packaging
     from core.config_manager import get_config  # type: ignore
     from core.utils.paths import resolve_under_root  # type: ignore
+    from core.device_registry import get_device_registry  # type: ignore
 except ImportError:  # pragma: no cover - local fallback when running from EDGE package
     from ..core.config_manager import get_config
     from ..core.utils.paths import resolve_under_root
+    from ..core.device_registry import get_device_registry
 
 try:
     _cfg = get_config()
     DB_PATH = resolve_under_root(getattr(_cfg.database, "file", "kub_data.db") or "kub_data.db")
 except Exception:
     DB_PATH = resolve_under_root("kub_data.db")
+
+try:
+    _devices = get_device_registry().get_all_devices(enabled_only=True)
+    DEFAULT_DEVICE_ID = _devices[0].device_id if _devices else 1
+except Exception:
+    DEFAULT_DEVICE_ID = 1
 
 try:
     from ..core.log_filter import get_secure_logger
@@ -37,9 +45,10 @@ def read_all() -> Optional[dict[str, Any]]:
             cursor.execute(
                 """
                 SELECT * FROM latest_data
-                WHERE id = 1
+                WHERE device_id = ?
                 LIMIT 1
-                """
+                """,
+                (DEFAULT_DEVICE_ID,),
             )
             row = cursor.fetchone()
             if not row:
@@ -101,9 +110,10 @@ def get_historical_data(hours: int = 6) -> Optional[list]:
                     ventilation_level,
                     software_version
                 FROM sensor_data
-                WHERE timestamp > datetime('now', '-{hours} hours')
+                WHERE device_id = ? AND timestamp > datetime('now', '-{hours} hours')
                 ORDER BY timestamp ASC
-                """
+                """,
+                (DEFAULT_DEVICE_ID,),
             )
             rows = cursor.fetchall()
             if not rows:
@@ -147,8 +157,9 @@ def get_statistics() -> Optional[dict[str, Any]]:
                     MAX(updated_at) as last_reading,
                     MIN(updated_at) as first_reading
                 FROM latest_data
-                WHERE updated_at > datetime('now', '-24 hours')
-                """
+                WHERE device_id = ? AND updated_at > datetime('now', '-24 hours')
+                """,
+                (DEFAULT_DEVICE_ID,),
             )
             row = cursor.fetchone()
             if not row:
@@ -160,8 +171,9 @@ def get_statistics() -> Optional[dict[str, Any]]:
             cursor.execute(
                 """
                 SELECT COUNT(*) FROM latest_data
-                WHERE updated_at > datetime('now', '-1 minute')
-                """
+                WHERE device_id = ? AND updated_at > datetime('now', '-1 minute')
+                """,
+                (DEFAULT_DEVICE_ID,),
             )
             recent_readings = cursor.fetchone()[0]
             is_running = recent_readings > 0

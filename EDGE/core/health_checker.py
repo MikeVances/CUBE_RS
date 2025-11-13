@@ -194,20 +194,19 @@ class HealthChecker:
                 table_count = (await cursor.fetchone())[0]
 
                 # Проверяем последнее обновление данных
+                last_update_age = None
                 try:
                     cursor = await conn.execute(
                         """
-                        SELECT updated_at FROM latest_data WHERE id=1
-                    """
+                        SELECT updated_at FROM latest_data
+                        ORDER BY updated_at DESC LIMIT 1
+                        """
                     )
                     row = await cursor.fetchone()
-                    last_update = None
                     if row and row[0]:
-                        last_update = datetime.fromisoformat(row[0])
+                        last_update = datetime.fromisoformat(str(row[0]))
                         last_update_age = (datetime.now() - last_update).total_seconds()
-                    else:
-                        last_update_age = None
-                except:
+                except Exception:
                     last_update_age = None
 
             # Размер БД

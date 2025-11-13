@@ -20,10 +20,15 @@ import time
 from pathlib import Path
 from typing import Any, List, Optional
 
+# Provide safe defaults to avoid config validation failures when Telegram is disabled
+if os.getenv("TELEGRAM_BOT_TOKEN") is None:
+    os.environ.setdefault("TELEGRAM_BOT_TOKEN", "dummy-edge-startup")
+    os.environ.setdefault("TELEGRAM_ENV_OVERRIDE", "true")
+
 # Добавляем текущую директорию в путь для импортов
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.config_manager import get_config
+from core.config_manager import get_config, reload_config
 from core.edge_authentication import EDGEAuthConfig, EDGEAuthenticatedClient
 from core.device_registry import DeviceRegistry
 from core.log_filter import get_secure_logger
@@ -76,8 +81,16 @@ except ImportError as e:
         pass
     def request_rs485_read_all(callback):
         raise RuntimeError("TimeWindowManager недоступен")
-    def update_data(**kwargs):
+    def update_data(*args, **kwargs):
         raise RuntimeError("modbus_storage недоступен")
+
+SCAN_CLI_AVAILABLE = False
+scan_cli = None
+try:
+    from tools import scan_slave_ids as scan_cli
+    SCAN_CLI_AVAILABLE = True
+except ImportError:
+    scan_cli = None
 
 logger = get_secure_logger(__name__)
 
@@ -97,13 +110,54 @@ class EDGEService:
     
     def __init__(self, config, offline_mode: bool = False):
         self.config = config
-        self.device_registry = DeviceRegistry()
         self.auth_client = None
         self.running_tasks = []
         self.offline_mode = offline_mode
         self.offline_reason: Optional[str] = None
         self.writer = None
         self.reader_thread = None
+        self._maybe_run_discovery()
+        reload_config()
+        self.config = get_config()
+        self.device_registry = DeviceRegistry()
+
+    def _maybe_run_discovery(self) -> None:
+        if not SCAN_CLI_AVAILABLE:
+            return
+
+        auto_env = os.getenv("EDGE_SCAN_ON_START")
+
+        if auto_env is not None and auto_env.lower() not in {"1", "true", "yes", "on"}:
+            return
+
+        interactive = auto_env is None
+        if interactive:
+            if not sys.stdin.isatty():
+                return
+            try:
+                answer = input("Запустить сканирование устройств перед стартом? [Y/n]: ").strip().lower()
+            except EOFError:
+                return
+            if answer and answer not in {"y", "yes", "д", "да"}:
+                return
+            os.environ.setdefault("EDGE_SCAN_SKIP_CONFIRM", "true")
+            os.environ.setdefault("EDGE_SCAN_AUTO_UPDATE", "true")
+        else:
+            os.environ.setdefault("EDGE_SCAN_SKIP_CONFIRM", "true")
+            os.environ.setdefault("EDGE_SCAN_SKIP_COUNT_PROMPT", "true")
+            os.environ.setdefault("EDGE_SCAN_AUTO_UPDATE", "true")
+
+        try:
+            parser = scan_cli.build_parser()
+            argv = []
+            range_env = os.getenv("EDGE_SCAN_RANGE")
+            if range_env:
+                argv.extend(range_env.split())
+
+            logger.info("🔎 Сканирование Modbus устройств перед запуском сервисов...")
+            scan_cli.main(argv)
+        except Exception as exc:
+            logger.warning(f"⚠️ Не удалось выполнить сканирование устройств: {exc}")
         
     async def setup_authentication(self):
         """Настройка аутентификации с SERVER"""
@@ -312,11 +366,20 @@ class EDGEService:
         max_retries = int(os.getenv("EDGE_POLL_MAX_RETRIES", "3"))
 
         def reader_worker():
-            consecutive_errors = 0
             logger.info("📖 Modbus reader запущен (интервал %.1fс)", poll_interval)
-            
+
             while not shutdown_requested.is_set():
-                try:
+                devices = self.device_registry.get_all_devices(enabled_only=True)
+                if not devices:
+                    logger.warning("⚠️ Нет активных устройств в реестре, Modbus reader остановлен")
+                    return
+
+                error_counters: dict[int, int] = {}
+
+                for device in devices:
+                    if shutdown_requested.is_set():
+                        break
+
                     data_holder: dict[str, Any] = {}
                     error_holder: dict[str, Any] = {}
                     done = threading.Event()
@@ -329,47 +392,81 @@ class EDGEService:
                         done.set()
 
                     try:
-                        logger.debug("📞 Вызываем request_rs485_read_all")
-                        request_rs485_read_all(_callback)
-                        logger.debug("📞 request_rs485_read_all завершен")
+                        logger.debug("📞 Вызываем request_rs485_read_all для slave_id=%s", device.slave_id)
+                        request_rs485_read_all(_callback, slave_id=device.slave_id)
+                        logger.debug("📞 request_rs485_read_all завершен для slave_id=%s", device.slave_id)
                     except Exception as exc:
                         logger.error(f"❌ Ошибка request_rs485_read_all: {exc}")
                         error_holder["err"] = str(exc)
                         done.set()
 
                     done.wait(timeout)
-                    
-                    logger.debug(f"📊 Результат ожидания: data_holder={data_holder}, error_holder={error_holder}")
+
+                    logger.debug(
+                        "📊 Результат ожидания (device_id=%s): data_holder=%s, error_holder=%s",
+                        device.device_id,
+                        data_holder,
+                        error_holder,
+                    )
 
                     data = data_holder.get("data")
 
-                    if data and data.get("connection_status") == "connected":
-                        try:
-                            update_data(**data)
-                            logger.debug("💾 Данные сохранены в базу")
-                        except Exception as db_err:
-                            logger.error(f"❌ Ошибка сохранения данных: {db_err}")
-                        consecutive_errors = 0
-                    else:
-                        consecutive_errors += 1
-                        logger.warning("⚠️ Не удалось получить данные от КУБ-1063 (%s/%s)", consecutive_errors, max_retries)
+                    try:
+                        if data and data.get("connection_status") in {"connected", "partial"}:
+                            payload = {
+                                key: value
+                                for key, value in data.items()
+                                if key not in {"connection_status", "error", "last_error"}
+                            }
+                            update_data(
+                                device_id=device.device_id,
+                                slave_id=device.slave_id,
+                                device_type=device.device_type.value,
+                                connection_status=data.get("connection_status"),
+                                last_error=data.get("error"),
+                                **payload,
+                            )
+                            logger.debug("💾 Данные сохранены в базу для устройства %s", device.device_id)
+                            error_counters[device.device_id] = 0
+                        else:
+                            error_counters[device.device_id] = error_counters.get(device.device_id, 0) + 1
+                            logger.warning(
+                                "⚠️ Не удалось получить данные от устройства %s (%s/%s)",
+                                device.device_id,
+                                error_counters[device.device_id],
+                                max_retries,
+                            )
 
-                        if consecutive_errors >= max_retries:
-                            backoff = min(poll_interval * 2, 60)
-                            logger.error("❌ Превышено число ошибок чтения, пауза %.1fс", backoff)
-                            if shutdown_requested.wait(backoff):
-                                break
-                            consecutive_errors = 0
-                            continue
+                            update_data(
+                                device_id=device.device_id,
+                                slave_id=device.slave_id,
+                                device_type=device.device_type.value,
+                                connection_status=(data or {}).get("connection_status", "error"),
+                                last_error=(data or {}).get("error") or error_holder.get("err", "timeout"),
+                            )
 
-                    if shutdown_requested.wait(poll_interval):
+                            if error_counters[device.device_id] >= max_retries:
+                                backoff = min(poll_interval * 2, 60)
+                                logger.error(
+                                    "❌ Превышено число ошибок для устройства %s, пауза %.1fс",
+                                    device.device_id,
+                                    backoff,
+                                )
+                                if shutdown_requested.wait(backoff):
+                                    break
+                                error_counters[device.device_id] = 0
+                    except Exception as exc:
+                        logger.error(
+                            "❌ Ошибка обработки данных устройства %s: %s",
+                            device.device_id,
+                            exc,
+                        )
+
+                    if shutdown_requested.wait(poll_interval / max(len(devices), 1)):
                         break
 
-                except Exception as exc:
-                    consecutive_errors += 1
-                    logger.error(f"❌ Критическая ошибка Modbus reader: {exc}")
-                    if shutdown_requested.wait(5):
-                        break
+                if shutdown_requested.is_set():
+                    break
 
             logger.info("📖 Modbus reader остановлен")
 

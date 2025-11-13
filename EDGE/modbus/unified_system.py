@@ -57,6 +57,8 @@ class UnifiedKUBSystem:
         # Компоненты системы (убрали дублированный Reader)
         self.writer = None
         self.time_window_manager = None
+        self.device_id = self.config.get("rs485", {}).get("device_id", 1)
+        self.slave_id = self.config.get("rs485", {}).get("slave_id", 1)
 
         # Состояние системы
         self.is_running = False
@@ -262,7 +264,18 @@ class UnifiedKUBSystem:
 
                         # Сохранение в базу данных
                         try:
-                            update_data(**data)
+                            payload = {
+                                key: value
+                                for key, value in data.items()
+                                if key not in {"connection_status", "error", "last_error"}
+                            }
+                            update_data(
+                                device_id=self.device_id,
+                                slave_id=self.slave_id,
+                                connection_status=data.get("connection_status"),
+                                last_error=data.get("error"),
+                                **payload,
+                            )
                             logger.debug("💾 Данные сохранены в базу")
                         except Exception as e:
                             logger.error(f"❌ Ошибка сохранения данных: {e}")
@@ -279,10 +292,22 @@ class UnifiedKUBSystem:
                         logger.warning(
                             f"⚠️ Нет соединения с КУБ-1063 (ошибка {consecutive_errors}/{max_retries})"
                         )
+                        update_data(
+                            device_id=self.device_id,
+                            slave_id=self.slave_id,
+                            connection_status=data.get("connection_status", "error"),
+                            last_error=data.get("error"),
+                        )
                 else:
                     consecutive_errors += 1
                     logger.warning(
                         f"⚠️ Таймаут чтения данных (ошибка {consecutive_errors}/{max_retries})"
+                    )
+                    update_data(
+                        device_id=self.device_id,
+                        slave_id=self.slave_id,
+                        connection_status="error",
+                        last_error=error_result[0] or "timeout",
                     )
 
                 # Если слишком много ошибок подряд, увеличиваем интервал

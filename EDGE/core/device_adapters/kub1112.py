@@ -4,7 +4,7 @@
 Использует Variable System для гибкого маппинга переменных
 """
 
-from typing import Dict, List, Any, Union
+from typing import Dict, List, Any, Union, Optional
 from .base import DeviceAdapter, RegisterInfo, DeviceData, ValueType
 from .variable_system import (
     KUBVariableMapper, DeviceVariableManager, VariableTypeDefinition, 
@@ -20,6 +20,7 @@ class KUB1112Adapter(DeviceAdapter):
         self._mapper = KUBVariableMapper()
         self._setup_variable_definitions()
         self._setup_variable_references()
+        self._device_managers: Dict[int, DeviceVariableManager] = {}
     
     @property
     def device_type(self) -> str:
@@ -193,10 +194,65 @@ class KUB1112Adapter(DeviceAdapter):
     
     def create_device_manager(self, device_id: int) -> DeviceVariableManager:
         """Создание менеджера переменных для устройства КУБ-1112"""
-        return DeviceVariableManager(device_id, self.device_type, self._mapper)
-    
-    def format_for_display(self, device_manager: DeviceVariableManager) -> str:
+        manager = DeviceVariableManager(device_id, self.device_type, self._mapper)
+        self._device_managers[device_id] = manager
+        return manager
+
+    def _get_or_create_manager(self, device_id: int) -> DeviceVariableManager:
+        return self._device_managers.get(device_id) or self.create_device_manager(device_id)
+
+    def _device_data_to_register_map(self, data: DeviceData) -> Dict[int, int]:
+        register_map: Dict[int, int] = {}
+        for name, raw_value in data.raw_registers.items():
+            var_ref = self._mapper.get_variable_by_name(name)
+            if var_ref:
+                register_map[var_ref.register_address] = raw_value
+        return register_map
+
+    def _ensure_device_manager(
+        self, source: Union[DeviceVariableManager, DeviceData, None]
+    ) -> Optional[DeviceVariableManager]:
+        if isinstance(source, DeviceVariableManager):
+            return source
+        if isinstance(source, DeviceData):
+            manager = self._device_managers.get(source.device_id)
+            if manager is None:
+                manager = self.create_device_manager(source.device_id)
+            register_payload = self._device_data_to_register_map(source)
+            if register_payload:
+                manager.update_from_registers(register_payload)
+            return manager
+        return None
+
+    def get_register_addresses(self) -> List[int]:
+        """Список регистров формируем из Variable System."""
+        return sorted(self._mapper.get_all_register_addresses())
+
+    def parse_device_data(self, device_id: int, raw_registers: Dict[int, int]) -> DeviceData:
+        """Парсинг данных через Variable System менеджер."""
+        device_manager = self._get_or_create_manager(device_id)
+        device_manager.update_from_registers(raw_registers)
+
+        registers = device_manager.get_all_values()
+        statuses = device_manager.get_all_statuses()
+        raw_named: Dict[str, int] = {}
+        for name, ref in self._mapper.variable_references.items():
+            if ref.register_address in raw_registers:
+                raw_named[name] = raw_registers[ref.register_address]
+
+        return DeviceData(
+            device_id=device_id,
+            device_type=self.device_type,
+            registers=registers,
+            raw_registers=raw_named,
+            status=statuses,
+        )
+
+    def format_for_display(self, data: Union[DeviceVariableManager, DeviceData]) -> str:
         """Форматирование данных КУБ-1112 для отображения в Telegram"""
+        device_manager = self._ensure_device_manager(data)
+        if device_manager is None:
+            return "Нет данных для отображения"
         lines = []
         device_id = device_manager.device_id
         
@@ -319,8 +375,13 @@ class KUB1112Adapter(DeviceAdapter):
         
         return "\n".join(lines)
     
-    def get_critical_alarms(self, device_manager: DeviceVariableManager) -> List[str]:
+    def get_critical_alarms(
+        self, data: Union[DeviceVariableManager, DeviceData]
+    ) -> List[str]:
         """Критичные аварии КУБ-1112"""
+        device_manager = self._ensure_device_manager(data)
+        if device_manager is None:
+            return []
         alarms = []
         
         # Проверяем аварийные регистры
@@ -348,8 +409,13 @@ class KUB1112Adapter(DeviceAdapter):
         
         return alarms
     
-    def get_warnings(self, device_manager: DeviceVariableManager) -> List[str]:
+    def get_warnings(
+        self, data: Union[DeviceVariableManager, DeviceData]
+    ) -> List[str]:
         """Предупреждения КУБ-1112"""
+        device_manager = self._ensure_device_manager(data)
+        if device_manager is None:
+            return []
         warnings = []
         
         # Проверяем неготовые измерения

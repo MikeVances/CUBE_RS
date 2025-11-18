@@ -165,7 +165,12 @@ class SecurityManager:
         if password:
             return password
 
-        # 2. Файл с паролем (НЕ для продакшена!)
+        # 2. Файл с мастер-паролем (создается через security_cli)
+        master_password_file = self.secrets_dir / "master_password.txt"
+        if master_password_file.exists():
+            return master_password_file.read_text().strip()
+
+        # 3. Файл с паролем для разработки
         password_file = self.secrets_dir / "dev_password.txt"
         if password_file.exists():
             self.security_logger.warning(
@@ -173,7 +178,7 @@ class SecurityManager:
             )
             return password_file.read_text().strip()
 
-        # 3. Для разработки создаем простой пароль
+        # 4. Для разработки создаем простой пароль
         dev_password = "CUBE_RS_DEV_2023_SECURE"
 
         # Сохраняем для последующих запусков (только разработка!)

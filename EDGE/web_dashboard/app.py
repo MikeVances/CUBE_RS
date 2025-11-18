@@ -12,10 +12,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import time
 from datetime import datetime
+from textwrap import dedent
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+from web_dashboard.services.room_data import (
+    RoomSnapshot,
+    build_room_snapshots,
+    update_room_name,
+)
 
 # Импорт функции чтения данных через Device Registry
 try:
@@ -130,6 +138,21 @@ st.set_page_config(
     page_title="CUBE_RS EDGE Dashboard", layout="wide", initial_sidebar_state="collapsed"
 )
 
+# Каталог показателей для карточек помещений
+METRIC_CATALOG = {
+    "temp_inside": {"label": "Температура", "unit": "°C"},
+    "temp_target": {"label": "Целевая температура", "unit": "°C"},
+    "humidity": {"label": "Влажность", "unit": "%"},
+    "co2": {"label": "CO₂", "unit": "ppm"},
+    "pressure": {"label": "Давление", "unit": "Pa"},
+    "ventilation_level": {"label": "Уровень вентиляции", "unit": "%"},
+    "ventilation_target": {"label": "Цель вентиляции", "unit": "%"},
+    "active_alarms": {"label": "Активные тревоги", "unit": ""},
+    "active_warnings": {"label": "Предупреждения", "unit": ""},
+}
+
+DEFAULT_METRICS = ["temp_inside", "humidity", "co2", "pressure"]
+
 # Стили в стиле Grafana
 st.markdown(
     """
@@ -163,6 +186,45 @@ st.markdown(
         background-color: #21262d;
         border-radius: 6px;
         margin: 8px 0;
+    }
+
+    .room-card {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 16px;
+    }
+
+    .room-card__header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+    }
+
+    .room-card__metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 12px;
+    }
+
+    .room-card__metric {
+        background-color: #1f242d;
+        border-left: 4px solid #30363d;
+        border-radius: 6px;
+        padding: 10px;
+    }
+
+    .room-card__metric h5 {
+        margin: 0;
+        color: #8b949e;
+        font-size: 0.9rem;
+    }
+
+    .room-card__metric p {
+        margin: 6px 0 4px;
+        font-size: 1.3rem;
     }
 
     /* Боковая панель */
@@ -254,11 +316,148 @@ def get_status_color(value, min_val, max_val):
         return "#dc3545"  # Красный
 
 
+def get_metric_meta(key: str) -> Dict[str, str]:
+    meta = METRIC_CATALOG.get(key, {})
+    return {
+        "label": meta.get("label", key.replace("_", " ")),
+        "unit": meta.get("unit", ""),
+    }
+
+
+def format_metric_value(key: str, value: Any) -> str:
+    if value is None:
+        return "—"
+    meta = get_metric_meta(key)
+    unit = meta.get("unit", "")
+    if isinstance(value, float):
+        return f"{value:.1f}{unit}" if unit else f"{value:.1f}"
+    return f"{value}{unit}" if unit else str(value)
+
+
+
+def _get_room_widget_id(room: RoomSnapshot) -> str:
+    mapping = st.session_state.setdefault("room_widget_keys", {})
+    device_ids: Tuple[str, ...] = tuple(sorted(str(device.device_id) for device in room.devices))
+    room_key = (room.room, device_ids)
+    if room_key not in mapping:
+        mapping[room_key] = f"room_{len(mapping)}"
+    return mapping[room_key]
+
+
+def render_room_card(
+    room: RoomSnapshot,
+    metric_keys: List[str],
+    *,
+    show_only_alarms: bool = False,
+    widget_suffix: Optional[str] = None,
+):
+    alarms = room.alarms.get("active_alarms", 0)
+    if show_only_alarms and alarms == 0:
+        return
+    status_color = "#238636" if alarms == 0 else "#dc3545"
+    badge = "Норма" if alarms == 0 else f"Тревоги: {alarms}"
+
+    metrics_html = []
+    for key in metric_keys:
+        record = room.metrics.get(key)
+        value = format_metric_value(key, record.value if record else None)
+        metrics_html.append(
+            dedent(
+                f"""
+                <div class="room-card__metric">
+                    <h5>{get_metric_meta(key)['label']}</h5>
+                    <p style="color:#e6edf3;">{value}</p>
+                    <small style="color:#8b949e;">{record.device_type if record else ''}</small>
+                </div>
+                """
+            ).strip()
+        )
+
+    card_html = dedent(
+        f"""
+        <div class="room-card">
+            <div class="room-card__header">
+                <div>
+                    <h4 style="margin:0;">{room.room}</h4>
+                    <small style="color:#8b949e;">{room.location}</small><br/>
+                    <small style="color:#8b949e;">Обновлено: {room.timestamp.strftime('%d.%m %H:%M:%S') if room.timestamp else '—'}</small>
+                </div>
+                <div style="border:1px solid {status_color}; padding:6px 12px; border-radius:6px; color:{status_color};">
+                    {badge}
+                </div>
+            </div>
+            <div class="room-card__metrics">
+                {''.join(metrics_html) if metrics_html else '<em>Нет выбранных показателей</em>'}
+            </div>
+        </div>
+        """
+    )
+
+    st.markdown(card_html, unsafe_allow_html=True)
+
+    suffix = widget_suffix or _get_room_widget_id(room)
+    with st.expander("⚙️ Управление помещением", expanded=False):
+        form_key = f"rename_form_{suffix}"
+        with st.form(form_key, clear_on_submit=False):
+            new_name = st.text_input(
+                "Новое название",
+                value=room.room,
+                key=f"rename_{suffix}",
+            )
+            submitted = st.form_submit_button("Сохранить")
+            if submitted:
+                try:
+                    changed = update_room_name(device_registry, room.room, new_name)
+                    if changed:
+                        st.success("Название обновлено")
+                        st.experimental_rerun()
+                    else:
+                        st.info("Изменений нет")
+                except Exception as exc:
+                    st.error(f"Не удалось обновить название: {exc}")
+
+
+def render_rooms_grid(
+    rooms: List[RoomSnapshot], metric_keys: List[str], *, show_only_alarms: bool = False
+):
+    if show_only_alarms:
+        rooms = [room for room in rooms if room.alarms.get("active_alarms", 0)]
+
+    if not rooms:
+        st.info("Нет помещений, удовлетворяющих фильтрам")
+        return
+
+    chunk = 3
+    for start in range(0, len(rooms), chunk):
+        cols = st.columns(min(chunk, len(rooms) - start))
+        for col, room in zip(cols, rooms[start : start + chunk]):
+            with col:
+                render_room_card(
+                    room,
+                    metric_keys,
+                    show_only_alarms=show_only_alarms,
+                )
 def main():
     st.title("📊 CUBE_RS EDGE Dashboard")
 
     # Создаем placeholder для автообновления
     placeholder = st.empty()
+
+    rooms_snapshot_for_sidebar: List[RoomSnapshot] = []
+    available_metric_keys: List[str] = DEFAULT_METRICS.copy()
+    if DEVICE_AVAILABLE:
+        try:
+            rooms_snapshot_for_sidebar = build_room_snapshots(device_registry)
+            extra_keys = {
+                key
+                for room in rooms_snapshot_for_sidebar
+                for key in room.metrics.keys()
+            }
+            available_metric_keys = sorted(set(available_metric_keys) | extra_keys)
+        except Exception as exc:
+            st.warning(f"Не удалось подготовить данные по помещениям: {exc}")
+    else:
+        available_metric_keys = DEFAULT_METRICS.copy()
 
     # Боковая панель с настройками
     with st.sidebar:
@@ -285,6 +484,24 @@ def main():
 
         st.info("💾 Исторические данные загружаются из базы данных")
 
+        st.header("🏢 Помещения")
+        show_only_alarms = st.checkbox("Показывать только помещения с тревогами", value=False)
+        selected_metrics = st.multiselect(
+            "Показатели для карточек",
+            available_metric_keys,
+            default=[k for k in DEFAULT_METRICS if k in available_metric_keys]
+            or available_metric_keys,
+        )
+        if not selected_metrics:
+            selected_metrics = available_metric_keys[:4]
+
+        room_names = [room.room for room in rooms_snapshot_for_sidebar]
+        selected_rooms = st.multiselect(
+            "Отображаемые помещения",
+            room_names,
+            default=room_names,
+        )
+
     # Основной цикл обновления
     while True:
         with placeholder.container():
@@ -309,6 +526,27 @@ def main():
             except Exception as e:
                 st.error(f"❌ Ошибка чтения данных: {e}")
                 data = {}
+
+            try:
+                rooms_snapshot = (
+                    build_room_snapshots(device_registry)
+                    if DEVICE_AVAILABLE
+                    else []
+                )
+            except Exception as exc:
+                rooms_snapshot = []
+                st.warning(f"Не удалось собрать данные по помещениям: {exc}")
+
+            st.subheader("🏢 Состояние помещений")
+            filtered_rooms = [room for room in rooms_snapshot if room.room in selected_rooms]
+            if filtered_rooms:
+                render_rooms_grid(
+                    filtered_rooms,
+                    selected_metrics,
+                    show_only_alarms=show_only_alarms,
+                )
+            else:
+                st.info("Нет данных по выбранным помещениям")
 
             # Основные метрики
             st.subheader("🎯 Основные параметры")

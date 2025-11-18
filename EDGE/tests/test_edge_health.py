@@ -94,20 +94,13 @@ class TestModbusComponents:
         """Тест импорта modbus gateway"""
         try:
             from modbus.gateway import ModbusGateway
-            from modbus.gateway_typed import TypedModbusGateway
-            
             assert ModbusGateway is not None
-            assert TypedModbusGateway is not None
         except ImportError as e:
             pytest.skip(f"Modbus gateway не доступен: {e}")
 
     def test_unified_system_import(self):
         """Тест импорта unified system"""
-        try:
-            from modbus.unified_system import UnifiedKUBSystem
-            assert UnifiedKUBSystem is not None
-        except ImportError as e:
-            pytest.skip(f"Unified system не доступен: {e}")
+        pytest.skip("Unified system переведён в архив (OLDEDGE)")
 
     def test_modbus_storage_schema(self, temp_edge_db, monkeypatch):
         """Тест схемы базы данных modbus"""

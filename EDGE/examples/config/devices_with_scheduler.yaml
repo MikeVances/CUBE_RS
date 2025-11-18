@@ -1,0 +1,82 @@
+# Пример конфигурации устройств с настройками планировщика
+# Поддерживаемые параметры:
+#   poll_interval: Интервал опроса в секундах (float)
+#   priority: Приоритет устройства (CRITICAL, HIGH, NORMAL, LOW)
+
+devices:
+  # Критическое устройство - опрашиваем каждые 0.5 секунды
+  - device_id: 1
+    device_type: KUB-1063
+    slave_id: 1
+    name: "КУБ-1063 Основной"
+    description: "Система вентиляции и климат-контроля"
+    enabled: true
+    location: "Корпус №1"
+    poll_interval: 0.5  # Каждые 0.5 секунды
+    priority: CRITICAL  # Критический приоритет
+
+  # Важное устройство - опрашиваем каждую секунду
+  - device_id: 2
+    device_type: KUB-1112
+    slave_id: 2
+    name: "КУБ-1112 Обогрев"
+    description: "Система обогрева"
+    enabled: true
+    location: "Корпус №1"
+    poll_interval: 1.0  # Каждую секунду
+    priority: HIGH      # Высокий приоритет
+
+  # VFD инверторы - нормальный приоритет
+  - device_id: 3
+    device_type: VFD-INVERTER
+    slave_id: 3
+    name: "VFD Вентилятор №1"
+    description: "Частотный преобразователь вентилятора"
+    enabled: true
+    location: "Производственная зона A"
+    poll_interval: 2.0  # Каждые 2 секунды
+    priority: NORMAL    # Нормальный приоритет
+
+  - device_id: 4
+    device_type: VFD-INVERTER
+    slave_id: 4
+    name: "VFD Насос"
+    description: "Частотный преобразователь насоса"
+    enabled: true
+    location: "Производственная зона B"
+    poll_interval: 3.0  # Каждые 3 секунды
+    priority: LOW       # Низкий приоритет
+
+  # Устройство без настроек планировщика - будут использованы DEFAULT значения
+  - device_id: 5
+    device_type: VFD-INVERTER
+    slave_id: 5
+    name: "VFD Резервный"
+    description: "Резервный частотный преобразователь"
+    enabled: true
+    location: "Складское помещение"
+    # poll_interval не указан - будет использован DEFAULT (2.0 для VFD)
+    # priority не указан - будет использован DEFAULT (NORMAL для VFD)
+
+# Приоритеты конфигурации:
+# 1. YAML (poll_interval и priority) - наивысший приоритет
+# 2. custom_intervals и custom_priorities в коде DeviceScheduler
+# 3. DEFAULT_INTERVALS и DEFAULT_PRIORITIES - используются если не указано
+
+# Примеры DEFAULT значений:
+#   КУБ-1063: poll_interval=1.0s, priority=HIGH
+#   КУБ-1112: poll_interval=1.0s, priority=HIGH
+#   VFD-INVERTER: poll_interval=2.0s, priority=NORMAL
+#   UNKNOWN: poll_interval=5.0s, priority=LOW
+
+# Доступные приоритеты (от высшего к низшему):
+#   CRITICAL - Критические устройства (опрашиваются в первую очередь)
+#   HIGH - Важные устройства
+#   NORMAL - Обычные устройства
+#   LOW - Низкоприоритетные устройства
+
+# Рекомендации по настройке:
+# - CRITICAL: Используйте для устройств безопасности и критической инфраструктуры
+# - HIGH: Основные производственные устройства (КУБы)
+# - NORMAL: Периферийные устройства (VFD, датчики)
+# - LOW: Вспомогательные и резервные устройства

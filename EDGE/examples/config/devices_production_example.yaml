@@ -1,0 +1,279 @@
+# Пример производственной конфигурации: 6 КУБов + 18 VFD
+# Оптимизировано для максимальной производительности
+
+devices:
+  # ========================================================================
+  # КУБы - Контроллеры климата (ВЫСОКИЙ ПРИОРИТЕТ)
+  # Опрос каждую секунду - критичные параметры
+  # ========================================================================
+
+  - device_id: 1
+    device_type: "KUB-1063"
+    slave_id: 1
+    name: "КУБ Корпус 1"
+    description: "Основная вентиляция и климат"
+    location: "Корпус №1"
+    enabled: true
+    # Эти параметры будут использоваться DeviceScheduler
+    poll_interval: 1.0      # Опрос каждую секунду
+    priority: "HIGH"        # Высокий приоритет
+
+  - device_id: 2
+    device_type: "KUB-1063"
+    slave_id: 2
+    name: "КУБ Корпус 2"
+    description: "Система вентиляции"
+    location: "Корпус №2"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  - device_id: 3
+    device_type: "KUB-1063"
+    slave_id: 3
+    name: "КУБ Корпус 3"
+    description: "Климат-контроль"
+    location: "Корпус №3"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  - device_id: 4
+    device_type: "KUB-1063"
+    slave_id: 4
+    name: "КУБ Корпус 4"
+    description: "Система вентиляции"
+    location: "Корпус №4"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  - device_id: 5
+    device_type: "KUB-1063"
+    slave_id: 5
+    name: "КУБ Корпус 5"
+    description: "Климат-контроль"
+    location: "Корпус №5"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  - device_id: 6
+    device_type: "KUB-1063"
+    slave_id: 6
+    name: "КУБ Корпус 6"
+    description: "Система вентиляции"
+    location: "Корпус №6"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  # ========================================================================
+  # VFD Критичные - Основные производственные линии (ВЫСОКИЙ ПРИОРИТЕТ)
+  # Опрос каждую секунду - нельзя пропустить остановку/аварию
+  # ========================================================================
+
+  - device_id: 7
+    device_type: "VFD-INVERTER"
+    slave_id: 7
+    name: "VFD Линия 1 - Главная"
+    description: "Основной привод производственной линии 1"
+    location: "Производство, Линия 1"
+    enabled: true
+    poll_interval: 1.0      # Критичный - каждую секунду
+    priority: "HIGH"
+
+  - device_id: 8
+    device_type: "VFD-INVERTER"
+    slave_id: 8
+    name: "VFD Линия 2 - Главная"
+    description: "Основной привод производственной линии 2"
+    location: "Производство, Линия 2"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  - device_id: 9
+    device_type: "VFD-INVERTER"
+    slave_id: 9
+    name: "VFD Конвейер Главный"
+    description: "Привод главного конвейера"
+    location: "Производство, Главный конвейер"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  - device_id: 10
+    device_type: "VFD-INVERTER"
+    slave_id: 10
+    name: "VFD Насос Охлаждения"
+    description: "Насос системы охлаждения"
+    location: "Техническое помещение"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  - device_id: 11
+    device_type: "VFD-INVERTER"
+    slave_id: 11
+    name: "VFD Вентилятор Главный"
+    description: "Главный вытяжной вентилятор"
+    location: "Вентиляция"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  - device_id: 12
+    device_type: "VFD-INVERTER"
+    slave_id: 12
+    name: "VFD Компрессор"
+    description: "Компрессор сжатого воздуха"
+    location: "Компрессорная"
+    enabled: true
+    poll_interval: 1.0
+    priority: "HIGH"
+
+  # ========================================================================
+  # VFD Обычные - Вспомогательное оборудование (НОРМАЛЬНЫЙ ПРИОРИТЕТ)
+  # Опрос раз в 5 секунд - некритичные параметры
+  # ========================================================================
+
+  - device_id: 13
+    device_type: "VFD-INVERTER"
+    slave_id: 13
+    name: "VFD Конвейер 2"
+    description: "Вспомогательный конвейер"
+    location: "Производство, Зона 2"
+    enabled: true
+    poll_interval: 5.0      # Некритичный - раз в 5 секунд
+    priority: "NORMAL"
+
+  - device_id: 14
+    device_type: "VFD-INVERTER"
+    slave_id: 14
+    name: "VFD Конвейер 3"
+    description: "Вспомогательный конвейер"
+    location: "Производство, Зона 3"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 15
+    device_type: "VFD-INVERTER"
+    slave_id: 15
+    name: "VFD Насос Подачи"
+    description: "Насос подачи воды"
+    location: "Техническое помещение"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 16
+    device_type: "VFD-INVERTER"
+    slave_id: 16
+    name: "VFD Насос Рециркуляции"
+    description: "Насос рециркуляции"
+    location: "Техническое помещение"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 17
+    device_type: "VFD-INVERTER"
+    slave_id: 17
+    name: "VFD Вентилятор 2"
+    description: "Вспомогательный вентилятор"
+    location: "Вентиляция, Зона 2"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 18
+    device_type: "VFD-INVERTER"
+    slave_id: 18
+    name: "VFD Вентилятор 3"
+    description: "Вспомогательный вентилятор"
+    location: "Вентиляция, Зона 3"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 19
+    device_type: "VFD-INVERTER"
+    slave_id: 19
+    name: "VFD Миксер 1"
+    description: "Привод миксера"
+    location: "Производство, Участок смешивания"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 20
+    device_type: "VFD-INVERTER"
+    slave_id: 20
+    name: "VFD Миксер 2"
+    description: "Привод миксера"
+    location: "Производство, Участок смешивания"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 21
+    device_type: "VFD-INVERTER"
+    slave_id: 21
+    name: "VFD Дозатор"
+    description: "Привод дозатора"
+    location: "Производство, Участок дозирования"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 22
+    device_type: "VFD-INVERTER"
+    slave_id: 22
+    name: "VFD Упаковка"
+    description: "Привод упаковочной машины"
+    location: "Производство, Участок упаковки"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 23
+    device_type: "VFD-INVERTER"
+    slave_id: 23
+    name: "VFD Транспортер"
+    description: "Транспортер готовой продукции"
+    location: "Производство, Склад"
+    enabled: true
+    poll_interval: 5.0
+    priority: "NORMAL"
+
+  - device_id: 24
+    device_type: "VFD-INVERTER"
+    slave_id: 24
+    name: "VFD Резервный"
+    description: "Резервный привод"
+    location: "Резерв"
+    enabled: false          # Отключен по умолчанию
+    poll_interval: 10.0
+    priority: "LOW"
+
+# ========================================================================
+# Ожидаемая производительность:
+# ========================================================================
+#
+# Критичные устройства (12 шт: 6 КУБ + 6 VFD):
+#   - Опрос каждую секунду
+#   - Время цикла: ~5.4 секунды
+#   - Данные обновляются каждую секунду (за счет волн)
+#
+# Некритичные устройства (12 VFD):
+#   - Опрос раз в 5 секунд
+#   - Не блокируют критичные устройства
+#
+# Волновой опрос (если 5.4s > 1s):
+#   Волна 1 (0.0-2.7s): КУБ 1-3 + VFD 7-9
+#   Волна 2 (2.7-5.4s): КУБ 4-6 + VFD 10-12
+#   Итого: каждая волна ~2.7s, критичные данные каждую секунду
+#
+# ========================================================================

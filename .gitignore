@@ -1,48 +1,64 @@
-# Python
+# === Python cache & build ===
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.pyd
 *.pyc
+*.egg-info/
+*$py.class
+build/
+dist/
+*.egg
 
-# Logs
-*.log
+# === Virtual envs ===
+.venv/
+venv/
+env/
 
-# Database
-*.db-shm
-*.db-wal
-
-# IDE
+# === IDE ===
 .vscode/
 .idea/
+*.code-workspace
 *.swp
 
-# OS
+# === OS junk ===
 .DS_Store
 Thumbs.db
 
-# Backup
-backup_*/
+# === Logs ===
+logs/
+tools/config/logs/
+*.log
+*.log.*
 
-# 🔒 СЕКРЕТЫ И ТОКЕНЫ (КРИТИЧНО!)
-config/bot_secrets.json
-config/*_secrets.json
-*.token
-*.key
-.env*
-
-# 📊 БАЗЫ ДАННЫХ  
+# === Databases & runtime data ===
 *.db
 *.sqlite*
+*.db-shm
+*.db-wal
+data/*.db
+SERVER/**/data/*.db
 
-# 📝 ЛОГИ
-*.log
+# Backup folders
+backup_*/
 
-# 🐍 PYTHON
-__pycache__/
-*.pyc
-venv/
+# === Exports / temporary files ===
+exports/
+*.tmp
 
-# ✅ НЕ исключаем:
-# telegram_bot/bot_config.json  - конфиг бота
-# config/config.json            - настройки системы
+# === Secrets & configs ===
+config/bot_secrets.json
+config/*_secrets.json
+config/secrets/*
+!config/secrets/.gitkeep
+*.token
+*.key
+*.pem
+.env*
+config.json
+tools/config/secrets/
+tools/config/secrets/*
 
+# ✅ Allow example configs
+!config.example.json
+# telegram_bot/bot_config.json  - keep tracked

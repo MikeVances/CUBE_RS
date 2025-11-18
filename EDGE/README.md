@@ -30,6 +30,12 @@ EDGE - это автономный промышленный шлюз, котор
 
 ## 🚀 Быстрый запуск
 
+### First Start Wizard
+```bash
+python EDGE/tools/first_start.py
+```
+Мастер первого запуска поможет задать мастер-пароль, удалить `dev_password.txt`, сохранить TELEGRAM_BOT_TOKEN и (при желании) выполнить автоскан устройств.
+
 ### Полный стек (все сервисы):
 ```bash
 python start.py
@@ -55,6 +61,21 @@ python start_dashboard.py
 # TypedModbusGateway (требует портирования)
 python start_typed_gateway.py
 ```
+
+### Работа с RTU BUS симулятором (для тестов)
+```bash
+# Терминал 1: запускаем симулятор шины
+cd EDGE
+python tools/simulators/rtu_bus_sim.py --kub 1-6 --vfd 7-44
+
+# Терминал 2: автоскан EDGE через указанный порт
+cd EDGE
+python start_edge.py --autoscan --rs485-port /dev/ttys027 --scan-start 1 --scan-end 44
+
+# Просмотр логов чтения
+tail -f reader.log
+```
+Симулятор печатает имя PTY (например `/dev/ttys027`) — используйте его в `--rs485-port`. Останавливайте симулятор и EDGE сочетанием `Ctrl+C` в соответствующих терминалах.
 
 ## ⚙️ Управление сервисами
 
@@ -118,6 +139,8 @@ python start_edge.py --offline --disable-telegram --rs485-port /dev/tty.usbseria
 ## 🔐 Конфигурация безопасности
 
 ### Telegram Bot секреты:
+
+> ⚠️ Перед записью секретов убедитесь, что мастер-пароль задан: `python EDGE/tools/security_cli.py set-master-password`. После создания `master.key` смена пароля потребует пересоздания ключа и перезаписи всех секретов.
 
 ```bash
 # Показать замаскированные секреты

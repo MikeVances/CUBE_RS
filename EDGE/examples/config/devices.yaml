@@ -1,15 +1,18 @@
 devices:
+
 - device_id: 1
   device_type: KUB-1063
   slave_id: 1
-  name: '0x19090001'
-  description: Автообнаружено 2025-10-21T16:48:05
+  name: 'KUB-1063 #1'
+  description: Автоскан EDGE
   enabled: true
   location: null
+  poll_interval: 1.0
+
 - device_id: 2
   device_type: KUB-1063
   slave_id: 2
-  name: '0x18080003'
-  description: Автообнаружено 2025-10-21T16:48:05
+  name: 'KUB-1063 #2'
+  description: Автоскан EDGE
   enabled: true
   location: null

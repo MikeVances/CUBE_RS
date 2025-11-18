@@ -22,6 +22,7 @@ logger = get_secure_logger(__name__)
 try:
     from modbus.modbus_storage import (
         read_data as read_modbus_data,
+        read_registers_latest,
         init_db as init_modbus_db,
     )
 
@@ -29,6 +30,7 @@ try:
 except Exception as e:  # pragma: no cover - optional dependency
     MODBUS_STORAGE_AVAILABLE = False
     read_modbus_data = None  # type: ignore
+    read_registers_latest = None  # type: ignore
     init_modbus_db = None  # type: ignore
     logger.warning(f"⚠️ Modbus storage недоступен: {e}")
 
@@ -37,6 +39,7 @@ class DeviceType(Enum):
     """Поддерживаемые типы устройств"""
     KUB_1063 = "KUB-1063"  # Вентиляция
     KUB_1112 = "KUB-1112"  # Обогрев
+    VFD_INVERTER = "VFD-INVERTER"  # Регулятор скорости / Частотный преобразователь
     UNKNOWN = "UNKNOWN"
 
 
@@ -50,13 +53,18 @@ class DeviceInfo:
     description: Optional[str] = None
     enabled: bool = True
     location: Optional[str] = None
-    
+    room: Optional[str] = None  # помещение/группа для UI/логики
+    # Новые поля для DeviceScheduler
+    poll_interval: Optional[float] = None  # Интервал опроса в секундах (None = дефолтный)
+    priority: Optional[str] = None         # Приоритет: "HIGH", "NORMAL", "LOW", "CRITICAL"
+
     def to_dict(self) -> Dict[str, Any]:
         """Конвертация в словарь для JSON/YAML"""
         result = asdict(self)
         result['device_type'] = self.device_type.value
-        return result
-    
+        # Убираем None значения для чистого YAML
+        return {k: v for k, v in result.items() if v is not None}
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'DeviceInfo':
         """Создание из словаря"""
@@ -66,7 +74,7 @@ class DeviceInfo:
         except ValueError:
             logger.warning(f"Неизвестный тип устройства: {device_type_str}")
             device_type = DeviceType.UNKNOWN
-        
+
         return cls(
             device_id=data['device_id'],
             device_type=device_type,
@@ -74,7 +82,10 @@ class DeviceInfo:
             name=data['name'],
             description=data.get('description'),
             enabled=data.get('enabled', True),
-            location=data.get('location')
+            location=data.get('location'),
+            room=data.get('room'),
+            poll_interval=data.get('poll_interval'),  # Новое поле
+            priority=data.get('priority')             # Новое поле
         )
 
 
@@ -252,7 +263,7 @@ class DeviceRegistry:
             return None
 
         try:
-            raw_data = read_modbus_data()  # type: ignore[misc]
+            raw_data = read_modbus_data(device.device_id)  # type: ignore[misc]
         except Exception as exc:
             logger.error(f"❌ Ошибка чтения modbus storage: {exc}")
             return None
@@ -282,6 +293,19 @@ class DeviceRegistry:
         data["timestamp"] = iso_ts
         data["updated_at"] = iso_ts
         data.setdefault("status", "online")
+
+        # Включаем регистры (для VFD и т.д.)
+        try:
+            if read_registers_latest:
+                registers = read_registers_latest(device.device_id)
+                if registers:
+                    data["registers"] = {
+                        str(reg.get("name") or reg.get("register")): reg.get("value")
+                        for reg in registers
+                        if reg.get("name") or reg.get("register") is not None
+                    }
+        except Exception as exc:
+            logger.warning(f"⚠️ Не удалось прочитать регистры устройства {device.device_id}: {exc}")
 
         return data
 
@@ -316,6 +340,57 @@ class DeviceRegistry:
             if data:
                 refreshed[device.device_id] = data
         return refreshed
+
+    # ---------------------------
+    # Параметры планировщика
+    # ---------------------------
+
+    def get_custom_poll_intervals(self) -> Dict[int, float]:
+        """Возвращает интервалы опроса, заданные в devices.yaml."""
+        intervals: Dict[int, float] = {}
+        for device_id, info in self.devices.items():
+            if info.poll_interval is None:
+                continue
+            try:
+                interval = float(info.poll_interval)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "⚠️ Некорректный poll_interval для устройства %s: %s",
+                    device_id,
+                    info.poll_interval,
+                )
+                continue
+            if interval > 0:
+                intervals[device_id] = interval
+        return intervals
+
+    def get_custom_poll_priorities(self) -> Dict[int, "PollPriority"]:
+        """Возвращает приоритеты опроса, заданные в devices.yaml."""
+        try:
+            from core.device_scheduler import PollPriority  # локальный импорт, чтобы избежать циклов
+        except Exception:
+            logger.warning("⚠️ PollPriority недоступен, возвращаем пустые приоритеты")
+            return {}
+
+        priorities: Dict[int, PollPriority] = {}
+        for device_id, info in self.devices.items():
+            if not info.priority:
+                continue
+
+            priority_key = str(info.priority).upper().strip()
+            try:
+                priority_enum = PollPriority[priority_key]
+            except KeyError:
+                logger.warning(
+                    "⚠️ Некорректный priority '%s' для устройства %s",
+                    info.priority,
+                    device_id,
+                )
+                continue
+
+            priorities[device_id] = priority_enum
+
+        return priorities
 
 
 # Глобальный экземпляр реестра

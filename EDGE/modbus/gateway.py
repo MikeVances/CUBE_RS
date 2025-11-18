@@ -1,9 +1,7 @@
 """
 Modbus TCP‑шлюз для КУБ‑1063 (ШЛЮЗ 1)
-Читает данные через TimeWindowManager (RS485) и ретранслирует их в Modbus TCP.
+Работает поверх Universal Modbus Reader и ретранслирует данные в Modbus TCP.
 Сохраняет данные в SQLite для дашборда.
-
-Использует централизованный конфиг-менеджер для всех настроек.
 """
 
 import os
@@ -42,32 +40,18 @@ except ImportError:
 # Безопасные импорты локальных модулей
 try:
     from modbus.modbus_storage import init_db, update_data
-    from modbus.time_window_manager import (
-        get_time_window_manager,
-        request_rs485_read_all,
-        request_rs485_read_register,
-    )
-    from modbus.writer import KUB1063Writer
+    from modbus.universal_reader import UniversalModbusReader
 except ImportError:
     try:
         from .modbus_storage import init_db, update_data
-        from .time_window_manager import (
-            get_time_window_manager,
-            request_rs485_read_all,
-            request_rs485_read_register,
-        )
-        from .writer import KUB1063Writer
+        from .universal_reader import UniversalModbusReader
     except ImportError:
         # Fallback для прямого запуска
         import modbus_storage
-        import time_window_manager
+        from modbus.universal_reader import UniversalModbusReader  # type: ignore
 
         init_db = modbus_storage.init_db
         update_data = modbus_storage.update_data
-        request_rs485_read_all = time_window_manager.request_rs485_read_all
-        request_rs485_read_register = time_window_manager.request_rs485_read_register
-        get_time_window_manager = time_window_manager.get_time_window_manager
-        from writer import KUB1063Writer
 
 # Настройка логирования из конфига
 log_file = config.config_dir / "logs" / "gateway1.log"
@@ -91,19 +75,6 @@ except ImportError:
 # Глобальная блокировка для потокобезопасной работы с хранилищем регистров
 store_lock = threading.Lock()
 
-# Получаем список регистров для чтения из конфига
-REGISTERS_TO_READ = []
-for reg_name, reg_addr in config.get_all_modbus_registers().items():
-    # Конвертируем строковый адрес в int
-    if isinstance(reg_addr, str):
-        if reg_addr.startswith("0x"):
-            addr_int = int(reg_addr, 16)
-        else:
-            addr_int = int(reg_addr)
-        REGISTERS_TO_READ.append(addr_int)
-
-logger.info(f"📋 Загружено {len(REGISTERS_TO_READ)} регистров из конфигурации")
-
 # Получаем настройки из конфиг-менеджера
 MODBUS_TCP_PORT = config.modbus_tcp.port
 SERIAL_PORT = config.rs485.port
@@ -115,50 +86,24 @@ def create_modbus_datastore():
     return ModbusSequentialDataBlock(0, registers)
 
 
-def update_register_from_rs485(store, register_addr, value):
-    """Потокобезопасно обновляет значение Holding Register."""
-    try:
-        with store_lock:
-            store.setValues(3, register_addr, [int(value)])  # FC=3 Holding
-        logging.info(f"📡 Обновлен регистр 0x{register_addr:04X} = {int(value)}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка обновления регистра 0x{register_addr:04X}: {e}")
+def update_store_with_raw_registers(store, raw_registers: dict[int, int]) -> int:
+    """Потокобезопасно записывает карту регистров в datastore."""
+    if not raw_registers:
+        return 0
 
-
-def read_and_retranslate_all_registers(store):
-    """Читает набор регистров через менеджер окон и пишет их в Modbus‑datastore."""
-    updated_count = 0
-
-    for register_addr in REGISTERS_TO_READ:
-        try:
-            result = [None]
-
-            def register_callback(v):
-                result[0] = v
-
-            # Запрос одного регистра
-            request_rs485_read_register(register_addr, register_callback)
-
-            # Ждём ответ (до 20 секунд)
-            start_time = time.time()
-            while result[0] is None and time.time() - start_time < 20:
-                time.sleep(0.1)
-
-            if result[0] is not None:
-                update_register_from_rs485(store, register_addr, result[0])
-                updated_count += 1
-            else:
-                logging.warning(f"⚠️ Таймаут чтения регистра 0x{register_addr:04X}")
-
-            time.sleep(0.3)  # Пауза между запросами
-
-        except Exception as e:
-            logging.error(f"❌ Ошибка чтения регистра 0x{register_addr:04X}: {e}")
-
-    logging.info(
-        f"📊 Ретранслировано {updated_count} регистров из {len(REGISTERS_TO_READ)}"
-    )
-    return updated_count
+    updated = 0
+    with store_lock:
+        for register_addr, value in raw_registers.items():
+            try:
+                store.setValues(3, register_addr, [int(value) & 0xFFFF])
+                updated += 1
+            except Exception as exc:
+                logging.error(
+                    "❌ Ошибка обновления регистра 0x%04X: %s",
+                    register_addr,
+                    exc,
+                )
+    return updated
 
 
 def run_modbus_server(context):
@@ -201,14 +146,6 @@ def main():
         logger.error(f"❌ Ошибка загрузки реестра устройств: {e}")
         return
 
-    # Инициализация менеджера временных окон с нужным портом
-    try:
-        manager = get_time_window_manager(serial_port=SERIAL_PORT)
-        logger.info(f"✅ TimeWindowManager инициализирован (порт: {SERIAL_PORT})")
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации TimeWindowManager: {e}")
-        return
-
     # Инициализация БД (SQLite) для сводных данных/дашборда
     try:
         init_db()
@@ -226,114 +163,119 @@ def main():
         logger.error(f"❌ Ошибка создания контекста: {e}")
         raise
 
-    # Запускаем Writer для обработки очереди команд (в том же процессе, чтобы разделять TimeWindowManager)
+    # Создаем Universal Reader
     try:
-        writer = KUB1063Writer(use_time_window_manager=True)
-        writer.start()
-        logger.info("✍️ Writer запущен: обработка очереди write_commands активна")
+        reader = UniversalModbusReader(
+            port=SERIAL_PORT,
+            baudrate=config.rs485.baudrate,
+            timeout=config.rs485.timeout,
+        )
+        if not reader.connect():
+            logger.error(f"❌ Universal Reader: не удалось подключиться к {SERIAL_PORT}")
+            return
+        logger.info(f"✅ Universal Reader подключен к {SERIAL_PORT}")
     except Exception as e:
-        logger.error(f"❌ Не удалось запустить Writer: {e}")
+        logger.error(f"❌ Ошибка инициализации Universal Reader: {e}")
+        return
 
-    # Фоновый поток: периодически опрашиваем ВСЕ устройства и обновляем datastore + БД
+    def _build_payload(data: dict) -> dict:
+        excluded = {
+            "connection_status",
+            "error",
+            "last_error",
+            "device_id",
+            "slave_id",
+            "device_type",
+            "device_name",
+            "timestamp",
+            "raw_registers",
+            "raw_named_registers",
+            "registers",
+            "status",
+            "alarms",
+            "warnings",
+        }
+        payload = {k: v for k, v in data.items() if k not in excluded}
+        registers_payload = data.get("registers") or {}
+        payload.update(registers_payload)
+        return payload
+
+    # Фоновый поток: периодически опрашиваем устройства и обновляем datastore + БД
     def update_loop():
-        logger.info("🔄 Запуск цикла ретрансляции данных для всех устройств")
+        logger.info("🔄 Запуск цикла Universal Reader для Modbus gateway")
 
         while True:
-            try:
-                # Опрашиваем каждое устройство по очереди
-                for device in devices:
-                    device_name = device.name
-                    slave_id = device.slave_id
+            for device in devices:
+                device_name = device.name
+                slave_id = device.slave_id
+                logger.info("📡 Опрос устройства: %s (slave_id=%s)", device_name, slave_id)
 
-                    logger.info(f"📡 Опрос устройства: {device_name} (slave_id={slave_id})")
+                try:
+                    data = reader.read_device(device)
+                except Exception as exc:
+                    logging.error(
+                        "❌ Ошибка чтения %s (slave_id=%s): %s",
+                        device_name,
+                        slave_id,
+                        exc,
+                    )
+                    data = None
 
-                    data_result = [None]
-
-                    def data_callback(data, dev_name=device_name, dev_info=device):
-                        logger.info(
-                            "🔔 Callback для %s (slave_id=%s): %s",
-                            dev_name,
-                            dev_info.slave_id,
-                            data,
-                        )
-                        data_result[0] = data or {}
-
-                        try:
-                            raw_payload = data_result[0] if data_result[0] else {}
-                            connection_status = raw_payload.get("connection_status") or (
-                                "connected" if raw_payload else "error"
-                            )
-                            last_error = raw_payload.get("error")
-                            payload = {
-                                key: value
-                                for key, value in raw_payload.items()
-                                if key not in {"connection_status", "error", "last_error"}
-                            }
-
-                            update_data(
-                                device_id=dev_info.device_id,
-                                slave_id=dev_info.slave_id,
-                                device_type=dev_info.device_type.value,
-                                connection_status=connection_status,
-                                last_error=last_error,
-                                **payload,
-                            )
-                            logger.info("💾 Данные от %s сохранены в БД", dev_name)
-                        except Exception as e:
-                            logger.error(
-                                "❌ Ошибка сохранения данных от %s: %s", dev_name, e
-                            )
-                            import traceback
-
-                            logger.error(traceback.format_exc())
-
-                    logging.info(f"📤 Отправка запроса для slave_id={slave_id}")
-                    request_rs485_read_all(data_callback, slave_id=slave_id)
-
-                    # Ждём ответ до 20 секунд
-                    start_time = time.time()
-                    while data_result[0] is None and time.time() - start_time < 20:
-                        time.sleep(0.1)
-
-                    data = data_result[0]
-                    if data and data.get("connection_status") == "connected":
-                        logging.info(
-                            f"📊 {device_name}: temp={data.get('temp_inside')}°C, humidity={data.get('humidity')}%, CO2={data.get('co2')}ppm"
-                        )
-
-                        try:
-                            # Ретранслируем регистры в Modbus TCP
-                            # TODO: Учитывать slave_id при ретрансляции
-                            updated_count = read_and_retranslate_all_registers(store)
-                            logging.info(f"📡 {device_name}: ретранслировано {updated_count} регистров")
-                        except Exception as e:
-                            logging.error(f"❌ Ошибка ретрансляции для {device_name}: {e}")
-                    else:
-                        logging.warning(
-                            f"⚠️ Нет связи с {device_name} (slave_id={slave_id})"
-                        )
+                if data:
+                    connection_status = data.get("connection_status", "connected")
+                    last_error = data.get("error")
+                    payload = _build_payload(data)
+                    try:
                         update_data(
                             device_id=device.device_id,
-                            slave_id=device.slave_id,
+                            slave_id=slave_id,
                             device_type=device.device_type.value,
-                            connection_status="error",
-                            last_error="timeout",
+                            connection_status=connection_status,
+                            last_error=last_error,
+                            **payload,
+                        )
+                        logger.info("💾 Данные от %s сохранены в БД", device_name)
+                    except Exception as exc:
+                        logging.error(
+                            "❌ Ошибка сохранения данных от %s: %s",
+                            device_name,
+                            exc,
                         )
 
-                    # Небольшая пауза между устройствами
-                    time.sleep(2)
+                    raw_map = data.get("raw_registers") or {}
+                    updated = update_store_with_raw_registers(store, raw_map)
+                    if updated:
+                        logging.info(
+                            "📡 %s: обновлено %s регистров в datastore",
+                            device_name,
+                            updated,
+                        )
+                else:
+                    logging.warning(
+                        "⚠️ Нет связи с %s (slave_id=%s)", device_name, slave_id
+                    )
+                    update_data(
+                        device_id=device.device_id,
+                        slave_id=slave_id,
+                        device_type=device.device_type.value,
+                        connection_status="error",
+                        last_error="timeout",
+                    )
 
-                # Пауза перед следующим циклом опроса всех устройств
-                time.sleep(30)
+                time.sleep(2)
 
-            except Exception as e:
-                logging.error(f"❌ Ошибка в цикле ретрансляции: {e}")
-                time.sleep(3)
+            time.sleep(30)
 
-    # Стартуем фоновый поток и TCP‑сервер
-    update_thread = threading.Thread(target=update_loop, daemon=False)
+    update_thread = threading.Thread(target=update_loop, daemon=True)
     update_thread.start()
-    run_modbus_server(context)
+
+    try:
+        run_modbus_server(context)
+    finally:
+        try:
+            reader.disconnect()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

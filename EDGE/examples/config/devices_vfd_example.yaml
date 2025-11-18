@@ -1,0 +1,45 @@
+# Пример конфигурации устройств с VFD Inverter
+# Скопируйте нужные устройства в devices.yaml
+
+devices:
+  # === КУБ-1063 (Вентиляция) ===
+  - device_id: 1
+    device_type: "KUB-1063"
+    slave_id: 1
+    name: "Корпус 1 - Вентиляция"
+    description: "Система вентиляции и климата"
+    location: "Корпус №1"
+    enabled: true
+
+  # === КУБ-1112 (Обогрев) ===
+  - device_id: 2
+    device_type: "KUB-1112"
+    slave_id: 2
+    name: "Корпус 1 - Обогрев"
+    description: "Система обогрева"
+    location: "Корпус №1"
+    enabled: true
+
+  # === VFD Inverter (Регулятор скорости) ===
+  - device_id: 10
+    device_type: "VFD-INVERTER"
+    slave_id: 10
+    name: "Вентилятор главный - VFD"
+    description: "Частотный преобразователь основного вентилятора"
+    location: "Вентиляционная система"
+    enabled: true
+
+  # Еще один VFD для другого мотора
+  - device_id: 11
+    device_type: "VFD-INVERTER"
+    slave_id: 11
+    name: "Насос циркуляционный - VFD"
+    description: "Частотный преобразователь циркуляционного насоса"
+    location: "Система отопления"
+    enabled: true
+
+# Примечания:
+# - device_id должен быть уникальным в пределах системы
+# - slave_id - это Modbus slave ID устройства (должен соответствовать настройке устройства)
+# - device_type должен быть одним из: "KUB-1063", "KUB-1112", "VFD-INVERTER"
+# - enabled: false - временно отключить опрос устройства без удаления из конфигурации

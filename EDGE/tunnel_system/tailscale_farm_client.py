@@ -21,10 +21,14 @@ from flask_cors import CORS
 # Import EDGE components
 try:
     from ..core.log_filter import get_secure_logger
-    from ..modbus.unified_system import UnifiedKUBSystem
     logger = get_secure_logger(__name__)
 except ImportError:
     logger = logging.getLogger(__name__)
+
+try:
+    from ..modbus.unified_system import UnifiedKUBSystem
+except ImportError:
+    UnifiedKUBSystem = None  # type: ignore
 
 # Import Tailscale components
 from .tailscale_manager import TailscaleFarmRegistrator, TailscaleManager
@@ -36,15 +40,19 @@ class KubDataProvider:
     def __init__(self):
         """Инициализация провайдера данных"""
         # Пытаемся использовать реальный UnifiedKUBSystem
-        try:
-            self.unified_system = UnifiedKUBSystem()
-            self.use_real_data = True
-            logger.info("✅ Подключен к реальной системе КУБ-1063")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось подключиться к КУБ-1063, используем симуляцию: {e}")
-            self.unified_system = None
-            self.use_real_data = False
-            
+        self.unified_system = None
+        self.use_real_data = False
+
+        if UnifiedKUBSystem is not None:
+            try:
+                self.unified_system = UnifiedKUBSystem()
+                self.use_real_data = True
+                logger.info("✅ Подключен к реальной системе КУБ-1063")
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Не удалось подключиться к КУБ-1063, используем симуляцию: {e}"
+                )
+
         # Данные симуляции
         self.simulation_data = {
             "temperature_inside": 25.5,

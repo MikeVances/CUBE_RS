@@ -54,3 +54,13 @@ system:
   log_level: INFO
   shutdown_timeout: 15
   startup_timeout: 60
+polling:
+  timeout: 6.0
+  max_retries: 3
+  backoff_factor: 2.0
+  backoff_max: 60.0
+  default_intervals:
+    KUB-1063: 1.0
+    KUB-1112: 1.0
+    VFD-INVERTER: 2.0
+  device_overrides: {}

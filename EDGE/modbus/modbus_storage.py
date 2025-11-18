@@ -55,6 +55,18 @@ def _connect():
 _lock = threading.Lock()
 
 # Все регистры из Cube-1063_modbus registers.md (Input Registers)
+VFD_FIELDS: list[str] = [
+    "running_state",
+    "running_frequency",
+    "running_speed",
+    "output_voltage",
+    "output_current",
+    "output_power",
+    "motor_temperature",
+    "igbt_temperature",
+    "fault_code",
+]
+
 ALL_FIELDS: list[str] = [
     "software_version",  # 0x0301
     "device_uid_hi",  # 0x0302
@@ -87,7 +99,7 @@ ALL_FIELDS: list[str] = [
     "temp_inside",  # 0x00D5
     "temp_vent_activation",  # 0x00D6
     # + updated_at
-]
+] + VFD_FIELDS
 
 # Поля, представляющие собой битовые маски аварий/предупреждений.
 BITMASK_FIELDS = {
@@ -157,6 +169,15 @@ CREATE TABLE IF NOT EXISTS latest_data (
     temp_target REAL,
     temp_inside REAL,
     temp_vent_activation REAL,
+    running_state TEXT,
+    running_frequency REAL,
+    running_speed REAL,
+    output_voltage REAL,
+    output_current REAL,
+    output_power REAL,
+    motor_temperature REAL,
+    igbt_temperature REAL,
+    fault_code TEXT,
     updated_at TIMESTAMP
 );
 """
@@ -195,7 +216,16 @@ CREATE TABLE IF NOT EXISTS sensor_data (
     day_counter INTEGER,
     temp_target REAL,
     temp_inside REAL,
-    temp_vent_activation REAL
+    temp_vent_activation REAL,
+    running_state TEXT,
+    running_frequency REAL,
+    running_speed REAL,
+    output_voltage REAL,
+    output_current REAL,
+    output_power REAL,
+    motor_temperature REAL,
+    igbt_temperature REAL,
+    fault_code TEXT
 );
 """
 
@@ -245,6 +275,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         cur = conn.execute(f"PRAGMA table_info({table})")
         return [row[1] for row in cur.fetchall()]
 
+    def _ensure_columns(table: str, columns: Dict[str, str]) -> None:
+        if not _table_exists(conn, table):
+            return
+        existing = set(_table_columns(table))
+        for column, col_type in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
     # latest_data table migration
     if _table_exists(conn, "latest_data"):
         cols = _table_columns("latest_data")
@@ -271,6 +309,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
             conn.execute("DROP TABLE latest_data_legacy")
 
+    vfd_column_types = {
+        "running_state": "TEXT",
+        "running_frequency": "REAL",
+        "running_speed": "REAL",
+        "output_voltage": "REAL",
+        "output_current": "REAL",
+        "output_power": "REAL",
+        "motor_temperature": "REAL",
+        "igbt_temperature": "REAL",
+        "fault_code": "TEXT",
+    }
+
+    _ensure_columns("latest_data", vfd_column_types)
+
     # sensor_data migration
     if _table_exists(conn, "sensor_data"):
         cols = _table_columns("sensor_data")
@@ -278,6 +330,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE sensor_data ADD COLUMN device_id INTEGER DEFAULT 1")
         if "slave_id" not in cols:
             conn.execute("ALTER TABLE sensor_data ADD COLUMN slave_id INTEGER")
+
+    _ensure_columns("sensor_data", vfd_column_types)
 
     # registers tables migration
     if _table_exists(conn, "registers_latest"):

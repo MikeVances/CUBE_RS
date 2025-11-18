@@ -180,31 +180,33 @@ class KUB1063Adapter(DeviceAdapter):
         """Карта регистров (legacy compatibility)"""
         # Создаем legacy карту регистров из Variable System
         legacy_map = {}
+        value_type_map = {
+            VariableType.TEMPERATURE: ValueType.TEMPERATURE,
+            VariableType.PERCENTAGE: ValueType.PERCENTAGE,
+            VariableType.FLOAT: ValueType.FLOAT,
+            VariableType.BOOL: ValueType.BOOLEAN,
+            VariableType.BITFIELD: ValueType.BITFIELD,
+            VariableType.VERSION: ValueType.VERSION,
+            VariableType.SHORT: ValueType.INTEGER,
+            VariableType.USHORT: ValueType.INTEGER,
+            VariableType.INT: ValueType.INTEGER,
+            VariableType.UINT: ValueType.INTEGER,
+            VariableType.BYTE: ValueType.INTEGER,
+        }
+
         for var_name, var_ref in self._mapper.variable_references.items():
             type_def = self._mapper.type_definitions[var_ref.type_id]
-            
-            # Конвертируем VariableType в ValueType
-            value_type_map = {
-                VariableType.TEMPERATURE: ValueType.TEMPERATURE,
-                VariableType.PERCENTAGE: ValueType.PERCENTAGE,
-                VariableType.INTEGER: ValueType.INTEGER,
-                VariableType.FLOAT: ValueType.FLOAT,
-                VariableType.BOOLEAN: ValueType.BOOLEAN,
-                VariableType.BITFIELD: ValueType.BITFIELD,
-                VariableType.STATUS: ValueType.STATUS
-            }
-            
             legacy_map[var_name] = RegisterInfo(
-                address=var_ref.address,
+                address=var_ref.register_address,
                 name=var_name,
                 value_type=value_type_map.get(type_def.var_type, ValueType.INTEGER),
                 unit=type_def.unit,
                 scale=type_def.scale,
                 signed=type_def.signed,
                 description=type_def.description,
-                special_values=type_def.special_values
+                special_values=type_def.special_values,
             )
-        
+
         return legacy_map
     
     def parse_register_value(self, register_name: str, raw_value: int) -> tuple[Any, str]:

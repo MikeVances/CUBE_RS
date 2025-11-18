@@ -18,19 +18,26 @@ import signal
 import threading
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
+
+EDGE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = EDGE_DIR.parent
 
 # Provide safe defaults to avoid config validation failures when Telegram is disabled
 if os.getenv("TELEGRAM_BOT_TOKEN") is None:
     os.environ.setdefault("TELEGRAM_BOT_TOKEN", "dummy-edge-startup")
     os.environ.setdefault("TELEGRAM_ENV_OVERRIDE", "true")
 
-# Добавляем текущую директорию в путь для импортов
-sys.path.insert(0, str(Path(__file__).parent))
+# Ensure working directory is project root so runtime artifacts land in predictable place
+os.chdir(PROJECT_ROOT)
+
+# Добавляем EDGE в PYTHONPATH
+sys.path.insert(0, str(EDGE_DIR))
 
 from core.config_manager import get_config, reload_config
 from core.edge_authentication import EDGEAuthConfig, EDGEAuthenticatedClient
-from core.device_registry import DeviceRegistry
+from core.device_registry import DeviceRegistry, DeviceType
+from core.device_scheduler import DeviceScheduler
 from core.log_filter import get_secure_logger
 
 # Опциональные импорты
@@ -65,24 +72,29 @@ except ImportError as e:
     print(f"⚠️ Publishing services недоступны: {e}")
 
 try:
-    from modbus.writer import KUB1063Writer
-    WRITER_AVAILABLE = True
-except ImportError as e:
-    WRITER_AVAILABLE = False
-    print(f"⚠️ Modbus writer недоступен: {e}")
-
-try:
-    from modbus.time_window_manager import stop_time_window_manager, request_rs485_read_all
     from modbus.modbus_storage import update_data
     print("✅ Успешный импорт modbus модулей")
 except ImportError as e:
     print(f"❌ Ошибка импорта modbus модулей: {e}")
-    def stop_time_window_manager():
-        pass
-    def request_rs485_read_all(callback):
-        raise RuntimeError("TimeWindowManager недоступен")
     def update_data(*args, **kwargs):
         raise RuntimeError("modbus_storage недоступен")
+
+# Переходим на Universal Reader (legacy поддержка удалена)
+try:
+    from modbus.reader_integration import (
+        initialize_reader,
+        request_universal_read,
+        shutdown_reader as shutdown_universal_reader,
+    )
+except ImportError as e:
+    raise ImportError("Universal Modbus Reader обязателен для EDGE") from e
+
+USE_UNIVERSAL_READER = os.getenv("USE_UNIVERSAL_READER", "true").lower() in {"1", "true", "yes", "on"}
+if not USE_UNIVERSAL_READER:
+    raise RuntimeError(
+        "Legacy Modbus reader удалён. Установите USE_UNIVERSAL_READER=true, чтобы запустить EDGE."
+    )
+print("✅ Universal Modbus Reader активирован")
 
 SCAN_CLI_AVAILABLE = False
 scan_cli = None
@@ -116,10 +128,27 @@ class EDGEService:
         self.offline_reason: Optional[str] = None
         self.writer = None
         self.reader_thread = None
+        self.use_universal_reader = True
+        self.scheduler: Optional[DeviceScheduler] = None
         self._maybe_run_discovery()
         reload_config()
         self.config = get_config()
         self.device_registry = DeviceRegistry()
+        self._init_scheduler()
+
+        # Инициализация Universal Modbus Reader (обязательна)
+        try:
+            port = self.config.rs485.port
+            baudrate = self.config.rs485.baudrate
+            timeout = self.config.rs485.timeout
+
+            if initialize_reader(port=port, baudrate=baudrate, timeout=timeout):
+                logger.info(f"✅ Universal Modbus Reader инициализирован ({port} @ {baudrate})")
+            else:
+                raise RuntimeError("Не удалось подключиться к RS485 порту для Universal Reader")
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка инициализации Universal Reader: {e}")
+            raise
 
     def _maybe_run_discovery(self) -> None:
         if not SCAN_CLI_AVAILABLE:
@@ -159,6 +188,44 @@ class EDGEService:
         except Exception as exc:
             logger.warning(f"⚠️ Не удалось выполнить сканирование устройств: {exc}")
         
+    def _default_intervals_from_config(self) -> Dict[DeviceType, float]:
+        mapping: Dict[DeviceType, float] = {}
+        intervals = getattr(self.config.polling, "default_intervals", {}) or {}
+        for type_name, value in intervals.items():
+            try:
+                dtype = DeviceType(type_name)
+            except ValueError:
+                logger.warning(f"⚠️ Неизвестный тип устройства в polling.default_intervals: {type_name}")
+                continue
+            try:
+                interval = float(value)
+            except (TypeError, ValueError):
+                logger.warning(f"⚠️ Некорректный интервал для {type_name}: {value}")
+                continue
+            if interval > 0:
+                mapping[dtype] = interval
+        return mapping
+
+    def _init_scheduler(self) -> None:
+        devices = self.device_registry.get_devices(enabled_only=True)
+        if not devices:
+            logger.warning("⚠️ В реестре нет активных устройств для Scheduler")
+            self.scheduler = None
+            return
+
+        custom_intervals = self.device_registry.get_custom_poll_intervals()
+        custom_priorities = self.device_registry.get_custom_poll_priorities()
+        self.scheduler = DeviceScheduler(
+            devices,
+            custom_intervals=custom_intervals,
+            custom_priorities=custom_priorities,
+            default_intervals_by_type=self._default_intervals_from_config(),
+        )
+        logger.info(
+            "📅 Scheduler создан: %s устройств",
+            len(self.scheduler.scheduled_devices),
+        )
+
     async def setup_authentication(self):
         """Настройка аутентификации с SERVER"""
         if self.offline_mode:
@@ -323,56 +390,42 @@ class EDGEService:
             logger.error("❌ Не удалось запустить Health API")
 
     async def start_modbus_writer(self):
-        """Запуск Modbus writer"""
-        if not WRITER_AVAILABLE:
-            logger.warning("Modbus writer недоступен")
-            return
-        if self.writer:
-            logger.debug("Modbus writer уже запущен")
-            return
-
-        try:
-            from modbus.time_window_manager import get_time_window_manager
-
-            cfg_rs485 = self.config.rs485
-            get_time_window_manager(
-                serial_port=cfg_rs485.port,
-                window_duration=getattr(cfg_rs485, "window_duration", 5),
-                cooldown_duration=getattr(cfg_rs485, "cooldown_duration", 10),
-                baudrate=cfg_rs485.baudrate,
-                slave_id=cfg_rs485.slave_id,
-            )
-
-            self.writer = KUB1063Writer(
-                port=cfg_rs485.port,
-                baudrate=cfg_rs485.baudrate,
-                slave_id=cfg_rs485.slave_id,
-                use_time_window_manager=True,
-            )
-            self.writer.start()
-            logger.info("✍️ Modbus writer запущен (порт %s)", cfg_rs485.port)
-            
-        except Exception as e:
-            self.writer = None
-            logger.error(f"❌ Не удалось запустить Modbus writer: {e}")
+        """Writer временно отключён в универсальном режиме."""
+        logger.info("✍️ Modbus writer пропущен (доступен только в legacy режиме)")
+        return
 
     def start_modbus_reader(self, interval: float | None = None):
         """Запуск фонового опроса RS485"""
         if self.reader_thread and self.reader_thread.is_alive():
             return
 
-        poll_interval = interval or float(os.getenv("EDGE_POLL_INTERVAL", "10"))
-        timeout = float(os.getenv("EDGE_POLL_TIMEOUT", str(self.config.rs485.timeout * 3)))
-        max_retries = int(os.getenv("EDGE_POLL_MAX_RETRIES", "3"))
+        polling_cfg = getattr(self.config, "polling", None)
+        default_timeout = (
+            polling_cfg.timeout if polling_cfg and hasattr(polling_cfg, "timeout")
+            else self.config.rs485.timeout * 3
+        )
+        timeout = float(os.getenv("EDGE_POLL_TIMEOUT", str(default_timeout)))
+        default_retries = polling_cfg.max_retries if polling_cfg else 3
+        max_retries = int(os.getenv("EDGE_POLL_MAX_RETRIES", str(default_retries)))
+        backoff_factor = polling_cfg.backoff_factor if polling_cfg else 2.0
+        backoff_max = polling_cfg.backoff_max if polling_cfg else 60.0
 
         def reader_worker():
-            logger.info("📖 Modbus reader запущен (интервал %.1fс)", poll_interval)
+            logger.info("📖 Modbus reader запущен (DeviceScheduler)")
 
             while not shutdown_requested.is_set():
-                devices = self.device_registry.get_all_devices(enabled_only=True)
+                scheduler = self.scheduler
+                if scheduler is None:
+                    if shutdown_requested.wait(1.0):
+                        break
+                    continue
+
+                devices = scheduler.get_devices_to_poll()
                 if not devices:
-                    logger.warning("⚠️ Нет активных устройств в реестре, Modbus reader остановлен")
-                    return
+                    wait_time = scheduler.get_next_poll_time()
+                    if shutdown_requested.wait(wait_time or 0.1):
+                        break
+                    continue
 
                 error_counters: dict[int, int] = {}
 
@@ -391,12 +444,17 @@ class EDGEService:
                             data_holder["data"] = payload
                         done.set()
 
+                    success = False
                     try:
-                        logger.debug("📞 Вызываем request_rs485_read_all для slave_id=%s", device.slave_id)
-                        request_rs485_read_all(_callback, slave_id=device.slave_id)
-                        logger.debug("📞 request_rs485_read_all завершен для slave_id=%s", device.slave_id)
+                        logger.debug(
+                            "📞 Вызываем Universal Reader для device_id=%s (slave_id=%s)",
+                            device.device_id,
+                            device.slave_id,
+                        )
+                        request_universal_read(_callback, device_info=device)
+                        logger.debug("📞 Чтение завершено для device_id=%s", device.device_id)
                     except Exception as exc:
-                        logger.error(f"❌ Ошибка request_rs485_read_all: {exc}")
+                        logger.error(f"❌ Ошибка чтения устройства {device.device_id}: {exc}")
                         error_holder["err"] = str(exc)
                         done.set()
 
@@ -413,11 +471,30 @@ class EDGEService:
 
                     try:
                         if data and data.get("connection_status") in {"connected", "partial"}:
+                            success = True
+                            excluded = {
+                                "connection_status",
+                                "error",
+                                "last_error",
+                                "device_id",
+                                "slave_id",
+                                "device_type",
+                                "device_name",
+                                "timestamp",
+                                "raw_registers",
+                                "raw_named_registers",
+                                "registers",
+                                "status",
+                                "alarms",
+                                "warnings",
+                            }
                             payload = {
                                 key: value
                                 for key, value in data.items()
-                                if key not in {"connection_status", "error", "last_error"}
+                                if key not in excluded
                             }
+                            registers_payload = data.get("registers") or {}
+                            payload.update(registers_payload)
                             update_data(
                                 device_id=device.device_id,
                                 slave_id=device.slave_id,
@@ -446,7 +523,13 @@ class EDGEService:
                             )
 
                             if error_counters[device.device_id] >= max_retries:
-                                backoff = min(poll_interval * 2, 60)
+                                device_interval = 1.0
+                                if scheduler and device.device_id in scheduler.scheduled_devices:
+                                    device_interval = (
+                                        scheduler.scheduled_devices[device.device_id].poll_interval
+                                        or 1.0
+                                    )
+                                backoff = min(device_interval * backoff_factor, backoff_max)
                                 logger.error(
                                     "❌ Превышено число ошибок для устройства %s, пауза %.1fс",
                                     device.device_id,
@@ -461,9 +544,12 @@ class EDGEService:
                             device.device_id,
                             exc,
                         )
+                    finally:
+                        scheduler.mark_poll_result(device.device_id, success)
 
-                    if shutdown_requested.wait(poll_interval / max(len(devices), 1)):
-                        break
+                wait_next = scheduler.get_next_poll_time()
+                if shutdown_requested.wait(wait_next):
+                    break
 
                 if shutdown_requested.is_set():
                     break
@@ -526,7 +612,6 @@ class EDGEService:
         enable_mqtt: bool = True,
         enable_edge_ping: bool = True,
         enable_health_api: bool = True,
-        enable_writer: bool = True,
     ):
         """Запуск всех сервисов EDGE"""
         logger.info("🚀 Запуск EDGE Services...")
@@ -537,6 +622,7 @@ class EDGEService:
         # Загрузка устройств
         logger.info("📡 Загрузка конфигурации устройств...")
         self.device_registry.load_devices_from_config()
+        self._init_scheduler()
 
         # Прокидываем параметры Modbus в окружение
         try:
@@ -569,9 +655,8 @@ class EDGEService:
         if enable_edge_ping:
             await self.start_edge_ping_service()
 
-        if enable_writer:
-            await self.start_modbus_writer()
-            self.start_modbus_reader()
+        await self.start_modbus_writer()
+        self.start_modbus_reader()
         
         # Запуск heartbeat
         if not self.offline_mode and self.auth_client:
@@ -614,24 +699,17 @@ class EDGEService:
             except Exception as e:
                 logger.error(f"❌ Ошибка остановки Health API: {e}")
 
-        # Останавливаем writer
-        if self.writer:
-            try:
-                self.writer.stop()
-                logger.info("🛑 Modbus writer остановлен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки Modbus writer: {e}")
-            self.writer = None
-            
-            try:
-                stop_time_window_manager()
-                logger.info("🛑 TimeWindowManager остановлен")
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось остановить TimeWindowManager: {e}")
-
         # Ждем завершения reader thread (он демонический, но лучше подождать)
         if self.reader_thread and self.reader_thread.is_alive():
             self.reader_thread.join(timeout=3)
+
+        # Останавливаем Universal Reader (если используется)
+        if self.use_universal_reader:
+            try:
+                shutdown_universal_reader()
+                logger.info("🛑 Universal Modbus Reader остановлен")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка остановки Universal Reader: {e}")
 
         # Отменяем все задачи
         cancelled_tasks = []
@@ -682,7 +760,6 @@ async def main():
     parser.add_argument('--disable-mqtt', action='store_true', help='Отключить MQTT Publisher')
     parser.add_argument('--disable-edge-ping', action='store_true', help='Отключить EDGE Ping Service')
     parser.add_argument('--disable-health-api', action='store_true', help='Отключить Health API')
-    parser.add_argument('--disable-writer', action='store_true', help='Отключить Modbus writer')
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
     parser.add_argument('--offline', action='store_true', help='Запуск без подключения к SERVER (offline mode)')
     
@@ -736,8 +813,6 @@ async def main():
             enable_edge_ping=(not args.disable_edge_ping)
             and bool(getattr(services_cfg, "gateway_enabled", True)),
             enable_health_api=(not args.disable_health_api),
-            enable_writer=(not args.disable_writer)
-            and bool(getattr(services_cfg, "gateway_enabled", True)),
         )
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")

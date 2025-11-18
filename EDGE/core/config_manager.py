@@ -14,7 +14,7 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -185,6 +185,9 @@ class ConfigManager:
         # Modbus регистры
         self.modbus_registers: dict[str, str] = {}
 
+        # Настройки опроса устройств
+        self.polling: PollingConfig = PollingConfig()
+
         # Менеджер безопасности
         self.security_manager = get_security_manager() if SECURITY_AVAILABLE else None
 
@@ -293,6 +296,41 @@ class ConfigManager:
                 # Modbus регистры
                 if "modbus_registers" in config_data:
                     self.modbus_registers = config_data["modbus_registers"]
+
+                # Настройки опроса
+                if "polling" in config_data and isinstance(config_data["polling"], dict):
+                    polling_data = config_data["polling"]
+                    for key in ["timeout", "max_retries", "backoff_factor", "backoff_max"]:
+                        if key in polling_data:
+                            try:
+                                value = float(polling_data[key]) if "timeout" in key or "backoff" in key else int(polling_data[key])
+                                setattr(self.polling, key, value)
+                            except Exception:
+                                logger.warning(f"⚠️ Некорректное значение polling.{key}: {polling_data[key]}")
+
+                    if "default_intervals" in polling_data and isinstance(polling_data["default_intervals"], dict):
+                        cleaned: dict[str, float] = {}
+                        for name, value in polling_data["default_intervals"].items():
+                            try:
+                                cleaned[str(name).strip()] = float(value)
+                            except (TypeError, ValueError):
+                                logger.warning(
+                                    f"⚠️ Некорректный интервал для типа {name}: {value}"
+                                )
+                        if cleaned:
+                            self.polling.default_intervals = cleaned
+
+                    if "device_overrides" in polling_data and isinstance(polling_data["device_overrides"], dict):
+                        overrides: dict[str, float] = {}
+                        for device_id, value in polling_data["device_overrides"].items():
+                            try:
+                                overrides[str(device_id).strip()] = float(value)
+                            except (TypeError, ValueError):
+                                logger.warning(
+                                    f"⚠️ Некорректный device override для {device_id}: {value}"
+                                )
+                        if overrides:
+                            self.polling.device_overrides = overrides
 
                 logger.info(f"📁 Загружен основной конфиг: {config_file}")
 
@@ -815,3 +853,19 @@ if __name__ == "__main__":
     print(f"🏷️ Modbus регистров: {len(config.modbus_registers)}")
 
     print("✅ ConfigManager протестирован успешно!")
+@dataclass
+class PollingConfig:
+    """Настройки опроса устройств."""
+
+    timeout: float = 6.0
+    max_retries: int = 3
+    backoff_factor: float = 2.0
+    backoff_max: float = 60.0
+    default_intervals: dict = field(
+        default_factory=lambda: {
+            "KUB-1063": 1.0,
+            "KUB-1112": 1.0,
+            "VFD-INVERTER": 2.0,
+        }
+    )
+    device_overrides: dict = field(default_factory=dict)

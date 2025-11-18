@@ -7,6 +7,7 @@ from typing import Optional, Dict
 from .base import DeviceAdapter
 from .kub1063 import KUB1063Adapter
 from .kub1112 import KUB1112Adapter
+from .vfd_inverter import VFDInverterAdapter
 from core.device_registry import DeviceType
 
 
@@ -14,6 +15,7 @@ from core.device_registry import DeviceType
 _ADAPTER_REGISTRY: Dict[DeviceType, type] = {
     DeviceType.KUB_1063: KUB1063Adapter,
     DeviceType.KUB_1112: KUB1112Adapter,
+    DeviceType.VFD_INVERTER: VFDInverterAdapter,
 }
 
 # Кэш экземпляров адаптеров

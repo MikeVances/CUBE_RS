@@ -272,6 +272,35 @@ class DeviceRegistry:
             return None
 
         data = dict(raw_data)
+        registers_blob = data.pop("registers_blob", None)
+        registers_payload: Dict[str, Any] = {}
+        if isinstance(registers_blob, str) and registers_blob:
+            try:
+                registers_payload = json.loads(registers_blob)
+            except Exception:
+                logger.debug(
+                    "⚠️ Не удалось распарсить registers_blob для устройства %s",
+                    device.device_id,
+                )
+                registers_payload = {}
+        alarms_blob = data.pop("alarms_json", None)
+        warnings_blob = data.pop("warnings_json", None)
+        alarms_list: list[Any] = []
+        warnings_list: list[Any] = []
+        if isinstance(alarms_blob, str) and alarms_blob:
+            try:
+                parsed = json.loads(alarms_blob)
+                if isinstance(parsed, list):
+                    alarms_list = parsed
+            except Exception:
+                logger.debug("⚠️ Не удалось распарсить alarms_json для устройства %s", device.device_id)
+        if isinstance(warnings_blob, str) and warnings_blob:
+            try:
+                parsed = json.loads(warnings_blob)
+                if isinstance(parsed, list):
+                    warnings_list = parsed
+            except Exception:
+                logger.debug("⚠️ Не удалось распарсить warnings_json для устройства %s", device.device_id)
         updated_at = data.pop("updated_at", None)
 
         timestamp_dt: Optional[datetime] = None
@@ -293,10 +322,20 @@ class DeviceRegistry:
         data["timestamp"] = iso_ts
         data["updated_at"] = iso_ts
         data.setdefault("status", "online")
+        if alarms_list:
+            data["alarms"] = alarms_list
+            if not data.get("active_alarms"):
+                data["active_alarms"] = len(alarms_list)
+        if warnings_list:
+            data["warnings"] = warnings_list
 
         # Включаем регистры (для VFD и т.д.)
         try:
-            if read_registers_latest:
+            if registers_payload:
+                data["registers"] = registers_payload
+                for key, value in registers_payload.items():
+                    data.setdefault(key, value)
+            elif read_registers_latest:
                 registers = read_registers_latest(device.device_id)
                 if registers:
                     data["registers"] = {
@@ -304,9 +343,12 @@ class DeviceRegistry:
                         for reg in registers
                         if reg.get("name") or reg.get("register") is not None
                     }
+                    for key, value in data["registers"].items():
+                        data.setdefault(key, value)
         except Exception as exc:
             logger.warning(f"⚠️ Не удалось прочитать регистры устройства {device.device_id}: {exc}")
 
+        self._filter_metrics_for_device(device, data)
         return data
 
     def get_device_data(self, device_id: int, *, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
@@ -340,6 +382,20 @@ class DeviceRegistry:
             if data:
                 refreshed[device.device_id] = data
         return refreshed
+
+    def _filter_metrics_for_device(self, device: DeviceInfo, data: Dict[str, Any]) -> None:
+        from core.device_adapters.factory import get_device_metric_keys  # локальный импорт, чтобы избежать циклов
+
+        allowed = get_device_metric_keys(device.device_type)
+        always = {"connection_status", "last_error", "status", "timestamp", "updated_at", "device_id", "device_name", "device_type", "slave_id"}
+        allowed.update(always)
+        remove_keys = [key for key in data.keys() if key not in allowed and key != "registers"]
+        for key in remove_keys:
+            data.pop(key, None)
+        if "registers" in data:
+            regs = data["registers"] or {}
+            if isinstance(regs, dict):
+                data["registers"] = {k: v for k, v in regs.items() if k in allowed}
 
     # ---------------------------
     # Параметры планировщика

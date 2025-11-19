@@ -14,6 +14,7 @@ import argparse
 import logging
 import threading
 import time
+from typing import Any
 
 try:
     from pymodbus.datastore import (
@@ -178,7 +179,7 @@ def main():
         logger.error(f"❌ Ошибка инициализации Universal Reader: {e}")
         return
 
-    def _build_payload(data: dict) -> dict:
+    def _build_payload(data: dict) -> tuple[dict, dict[str, Any]]:
         excluded = {
             "connection_status",
             "error",
@@ -198,7 +199,7 @@ def main():
         payload = {k: v for k, v in data.items() if k not in excluded}
         registers_payload = data.get("registers") or {}
         payload.update(registers_payload)
-        return payload
+        return payload, registers_payload
 
     # Фоновый поток: периодически опрашиваем устройства и обновляем datastore + БД
     def update_loop():
@@ -224,7 +225,9 @@ def main():
                 if data:
                     connection_status = data.get("connection_status", "connected")
                     last_error = data.get("error")
-                    payload = _build_payload(data)
+                    payload, registers_payload = _build_payload(data)
+                    alarms_list = data.get("alarms")
+                    warnings_list = data.get("warnings")
                     try:
                         update_data(
                             device_id=device.device_id,
@@ -232,6 +235,9 @@ def main():
                             device_type=device.device_type.value,
                             connection_status=connection_status,
                             last_error=last_error,
+                            registers=registers_payload,
+                            alarms=alarms_list,
+                            warnings=warnings_list,
                             **payload,
                         )
                         logger.info("💾 Данные от %s сохранены в БД", device_name)

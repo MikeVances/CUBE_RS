@@ -55,15 +55,15 @@ class VFDMap:
 
     def __init__(self) -> None:
         self.regs: Dict[int, int] = {
-            0x1000: 3,      # running_state (3=стоп)
+            0x1000: 1,      # running_state (1=вперёд)
             0x1001: 0,      # fault_code
             0x1002: 263,    # set_frequency (26.3 Hz → 263 с масштабом 0.1)
-            0x1003: 0,      # running_frequency
-            0x1004: 0,      # speed rpm
-            0x1005: 0,      # output voltage
-            0x1006: 0,      # output current (0.1A)
-            0x101A: 29,     # motor temp
-            0x101B: 35,     # igbt temp
+            0x1003: 235,    # running_frequency (23.5 Hz)
+            0x1004: 1500,   # скорость, об/мин
+            0x1005: 380,    # выходное напряжение, В
+            0x1006: 120,    # ток 12.0 А (масштаб 0.1)
+            0x101A: 35,     # motor temp
+            0x101B: 42,     # igbt temp
             0x102B: 0xAAAA, # serial low (для примера)
             0x102C: 0xBBBB, # serial high
         }
@@ -109,8 +109,9 @@ def run(slave_id: int) -> int:
         while True:
             events = poller.poll(1000)  # 1s
             if not events:
-                # чуть изменяем частоту/температуру для правдоподобности
-                vmap.regs[0x1003] = max(0, vmap.regs[0x1003] - 1)
+                # имитируем лёгкие колебания частоты/тока
+                vmap.regs[0x1003] = 230 + int(time.time()) % 10  # 23.0..32.9 Гц
+                vmap.regs[0x1006] = 115 + (int(time.time()) % 6)  # 11.5..12.0 А
                 continue
             data = os.read(master_fd, 4096)
             if not data:
@@ -179,4 +180,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
-

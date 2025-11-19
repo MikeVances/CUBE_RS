@@ -55,12 +55,12 @@ system:
   shutdown_timeout: 15
   startup_timeout: 60
 polling:
-  timeout: 6.0
+  timeout: 20.0
   max_retries: 3
-  backoff_factor: 2.0
+  backoff_factor: 10.0
   backoff_max: 60.0
   default_intervals:
-    KUB-1063: 1.0
-    KUB-1112: 1.0
-    VFD-INVERTER: 2.0
+    KUB-1063: 20.0
+    KUB-1112: 20.0
+    VFD-INVERTER: 20.0
   device_overrides: {}

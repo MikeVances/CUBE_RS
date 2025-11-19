@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import threading
@@ -109,6 +110,10 @@ BITMASK_FIELDS = {
     "registered_warnings",
 }
 
+REGISTERS_COLUMN = "registers_blob"
+ALARMS_COLUMN = "alarms_json"
+WARNINGS_COLUMN = "warnings_json"
+
 
 def _normalize_value_for_storage(key: str, value):
     """Преобразует значения перед записью в БД.
@@ -178,6 +183,9 @@ CREATE TABLE IF NOT EXISTS latest_data (
     motor_temperature REAL,
     igbt_temperature REAL,
     fault_code TEXT,
+    registers_blob TEXT,
+    alarms_json TEXT,
+    warnings_json TEXT,
     updated_at TIMESTAMP
 );
 """
@@ -225,7 +233,9 @@ CREATE TABLE IF NOT EXISTS sensor_data (
     output_power REAL,
     motor_temperature REAL,
     igbt_temperature REAL,
-    fault_code TEXT
+    fault_code TEXT,
+    alarms_json TEXT,
+    warnings_json TEXT
 );
 """
 
@@ -305,6 +315,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                     connection_status=data.get("connection_status", "unknown"),
                     last_error=data.get("last_error"),
                     payload=snapshot,
+                    updated_at=data.get("updated_at") or datetime.utcnow().isoformat(),
+                    registers_blob=None,
                 )
 
             conn.execute("DROP TABLE latest_data_legacy")
@@ -319,6 +331,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "motor_temperature": "REAL",
         "igbt_temperature": "REAL",
         "fault_code": "TEXT",
+        REGISTERS_COLUMN: "TEXT",
+        ALARMS_COLUMN: "TEXT",
+        WARNINGS_COLUMN: "TEXT",
     }
 
     _ensure_columns("latest_data", vfd_column_types)
@@ -375,6 +390,9 @@ def update_data(
     device_type: Optional[str] = None,
     connection_status: Optional[str] = None,
     last_error: Optional[str] = None,
+    registers: Optional[Dict[str, Any]] = None,
+    alarms: Optional[Any] = None,
+    warnings: Optional[Any] = None,
     **payload: Any,
 ) -> None:
     """Upsert latest snapshot for a particular device.
@@ -395,6 +413,27 @@ def update_data(
         if key in ALL_FIELDS:
             normalized_kwargs[key] = _normalize_value_for_storage(key, value)
 
+    registers_json: Optional[str] = None
+    if registers:
+        try:
+            registers_json = json.dumps(registers)
+        except TypeError:
+            registers_json = json.dumps({k: str(v) for k, v in registers.items()})
+
+    alarms_json = None
+    if alarms:
+        try:
+            alarms_json = json.dumps(alarms)
+        except TypeError:
+            alarms_json = json.dumps([str(a) for a in alarms])
+
+    warnings_json = None
+    if warnings:
+        try:
+            warnings_json = json.dumps(warnings)
+        except TypeError:
+            warnings_json = json.dumps([str(w) for w in warnings])
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     max_retries = 3
@@ -412,6 +451,9 @@ def update_data(
                     last_error=last_error,
                     payload=normalized_kwargs,
                     updated_at=timestamp,
+                    registers_blob=registers_json,
+                    alarms_blob=alarms_json,
+                    warnings_blob=warnings_json,
                 )
 
                 _append_history_tx(
@@ -420,11 +462,16 @@ def update_data(
                     slave_id=slave_id,
                     payload=normalized_kwargs,
                     timestamp=timestamp,
+                    alarms_blob=alarms_json,
+                    warnings_blob=warnings_json,
                 )
 
                 try:
                     _update_registers_snapshot_tx(
-                        conn, normalized_kwargs, device_id=device_id, timestamp=timestamp
+                        conn,
+                        registers or normalized_kwargs,
+                        device_id=device_id,
+                        timestamp=timestamp,
                     )
                 except Exception as exc:  # noqa: BLE001 - логируем и продолжаем
                     logging.warning(f"⚠️ Не удалось обновить KV регистры: {exc}")
@@ -460,6 +507,9 @@ def _insert_or_update_latest(
     last_error: Optional[str],
     payload: Dict[str, Any],
     updated_at: str,
+    registers_blob: Optional[str],
+    alarms_blob: Optional[str],
+    warnings_blob: Optional[str],
 ) -> None:
     columns: List[str] = ["device_id", "updated_at"]
     values: List[Any] = [device_id, updated_at]
@@ -474,6 +524,9 @@ def _insert_or_update_latest(
     _push("device_type", device_type)
     _push("connection_status", connection_status)
     _push("last_error", last_error)
+    _push(REGISTERS_COLUMN, registers_blob)
+    _push(ALARMS_COLUMN, alarms_blob)
+    _push(WARNINGS_COLUMN, warnings_blob)
 
     for field, value in payload.items():
         columns.append(field)
@@ -498,6 +551,8 @@ def _append_history_tx(
     slave_id: Optional[int],
     payload: Dict[str, Any],
     timestamp: str,
+    alarms_blob: Optional[str],
+    warnings_blob: Optional[str],
 ) -> None:
     if not payload:
         return
@@ -512,6 +567,14 @@ def _append_history_tx(
     for field, value in payload.items():
         columns.append(field)
         values.append(value)
+
+    if alarms_blob is not None:
+        columns.append(ALARMS_COLUMN)
+        values.append(alarms_blob)
+
+    if warnings_blob is not None:
+        columns.append(WARNINGS_COLUMN)
+        values.append(warnings_blob)
 
     placeholders = ", ".join("?" for _ in columns)
     conn.execute(
@@ -633,7 +696,13 @@ def add_history_record(*, device_id: int, slave_id: Optional[int] = None, **payl
 
 def read_data(device_id: Optional[int] = None) -> Dict[str, Any]:
     """Read latest snapshot for a specific device (defaults to first)."""
-    columns = ["device_id", "slave_id", "device_type", "connection_status", "last_error"] + ALL_FIELDS + ["updated_at"]
+    columns = [
+        "device_id",
+        "slave_id",
+        "device_type",
+        "connection_status",
+        "last_error",
+    ] + ALL_FIELDS + [REGISTERS_COLUMN, ALARMS_COLUMN, WARNINGS_COLUMN, "updated_at"]
     query_columns = ", ".join(columns)
     sql = SELECT_SQL_TEMPLATE.format(columns=query_columns)
 
@@ -653,6 +722,28 @@ def read_data(device_id: Optional[int] = None) -> Dict[str, Any]:
                 if not row:
                     return {}
                 data = dict(row)
+                registers_blob = data.pop(REGISTERS_COLUMN, None)
+                if isinstance(registers_blob, str) and registers_blob:
+                    try:
+                        registers_payload = json.loads(registers_blob)
+                    except Exception:
+                        registers_payload = {}
+                    if isinstance(registers_payload, dict):
+                        data["registers"] = registers_payload
+                        for key, value in registers_payload.items():
+                            data.setdefault(key, value)
+                alarms_blob = data.pop(ALARMS_COLUMN, None)
+                warnings_blob = data.pop(WARNINGS_COLUMN, None)
+                if isinstance(alarms_blob, str) and alarms_blob:
+                    try:
+                        data["alarms"] = json.loads(alarms_blob)
+                    except Exception:
+                        data["alarms"] = []
+                if isinstance(warnings_blob, str) and warnings_blob:
+                    try:
+                        data["warnings"] = json.loads(warnings_blob)
+                    except Exception:
+                        data["warnings"] = []
                 updated_at = data.get("updated_at")
                 if isinstance(updated_at, datetime):
                     data["updated_at"] = updated_at.isoformat()
@@ -687,6 +778,28 @@ def read_all_devices() -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
         for row in rows:
             item = dict(row)
+            registers_blob = item.pop(REGISTERS_COLUMN, None)
+            if isinstance(registers_blob, str) and registers_blob:
+                try:
+                    registers_payload = json.loads(registers_blob)
+                except Exception:
+                    registers_payload = {}
+                if isinstance(registers_payload, dict):
+                    item["registers"] = registers_payload
+                    for key, value in registers_payload.items():
+                        item.setdefault(key, value)
+            alarms_blob = item.pop(ALARMS_COLUMN, None)
+            warnings_blob = item.pop(WARNINGS_COLUMN, None)
+            if isinstance(alarms_blob, str) and alarms_blob:
+                try:
+                    item["alarms"] = json.loads(alarms_blob)
+                except Exception:
+                    item["alarms"] = []
+            if isinstance(warnings_blob, str) and warnings_blob:
+                try:
+                    item["warnings"] = json.loads(warnings_blob)
+                except Exception:
+                    item["warnings"] = []
             updated_at = item.get("updated_at")
             if isinstance(updated_at, datetime):
                 item["updated_at"] = updated_at.isoformat()

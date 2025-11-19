@@ -26,6 +26,7 @@ import os
 import pty
 import re
 import select
+import subprocess
 import sys
 import termios
 import time
@@ -111,6 +112,23 @@ class KUBMap(BaseMap):
             0x0087: 0,      # grv_base
             0x0088: 0,      # grv_tunnel
             0x0089: 450,    # damper (45.0%)
+            0x008A: 100,    # air_intake_1
+            0x008B: 200,    # air_intake_2
+            0x008C: 300,    # air_intake_tunnel
+            0x0092: 400,
+            0x0093: 500,
+            0x0094: 0,
+            0x0095: 0,
+            0x0096: 0,
+            0x0097: 0,
+            0x0098: 0,
+            0x0099: 0,
+            0x009A: 0,
+            0x009B: 0,
+            0x009C: 0,
+            0x009D: 0,
+            0x009E: 0,
+            0x009F: 0,
 
             # Digital outputs bitfields
             0x0081: 0,      # digital_outputs_1
@@ -207,6 +225,7 @@ def run_bus(
     kub1112_ids: List[int],
     rfd: int | None = None,
     wfd: int | None = None,
+    display_port: str | None = None,
 ) -> int:
     # If rfd/wfd provided, use stdin/stdout; otherwise create PTY pair
     if rfd is None or wfd is None:
@@ -233,9 +252,10 @@ def run_bus(
     for sid in kub1112_ids:
         devices.setdefault(sid, KUB1112Map())
 
+    port_label = display_port or slave_name
     print("─" * 80)
     print("🚌 RTU BUS симулятор (один порт, несколько устройств)")
-    print(f"• Порт: {slave_name}")
+    print(f"• Порт: {port_label}")
     if vfd_ids:
         print(f"• VFD IDs: {vfd_ids}")
     if kub_ids:
@@ -310,15 +330,42 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--kub", default="1-6", help="KUB-1063 slave IDs (e.g. '1-6')")
     ap.add_argument("--kub1112", default="", help="KUB-1112 slave IDs")
     ap.add_argument("--stdio", action="store_true", help="Use stdin/stdout instead of creating PTY (for use with socat link)")
+    ap.add_argument("--port", help="Bind to fixed PTY path (requires write access)")
     args = ap.parse_args(argv)
 
     vfd_ids = parse_id_ranges(args.vfd) if args.vfd else []
     kub_ids = parse_id_ranges(args.kub) if args.kub else []
     kub1112_ids = parse_id_ranges(args.kub1112) if args.kub1112 else []
     if args.stdio:
-        return run_bus(vfd_ids, kub_ids, kub1112_ids, rfd=sys.stdin.fileno(), wfd=sys.stdout.fileno())
-    else:
-        return run_bus(vfd_ids, kub_ids, kub1112_ids)
+        return run_bus(
+            vfd_ids,
+            kub_ids,
+            kub1112_ids,
+            rfd=sys.stdin.fileno(),
+            wfd=sys.stdout.fileno(),
+            display_port="<stdio>",
+        )
+    if args.port:
+        # Use socat to create a PTY symlink to a fixed path
+        temp_link = args.port
+        tmp_command = [
+            "socat",
+            f"pty,link={temp_link},raw,echo=0,wait-slave=0",
+            "STDIO",
+        ]
+        print(f"⚙️ Создаём PTY ссылку {args.port} через socat…")
+        # Spawn socat and run simulator using its stdio
+        with subprocess.Popen(tmp_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as proc:
+            assert proc.stdin and proc.stdout
+            return run_bus(
+                vfd_ids,
+                kub_ids,
+                kub1112_ids,
+                rfd=proc.stdout.fileno(),
+                wfd=proc.stdin.fileno(),
+                display_port=args.port,
+            )
+    return run_bus(vfd_ids, kub_ids, kub1112_ids)
 
 
 if __name__ == "__main__":

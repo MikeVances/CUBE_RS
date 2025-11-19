@@ -16,6 +16,7 @@ pydantic==2.5.0
 
 # Dashboard & visualization
 streamlit>=1.28.0
+streamlit-autorefresh>=0.1.0
 
 # Industrial protocols
 pymodbus>=3.5.0

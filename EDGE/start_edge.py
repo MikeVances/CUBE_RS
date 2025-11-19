@@ -19,9 +19,8 @@ sys.path.insert(0, str(EDGE_DIR))
 os.chdir(PROJECT_ROOT)
 
 # Provide safe defaults so config validation doesn't fail when Telegram is disabled
-if os.getenv("TELEGRAM_BOT_TOKEN") is None:
+if os.getenv("EDGE_USE_DUMMY_TELEGRAM_TOKEN"):
     os.environ.setdefault("TELEGRAM_BOT_TOKEN", "dummy-edge-startup")
-    os.environ.setdefault("TELEGRAM_ENV_OVERRIDE", "true")
 
 # After chdir we can reference config relative to root
 from core.config_manager import get_config, reload_config

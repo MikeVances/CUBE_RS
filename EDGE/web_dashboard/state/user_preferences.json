@@ -1,0 +1,72 @@
+{
+  "rooms": {
+    "Птичник-1": {
+      "1": [
+        "co2",
+        "humidity",
+        "temp_inside",
+        "temp_target",
+        "ventilation_level",
+        "ventilation_target"
+      ],
+      "2": [
+        "igbt_temperature",
+        "output_current",
+        "output_power",
+        "output_voltage",
+        "running_frequency",
+        "running_state",
+        "set_frequency"
+      ],
+      "3": [
+        "flame_level",
+        "flame_present",
+        "min_work_time",
+        "operation_mode",
+        "pressure",
+        "purge_duration",
+        "start_delay",
+        "temp_inside",
+        "temp_target"
+      ]
+    },
+    "Птичник-2": {
+      "3": [
+        "pressure",
+        "temp_inside",
+        "temp_target"
+      ]
+    },
+    "Птичник-3": {
+      "4": [
+        "pressure",
+        "temp_inside",
+        "temp_target"
+      ]
+    },
+    "Без помещения": {
+      "1": [
+        "damper",
+        "humidity",
+        "temp_inside",
+        "temp_target",
+        "ventilation_level"
+      ],
+      "2": [
+        "output_current",
+        "running_frequency",
+        "running_speed"
+      ],
+      "3": [
+        "flame_level",
+        "operation_mode",
+        "temp_inside",
+        "temp_target"
+      ]
+    }
+  },
+  "auto_refresh": {
+    "enabled": true,
+    "interval": 60
+  }
+}

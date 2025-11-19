@@ -105,7 +105,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="running_state",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="1=forward, 2=reverse, 3=stop"
+                description="Состояние привода: 1 — вперёд, 2 — назад, 3 — стоп"
             ),
 
             # U0-01: Fault Code
@@ -114,7 +114,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="fault_code",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Current fault code"
+                description="Текущий код аварии"
             ),
 
             # U0-02: Set Frequency
@@ -124,7 +124,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Hz",
                 scale=0.1,
-                description="Target frequency setting"
+                description="Заданное значение частоты"
             ),
 
             # U0-03: Running Frequency
@@ -134,7 +134,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Hz",
                 scale=0.1,
-                description="Current running frequency"
+                description="Фактическая рабочая частота"
             ),
 
             # U0-04: Running Speed
@@ -143,7 +143,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="running_speed",
                 value_type=ValueType.INTEGER,
                 unit="RPM",
-                description="Motor speed in RPM"
+                description="Скорость двигателя, об/мин"
             ),
 
             # U0-05: Output Voltage
@@ -153,7 +153,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="V",
                 scale=1.0,
-                description="Output voltage to motor"
+                description="Выходное напряжение на двигатель"
             ),
 
             # U0-06: Output Current
@@ -163,7 +163,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="A",
                 scale=0.1,
-                description="Output current to motor"
+                description="Выходной ток на двигатель"
             ),
 
             # U0-07: Output Power
@@ -173,7 +173,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="kW",
                 scale=0.1,
-                description="Output power"
+                description="Выходная мощность"
             ),
 
             # U0-08: DC Bus Voltage
@@ -183,7 +183,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="V",
                 scale=1.0,
-                description="DC bus voltage"
+                description="Напряжение звена постоянного тока"
             ),
 
             # U0-09: Output Torque
@@ -193,7 +193,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Nm",
                 scale=0.1,
-                description="Motor output torque"
+                description="Момент на валу двигателя"
             ),
 
             # U0-10: Power Factor Angle
@@ -202,7 +202,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="power_factor_angle",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Power factor angle"
+                description="Угол сдвига фаз (cos φ)"
             ),
 
             # U0-11: DI Input State
@@ -211,7 +211,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="di_input_state",
                 value_type=ValueType.BITFIELD,
                 unit=None,
-                description="Digital input state (0=default, DI1_valid when set1)"
+                description="Состояние дискретных входов (битовое поле)"
             ),
 
             # U0-13: AI1 Voltage Before Correction
@@ -221,7 +221,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="V",
                 scale=0.01,
-                description="AI1 voltage before correction"
+                description="Напряжение AI1 до коррекции"
             ),
 
             # U0-15: AI1 Voltage
@@ -231,7 +231,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="V",
                 scale=0.01,
-                description="AI1 voltage after correction"
+                description="Напряжение AI1 после коррекции"
             ),
 
             # U0-17: PID Setting
@@ -240,7 +240,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="pid_setting",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="PID setting value"
+                description="Уставка PID-регулятора"
             ),
 
             # U0-18: PID Feedback
@@ -249,7 +249,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="pid_feedback",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="PID feedback value"
+                description="Обратная связь PID-регулятора"
             ),
 
             # U0-19: Remaining Running Time
@@ -259,7 +259,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Min",
                 scale=0.1,
-                description="Remaining running time"
+                description="Оставшееся время работы, мин"
             ),
 
             # U0-20: Current Power-on Time
@@ -268,7 +268,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="current_power_on_time",
                 value_type=ValueType.INTEGER,
                 unit="Min",
-                description="Current power-on time"
+                description="Время текущего включения, мин"
             ),
 
             # U0-21: Current Running Time
@@ -278,7 +278,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Min",
                 scale=0.1,
-                description="Current running time"
+                description="Длительность текущего цикла, мин"
             ),
 
             # U0-22: Cumulative Running Time
@@ -287,7 +287,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="cumulative_running_time",
                 value_type=ValueType.INTEGER,
                 unit="Hour",
-                description="Total accumulated running time"
+                description="Суммарное время работы, ч"
             ),
 
             # U0-23: Accumulated Power-on Time
@@ -296,7 +296,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="accumulated_power_on_time",
                 value_type=ValueType.INTEGER,
                 unit="Hour",
-                description="Total accumulated power-on time"
+                description="Суммарное время включений, ч"
             ),
 
             # U0-24: Cumulative Power Consumption
@@ -306,7 +306,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="kWh",
                 scale=1.0,
-                description="Total power consumption"
+                description="Накопленное энергопотребление, кВт·ч"
             ),
 
             # U0-25: Motor Temperature Value
@@ -317,7 +317,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 unit="°C",
                 scale=1.0,
                 signed=True,
-                description="Motor temperature"
+                description="Температура двигателя"
             ),
 
             # U0-26: IGBT Temperature Value
@@ -328,7 +328,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 unit="°C",
                 scale=1.0,
                 signed=True,
-                description="IGBT (heatsink) temperature"
+                description="Температура модуля IGBT / радиатора"
             ),
 
             # U0-27: Actual Switching Frequency
@@ -338,7 +338,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="kHz",
                 scale=0.1,
-                description="Actual PWM switching frequency"
+                description="Фактическая частота ШИМ"
             ),
 
             # U0-28: M-axis Current Actual Value
@@ -348,7 +348,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="A",
                 scale=0.1,
-                description="M-axis current (torque component)"
+                description="Ток по оси M (моментная составляющая)"
             ),
 
             # U0-29: T-axis Current Actual Value
@@ -358,7 +358,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="A",
                 scale=0.1,
-                description="T-axis current (flux component)"
+                description="Ток по оси T (потоковая составляющая)"
             ),
 
             # U0-30: Feedback Speed Actual Value
@@ -367,7 +367,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="feedback_speed",
                 value_type=ValueType.INTEGER,
                 unit="Hz",
-                description="Encoder feedback speed"
+                description="Скорость по обратной связи энкодера"
             ),
 
             # === DEVICE INFORMATION ===
@@ -378,7 +378,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="serial_number_low",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Product serial number (lower 16 digits)"
+                description="Серийный номер (младшие 16 бит)"
             ),
 
             # U0-43: Product Serial Number Higher 16 Digits
@@ -387,7 +387,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="serial_number_high",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Product serial number (higher 16 digits)"
+                description="Серийный номер (старшие 16 бит)"
             ),
 
             # U0-44: Motor Boot Version
@@ -396,7 +396,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="motor_boot_version",
                 value_type=ValueType.VERSION,
                 unit=None,
-                description="Motor boot firmware version"
+                description="Версия загрузчика двигателя"
             ),
 
             # U0-45: CPU Type
@@ -405,7 +405,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="cpu_type",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="CPU type identifier"
+                description="Идентификатор типа CPU"
             ),
 
             # U0-46: Power Board Hardware Version
@@ -414,7 +414,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="power_board_hw_version",
                 value_type=ValueType.VERSION,
                 unit=None,
-                description="Power board hardware version"
+                description="Версия аппаратной части силовой платы"
             ),
 
             # U0-47: Power Board Software Version
@@ -423,7 +423,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="power_board_sw_version",
                 value_type=ValueType.VERSION,
                 unit=None,
-                description="Power board software version"
+                description="Версия ПО силовой платы"
             ),
 
             # U0-48: Control Board Software Version
@@ -432,7 +432,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="control_board_sw_version",
                 value_type=ValueType.VERSION,
                 unit=None,
-                description="Control board software version"
+                description="Версия ПО управляющей платы"
             ),
 
             # U0-49: Product Number
@@ -441,7 +441,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="product_number",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Product model number"
+                description="Код модели привода"
             ),
 
             # U0-50: Manufacturer Code
@@ -450,7 +450,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="manufacturer_code",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Manufacturer identification code"
+                description="Код производителя"
             ),
 
             # === FAULT HISTORY (Last 3 Faults) ===
@@ -461,7 +461,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="fault_third_code",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Most recent fault code"
+                description="Последний (третий) код аварии"
             ),
 
             # U0-52: Second Fault Code
@@ -470,7 +470,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="fault_second_code",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Second most recent fault code"
+                description="Предыдущий (второй) код аварии"
             ),
 
             # U0-53: First Fault Code
@@ -479,7 +479,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="fault_first_code",
                 value_type=ValueType.INTEGER,
                 unit=None,
-                description="Oldest of last three fault codes"
+                description="Самый ранний код из последних трёх аварий"
             ),
 
             # === THIRD FAULT DETAILS ===
@@ -490,7 +490,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Hz",
                 scale=0.1,
-                description="Frequency at third fault"
+                description="Частота при третьей аварии"
             ),
 
             "fault_third_current": RegisterInfo(
@@ -499,7 +499,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="A",
                 scale=0.1,
-                description="Current at third fault"
+                description="Ток при третьей аварии"
             ),
 
             "fault_third_dc_voltage": RegisterInfo(
@@ -508,7 +508,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="V",
                 scale=0.1,
-                description="DC bus voltage at third fault"
+                description="Напряжение звена DC при третьей аварии"
             ),
 
             "fault_third_temperature": RegisterInfo(
@@ -518,7 +518,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 unit="°C",
                 scale=1.0,
                 signed=True,
-                description="Heatsink temperature at third fault"
+                description="Температура радиатора при третьей аварии"
             ),
 
             "fault_third_time_power_on": RegisterInfo(
@@ -526,7 +526,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="fault_third_time_power_on",
                 value_type=ValueType.INTEGER,
                 unit="Min",
-                description="Power-on time when third fault occurred"
+                description="Накопленное время включения к моменту 3-й аварии"
             ),
 
             "fault_third_time_running": RegisterInfo(
@@ -535,7 +535,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Hour",
                 scale=0.1,
-                description="Running time when third fault occurred"
+                description="Накопленное время работы к моменту 3-й аварии"
             ),
 
             # === SECOND FAULT DETAILS ===
@@ -546,7 +546,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Hz",
                 scale=0.1,
-                description="Frequency at second fault"
+                description="Частота при второй аварии"
             ),
 
             "fault_second_current": RegisterInfo(
@@ -555,7 +555,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="A",
                 scale=0.1,
-                description="Current at second fault"
+                description="Ток при второй аварии"
             ),
 
             "fault_second_dc_voltage": RegisterInfo(
@@ -564,7 +564,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="V",
                 scale=0.1,
-                description="DC bus voltage at second fault"
+                description="Напряжение звена DC при второй аварии"
             ),
 
             "fault_second_temperature": RegisterInfo(
@@ -574,7 +574,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 unit="°C",
                 scale=1.0,
                 signed=True,
-                description="Heatsink temperature at second fault"
+                description="Температура радиатора при второй аварии"
             ),
 
             "fault_second_time_power_on": RegisterInfo(
@@ -582,7 +582,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="fault_second_time_power_on",
                 value_type=ValueType.INTEGER,
                 unit="Min",
-                description="Power-on time when second fault occurred"
+                description="Накопленное время включения к моменту 2-й аварии"
             ),
 
             "fault_second_time_running": RegisterInfo(
@@ -591,7 +591,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Hour",
                 scale=0.1,
-                description="Running time when second fault occurred"
+                description="Накопленное время работы к моменту 2-й аварии"
             ),
 
             # === FIRST FAULT DETAILS ===
@@ -602,7 +602,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Hz",
                 scale=0.1,
-                description="Frequency at first fault"
+                description="Частота при первой аварии"
             ),
 
             "fault_first_current": RegisterInfo(
@@ -611,7 +611,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="A",
                 scale=0.1,
-                description="Current at first fault"
+                description="Ток при первой аварии"
             ),
 
             "fault_first_dc_voltage": RegisterInfo(
@@ -620,7 +620,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="V",
                 scale=0.1,
-                description="DC bus voltage at first fault"
+                description="Напряжение звена DC при первой аварии"
             ),
 
             "fault_first_temperature": RegisterInfo(
@@ -630,7 +630,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 unit="°C",
                 scale=1.0,
                 signed=True,
-                description="Heatsink temperature at first fault"
+                description="Температура радиатора при первой аварии"
             ),
 
             "fault_first_time_power_on": RegisterInfo(
@@ -638,7 +638,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 name="fault_first_time_power_on",
                 value_type=ValueType.INTEGER,
                 unit="Min",
-                description="Power-on time when first fault occurred"
+                description="Накопленное время включения к моменту 1-й аварии"
             ),
 
             "fault_first_time_running": RegisterInfo(
@@ -647,7 +647,7 @@ class VFDInverterAdapter(DeviceAdapter):
                 value_type=ValueType.FLOAT,
                 unit="Hour",
                 scale=0.1,
-                description="Running time when first fault occurred"
+                description="Накопленное время работы к моменту 1-й аварии"
             ),
         }
 

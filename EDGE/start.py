@@ -23,10 +23,9 @@ from typing import Any, Dict, List, Optional
 EDGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = EDGE_DIR.parent
 
-# Provide safe defaults to avoid config validation failures when Telegram is disabled
-if os.getenv("TELEGRAM_BOT_TOKEN") is None:
+ENABLE_TELEGRAM_PLACEHOLDER = os.getenv("EDGE_USE_DUMMY_TELEGRAM_TOKEN")
+if ENABLE_TELEGRAM_PLACEHOLDER:
     os.environ.setdefault("TELEGRAM_BOT_TOKEN", "dummy-edge-startup")
-    os.environ.setdefault("TELEGRAM_ENV_OVERRIDE", "true")
 
 # Ensure working directory is project root so runtime artifacts land in predictable place
 os.chdir(PROJECT_ROOT)
@@ -472,6 +471,8 @@ class EDGEService:
                     try:
                         if data and data.get("connection_status") in {"connected", "partial"}:
                             success = True
+                            alarms_list = data.get("alarms")
+                            warnings_list = data.get("warnings")
                             excluded = {
                                 "connection_status",
                                 "error",
@@ -501,6 +502,9 @@ class EDGEService:
                                 device_type=device.device_type.value,
                                 connection_status=data.get("connection_status"),
                                 last_error=data.get("error"),
+                                registers=registers_payload,
+                                alarms=alarms_list,
+                                warnings=warnings_list,
                                 **payload,
                             )
                             logger.debug("💾 Данные сохранены в базу для устройства %s", device.device_id)

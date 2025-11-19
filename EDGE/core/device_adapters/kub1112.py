@@ -113,41 +113,41 @@ class KUB1112Adapter(DeviceAdapter):
             # Основные параметры пламени
             VariableReference(
                 name="flame_level", register_address=0x0400, type_id=1,
-                description="Уровень пламени в %"
+                description="Уровень пламени в камере, %"
             ),
             VariableReference(
                 name="flame_present", register_address=0x0401, type_id=2,
-                description="Флаг наличия пламени"
+                description="Пламя обнаружено (1 — да, 0 — нет)"
             ),
             
             # Настройки времени (потенциометры)
             VariableReference(
                 name="min_work_time", register_address=0x0402, type_id=3,
-                description="Минимальное время работы"
+                description="Минимальное время непрерывной работы, с"
             ),
             VariableReference(
                 name="start_delay", register_address=0x0403, type_id=3,
-                description="Задержка включения"
+                description="Задержка запуска после включения, с"
             ),
             VariableReference(
                 name="purge_duration", register_address=0x0404, type_id=3,
-                description="Продолжительность продувки"
+                description="Длительность продувки камеры, с"
             ),
             
             # Температурный датчик
             VariableReference(
                 name="temperature", register_address=0x0405, type_id=4,
-                description="Показание датчика температуры"
+                description="Температура корпуса обогревателя, °C"
             ),
             VariableReference(
                 name="temp_resistance", register_address=0x0406, type_id=5,
-                description="Сопротивление датчика температуры"
+                description="Сопротивление термодатчика корпуса, Ом"
             ),
             
             # Состояния (битовые поля)
             VariableReference(
                 name="relay_state", register_address=0x0407, type_id=6,
-                description="Состояние реле управления"
+                description="Состояние исполнительных реле"
             ),
             VariableReference(
                 name="discrete_inputs", register_address=0x0408, type_id=6,
@@ -157,7 +157,7 @@ class KUB1112Adapter(DeviceAdapter):
             # Режим работы
             VariableReference(
                 name="operation_mode", register_address=0x0409, type_id=7,
-                description="Режим работы системы"
+                description="Активный режим работы обогревателя"
             ),
             
             # Аварийные регистры

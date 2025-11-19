@@ -197,12 +197,6 @@ def _maybe_store_metric(
 ):
     """Добавляет показание, если оно пригодно для отображения."""
 
-    if metric_value is None:
-        return
-
-    if isinstance(metric_value, (dict, list, tuple, set)):
-        return
-
     dtype_key = device.device_type.value
     allowed_keys = _DEVICE_METRIC_CACHE.setdefault(
         dtype_key,
@@ -213,6 +207,18 @@ def _maybe_store_metric(
         if metric_key not in allowed_keys:
             return
 
+    meta_bucket = snapshot.metric_metadata.setdefault(device.device_id, {})
+    if metric_key not in meta_bucket:
+        meta = _get_metric_meta_for_device(device).get(metric_key)
+        if meta:
+            meta_bucket[metric_key] = meta
+
+    if metric_value is None:
+        return
+
+    if isinstance(metric_value, (dict, list, tuple, set)):
+        return
+
     # Всегда сохраняем показание в разрезе конкретного устройства
     record = MetricRecord(
         value=metric_value,
@@ -222,12 +228,6 @@ def _maybe_store_metric(
     )
     device_bucket = snapshot.device_metrics.setdefault(device.device_id, {})
     device_bucket[metric_key] = record
-
-    meta_bucket = snapshot.metric_metadata.setdefault(device.device_id, {})
-    if metric_key not in meta_bucket:
-        meta = _get_metric_meta_for_device(device).get(metric_key)
-        if meta:
-            meta_bucket[metric_key] = meta
 
     current_record = snapshot.metrics.get(metric_key)
     should_replace = False

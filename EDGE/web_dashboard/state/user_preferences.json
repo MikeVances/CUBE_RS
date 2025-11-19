@@ -54,8 +54,7 @@
       ],
       "2": [
         "output_current",
-        "running_frequency",
-        "running_speed"
+        "running_frequency"
       ],
       "3": [
         "flame_level",
@@ -66,7 +65,7 @@
     }
   },
   "auto_refresh": {
-    "enabled": true,
+    "enabled": false,
     "interval": 60
   }
 }

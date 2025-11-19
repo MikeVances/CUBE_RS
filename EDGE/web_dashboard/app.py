@@ -662,7 +662,7 @@ def render_device_cards(room: RoomSnapshot, device_payloads: Dict[int, Dict[str,
 
         metric_keys = DEVICE_METRICS.get(device.device_type.value)
         if not metric_keys:
-            metric_keys = list(key for key in payload.keys() if key in METRIC_DESCRIPTORS)
+            metric_keys = list(payload.keys())
         if not metric_keys:
             st.write("Нет описанных метрик для отображения")
             st.markdown("</div>", unsafe_allow_html=True)
@@ -699,8 +699,8 @@ def render_room_settings(
         payload = device_payloads.get(device.device_id, {})
         device_snapshot = device_metric_records.get(device.device_id, {})
         available_keys = set(DEVICE_METRICS.get(device.device_type.value, []))
-        available_keys |= {key for key in payload.keys() if key in METRIC_DESCRIPTORS}
-        available_keys |= {key for key in device_snapshot.keys() if key in METRIC_DESCRIPTORS}
+        available_keys |= set(payload.keys())
+        available_keys |= set(device_snapshot.keys())
         available_keys -= ALWAYS_ON_METRICS
         available_keys -= DEVICE_STATUS_FIELDS
 
@@ -711,11 +711,10 @@ def render_room_settings(
         with st.expander(f"{device.name} · {device.device_type.value}", expanded=False):
             device_selection: List[str] = []
             for key in sorted(available_keys):
-                descriptor = METRIC_DESCRIPTORS.get(key, MetricDescriptor(key, key))
                 checkbox_key = f"pref::{room.room}::{device.device_id}::{key}"
                 if checkbox_key not in st.session_state:
                     st.session_state[checkbox_key] = key in current_selection
-                checked = st.checkbox(descriptor.label, key=checkbox_key)
+                checked = st.checkbox(resolve_metric_label(room, device, key), key=checkbox_key)
                 if checked:
                     device_selection.append(key)
 

@@ -51,11 +51,69 @@
     },
     "Без помещения": {
       "1": [
-        "damper",
         "humidity",
         "temp_inside",
         "temp_target",
         "ventilation_level"
+      ],
+      "2": [
+        "co2",
+        "humidity",
+        "pressure",
+        "temp_inside",
+        "temp_target",
+        "ventilation_level",
+        "ventilation_target"
+      ],
+      "3": [
+        "igbt_temperature",
+        "output_current",
+        "output_power",
+        "output_voltage",
+        "running_frequency",
+        "running_state",
+        "set_frequency"
+      ],
+      "4": [
+        "temp_inside",
+        "humidity",
+        "co2",
+        "pressure"
+      ]
+    },
+    "Птичник 1": {
+      "1": [
+        "co2",
+        "humidity",
+        "pressure",
+        "temp_inside",
+        "temp_target",
+        "ventilation_level",
+        "ventilation_target"
+      ],
+      "2": [
+        "co2",
+        "humidity",
+        "pressure",
+        "temp_inside",
+        "temp_target",
+        "ventilation_level",
+        "ventilation_target"
+      ],
+      "3": [
+        "igbt_temperature",
+        "output_current",
+        "output_power",
+        "output_voltage",
+        "running_frequency",
+        "running_state",
+        "set_frequency"
+      ],
+      "4": [
+        "temp_inside",
+        "humidity",
+        "co2",
+        "pressure"
       ]
     }
   },

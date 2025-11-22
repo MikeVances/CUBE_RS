@@ -10,7 +10,8 @@ import streamlit as st
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from core.device_registry import DeviceRegistry, DeviceInfo
+from core.device_registry import DeviceRegistry, DeviceInfo, DeviceType
+from core.device_adapters.factory import get_device_metric_metadata
 
 
 @dataclass(frozen=True)
@@ -22,37 +23,23 @@ class DeviceMetricConfig:
     format_spec: Optional[str] = ".1f"
 
 
-DEVICE_METRIC_CONFIGS: Dict[str, List[DeviceMetricConfig]] = {
-    "KUB-1063": [
-        DeviceMetricConfig("temp_inside", "Температура", "°C"),
-        DeviceMetricConfig("temp_target", "Целевая", "°C"),
-        DeviceMetricConfig("humidity", "Влажность", "%", scale=10.0),
-        DeviceMetricConfig("pressure", "Давление", " Pa", scale=10.0),
-        DeviceMetricConfig("co2", "CO₂", " ppm", format_spec=".0f"),
-        DeviceMetricConfig("ventilation_level", "Вентиляция", "%", format_spec=".0f"),
-        DeviceMetricConfig("active_alarms", "Активные тревоги", "", format_spec=".0f"),
-    ],
-    "KUB-1112": [
-        DeviceMetricConfig("temp_inside", "Температура", "°C"),
-        DeviceMetricConfig("temp_target", "Целевая", "°C"),
-        DeviceMetricConfig("output_power", "Мощность", " kW"),
-        DeviceMetricConfig("active_alarms", "Аварии", "", format_spec=".0f"),
-    ],
-    "VFD-INVERTER": [
-        DeviceMetricConfig("set_frequency", "Set freq", " Hz"),
-        DeviceMetricConfig("running_frequency", "Run freq", " Hz"),
-        DeviceMetricConfig("output_current", "Ток", " A"),
-        DeviceMetricConfig("igbt_temperature", "IGBT", "°C", format_spec=".0f"),
-        DeviceMetricConfig("output_voltage", "Напряжение", " V"),
-        DeviceMetricConfig("running_state", "Состояние", "", format_spec=None),
-    ],
-}
 
-DEFAULT_DEVICE_METRICS: Dict[str, List[str]] = {
-    "KUB-1063": ["temp_inside", "temp_target", "humidity", "pressure"],
-    "KUB-1112": ["temp_inside", "temp_target", "output_power", "active_alarms"],
-    "VFD-INVERTER": ["set_frequency", "running_frequency", "output_current", "igbt_temperature"],
-}
+@st.cache_resource(show_spinner=False)
+def _build_metric_configs(device_type_value: str) -> List[DeviceMetricConfig]:
+    try:
+        dtype = DeviceType(device_type_value)
+    except Exception:
+        return []
+    metadata = get_device_metric_metadata(dtype)
+    if not metadata:
+        return []
+    configs: List[DeviceMetricConfig] = []
+    for key in sorted(metadata.keys()):
+        meta = metadata.get(key) or {}
+        label = meta.get("label") or key
+        unit = meta.get("unit") or ""
+        configs.append(DeviceMetricConfig(key, label, unit))
+    return configs
 
 
 @st.cache_resource(show_spinner=False)
@@ -105,14 +92,14 @@ def format_metric_value(data: dict, cfg: DeviceMetricConfig) -> str:
 
 
 def pick_metric_configs(device_id: int, device_type: str) -> List[DeviceMetricConfig]:
-    configs = DEVICE_METRIC_CONFIGS.get(device_type, [])
+    configs = _build_metric_configs(device_type)
     if not configs:
         return []
 
     state_key = f"device_detail_metrics::{device_id}"
     selected_keys = st.session_state.get(state_key)
     if not selected_keys:
-        selected_keys = DEFAULT_DEVICE_METRICS.get(device_type) or [cfg.key for cfg in configs[:4]]
+        selected_keys = [cfg.key for cfg in configs[:4]] or [cfg.key for cfg in configs]
         st.session_state[state_key] = selected_keys
 
     updated_selection: List[str] = []

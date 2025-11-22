@@ -3,10 +3,10 @@
   poll_interval: 20.0
   autoscan_probes:
     - kind: "input"
-      address: 0x0301
+      address: 0x0083
       require_non_zero: true
     - kind: "input"
-      address: 0x0302
+      address: 0x0084
       require_non_zero: true
 - type: "KUB-1112"
   adapter: "core.device_adapters.kub1112.KUB1112Adapter"

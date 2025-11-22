@@ -8,9 +8,11 @@ import atexit
 import asyncio
 import logging
 import os
+import secrets
 import sqlite3
 import sys
 import time
+from html import escape
 from contextlib import suppress
 from pathlib import Path
 from typing import Optional, Tuple
@@ -59,7 +61,7 @@ from core.telegram.bot_utils import (
 )
 
 # Telegram Bot imports
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.error import TimedOut
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -67,6 +69,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from core.telegram.bot_database import TelegramBotDB
 from core.device_registry import DeviceRegistry
 from core.utils.paths import resolve_under_root
+from core.user_registry import UserRegistry
 
 # Настройка логирования из конфига
 log_file = config.config_dir / "logs" / "telegram.log"
@@ -168,6 +171,11 @@ class KUBTelegramBot:
         self.primary_device_id = devices[0].device_id if devices else 1
         self.primary_device = devices[0] if devices else None
         self.bot_db = TelegramBotDB()
+        try:
+            self.user_registry = UserRegistry()
+        except Exception as exc:
+            logger.warning(f"⚠️ Не удалось инициализировать UserRegistry: {exc}")
+            self.user_registry = None
 
         # Telegram Application
         self.application = None
@@ -191,6 +199,33 @@ class KUBTelegramBot:
     def request_shutdown(self) -> None:
         """Инициировать мягкое завершение работы бота."""
         self._shutdown_event.set()
+
+    # =============================================================
+    # EDGE user registry sync
+    # =============================================================
+
+    def _sync_edge_user(self, tg_user, level: str) -> Optional[str]:
+        if not self.user_registry:
+            return None
+        role = level if level in {"user", "operator", "engineer", "admin"} else "user"
+        try:
+            edge_user = self.user_registry.get_user_by_telegram(tg_user.id)
+            if edge_user:
+                if edge_user.role != role:
+                    self.user_registry.update_user(edge_user.id, role=role)
+                return None
+            display_name = tg_user.first_name or tg_user.username or str(tg_user.id)
+            temp_pin = f"{secrets.randbelow(9000) + 1000:04d}"
+            self.user_registry.create_user(
+                display_name,
+                temp_pin,
+                role=role,
+                telegram_id=tg_user.id,
+            )
+            return temp_pin
+        except Exception as exc:
+            logger.warning(f"⚠️ Не удалось синхронизировать EDGE пользователя: {exc}")
+            return None
 
     # =======================================================================
     # РАБОТА С ДАННЫМИ ЧЕРЕЗ SQLite (вместо прямого RS485)
@@ -550,13 +585,19 @@ class KUBTelegramBot:
                 access_level="admin",
             )
             logger.info(f"🔑 Админ {user.id} автоматически зарегистрирован")
+            temp_pin = self._sync_edge_user(user, "admin")
             
             # Показываем главное меню для админа
             menu = build_main_menu("admin")
             await update.message.reply_text(
                 "✅ **Добро пожаловать, администратор!**\n\n"
                 "Вы автоматически получили права администратора.\n"
-                "Используйте меню ниже для управления системой.",
+                "Используйте меню ниже для управления системой." + (
+                    f"\n\n🔑 Временный PIN для входа в веб-интерфейс: `{temp_pin}`\n"
+                    "Введите /setpin <новый PIN>, чтобы задать собственный."
+                    if temp_pin
+                    else ""
+                ),
                 reply_markup=menu,
                 parse_mode="Markdown",
             )
@@ -641,6 +682,7 @@ class KUBTelegramBot:
                 last_name=user.last_name,
                 access_level=level,
             )
+            temp_pin = self._sync_edge_user(user, level)
 
             # Отмечаем приглашение как использованное
             cursor.execute(
@@ -685,7 +727,15 @@ class KUBTelegramBot:
             )
 
             await update.message.reply_text(
-                welcome_text, reply_markup=menu, parse_mode="Markdown"
+                welcome_text
+                + (
+                    f"\n\n🔑 Временный PIN для входа в веб-интерфейс: `{temp_pin}`\n"
+                    "Введите /setpin <новый PIN>, чтобы задать собственный."
+                    if temp_pin
+                    else ""
+                ),
+                reply_markup=menu,
+                parse_mode="Markdown",
             )
 
             self.bot_db.log_user_command(
@@ -778,6 +828,55 @@ class KUBTelegramBot:
                 error_message(f"Ошибка получения данных: {str(e)}"),
                 reply_markup=back_menu,
                 parse_mode="Markdown",
+            )
+
+    async def cmd_setpin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /setpin <NNNN> — обновить PIN для доступа к веб-дашборду."""
+        user = update.effective_user
+        if not self.user_registry:
+            await update.message.reply_text("⚠️ Управление PIN временно недоступно")
+            return
+        if not context.args:
+            await update.message.reply_text(
+                "ℹ️ Использование: /setpin 1234\nPIN должен содержать 4–8 цифр."
+            )
+            return
+        new_pin = context.args[0].strip()
+        if not new_pin.isdigit() or not (4 <= len(new_pin) <= 8):
+            await update.message.reply_text(
+                "❌ PIN должен состоять только из цифр и иметь длину от 4 до 8 символов."
+            )
+            return
+
+        edge_user = self.user_registry.get_user_by_telegram(user.id)
+        if not edge_user:
+            access_level = self.bot_db.get_user_access_level(user.id)
+            display_name = user.first_name or user.username or str(user.id)
+            try:
+                self.user_registry.create_user(
+                    display_name,
+                    new_pin,
+                    role=access_level,
+                    telegram_id=user.id,
+                )
+            except Exception as exc:
+                logger.error(f"❌ Не удалось создать edge_user через /setpin: {exc}")
+                await update.message.reply_text(
+                    "❌ Не удалось сохранить PIN. Обратитесь к администратору."
+                )
+                return
+            await update.message.reply_text(
+                "✅ PIN установлен. Используйте его для входа в веб-дашборд."
+            )
+            return
+
+        try:
+            self.user_registry.set_pin(edge_user.id, new_pin)
+            await update.message.reply_text("✅ PIN обновлён. Теперь можно входить в дашборд.")
+        except Exception as exc:
+            logger.error(f"❌ Ошибка установки PIN: {exc}")
+            await update.message.reply_text(
+                "❌ Не удалось обновить PIN. Попробуйте позже или обратитесь к администратору."
             )
 
     async def cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -996,27 +1095,41 @@ class KUBTelegramBot:
                 await update.message.reply_text("📋 Пользователи не найдены")
                 return
 
-            text = "👥 **СПИСОК ПОЛЬЗОВАТЕЛЕЙ:**\n\n"
+            header = "👥 <b>СПИСОК ПОЛЬЗОВАТЕЛЕЙ:</b>\n\n"
+            chunk = header
+
+            async def flush_chunk(buffer: str):
+                if buffer.strip():
+                    await update.message.reply_text(buffer, parse_mode="HTML")
 
             for user_data in users:
-                username = user_data.get("username", "нет")
-                first_name = user_data.get("first_name", "")
+                username = user_data.get("username") or "нет"
+                first_name = user_data.get("first_name") or ""
                 access_level = user_data.get("access_level", "user")
                 is_active = user_data.get("is_active", True)
 
                 status = "✅" if is_active else "❌"
+                safe_name = escape(first_name)
+                safe_username = escape(username)
+                safe_level = escape(access_level)
+                safe_id = escape(str(user_data["telegram_id"]))
 
-                text += f"{status} **{first_name}** (@{username})\n"
-                text += f"   ID: `{user_data['telegram_id']}`\n"
-                text += f"   Доступ: `{access_level}`\n\n"
+                entry = (
+                    f"{status} <b>{safe_name}</b> (@{safe_username})\n"
+                    f"   ID: <code>{safe_id}</code>\n"
+                    f"   Доступ: <code>{safe_level}</code>\n\n"
+                )
 
-            # Разбиваем длинное сообщение на части
-            if len(text) > 4000:
-                parts = [text[i : i + 4000] for i in range(0, len(text), 4000)]
-                for part in parts:
-                    await update.message.reply_text(part, parse_mode="Markdown")
-            else:
-                await update.message.reply_text(text, parse_mode="Markdown")
+                if len(chunk) + len(entry) > 3500:
+                    await flush_chunk(chunk)
+                    chunk = ""
+
+                if not chunk:
+                    chunk = header + entry
+                else:
+                    chunk += entry
+
+            await flush_chunk(chunk)
 
         except Exception as e:
             logger.error(f"❌ Ошибка команды users: {e}")
@@ -2444,7 +2557,7 @@ class KUBTelegramBot:
         try:
             all_users = self.bot_db.get_all_users()
 
-            users_text = f"👤 **СПИСОК ПОЛЬЗОВАТЕЛЕЙ** (всего: {len(all_users)})\n\n"
+            users_text = f"👤 <b>СПИСОК ПОЛЬЗОВАТЕЛЕЙ</b> (всего: {len(all_users)})\n\n"
 
             for user_data in all_users[:10]:  # Показываем первых 10 пользователей
                 username = user_data.get("username") or "Без username"
@@ -2460,10 +2573,17 @@ class KUBTelegramBot:
                     "admin": "👑",
                 }.get(user_access_level, "❓")
 
+                safe_name = escape(first_name)
+                safe_username = escape(username)
+                safe_id = escape(str(user_data["telegram_id"]))
+                safe_level = escape(user_access_level)
+
                 users_text += (
-                    f"{status_emoji} {level_emoji} **{first_name}** (@{username})\n"
+                    f"{status_emoji} {level_emoji} <b>{safe_name}</b> (@{safe_username})\n"
                 )
-                users_text += f"   ID: `{user_data['telegram_id']}` | Уровень: `{user_access_level}`\n\n"
+                users_text += (
+                    f"   ID: <code>{safe_id}</code> | Уровень: <code>{safe_level}</code>\n\n"
+                )
 
             if len(all_users) > 10:
                 users_text += f"... и еще {len(all_users) - 10} пользователей\n"
@@ -2472,9 +2592,16 @@ class KUBTelegramBot:
 
             menu = build_user_management_menu(access_level)
 
-            await query.edit_message_text(
-                users_text, reply_markup=menu, parse_mode="Markdown"
-            )
+            try:
+                await query.edit_message_text(
+                    users_text, reply_markup=menu, parse_mode="HTML"
+                )
+            except Exception as edit_error:
+                if "message is not modified" in str(edit_error).lower():
+                    await query.answer("ℹ️ Список уже актуален", show_alert=False)
+                    logger.debug("/users inline list not modified — ignoring")
+                else:
+                    raise edit_error
 
         except Exception as e:
             logger.error(f"❌ Ошибка получения списка пользователей: {e}")
@@ -3203,6 +3330,22 @@ class KUBTelegramBot:
             self.application.add_handler(
                 CommandHandler("level_info", self.cmd_level_info)
             )
+            self.application.add_handler(CommandHandler("setpin", self.cmd_setpin))
+
+            default_commands = [
+                BotCommand("start", "Запуск бота"),
+                BotCommand("status", "Сводка по помещениям"),
+                BotCommand("stats", "Краткая статистика"),
+                BotCommand("alarms", "Активные тревоги"),
+                BotCommand("reset", "Сброс тревог"),
+                BotCommand("help", "Справка по командам"),
+            ]
+
+            try:
+                await self.application.bot.set_my_commands(default_commands)
+                logger.info("📋 Меню команд Telegram обновлено")
+            except Exception as exc:
+                logger.warning(f"⚠️ Не удалось обновить меню команд: {exc}")
 
             # БЛОКИРОВКА ПОЛЬЗОВАТЕЛЕЙ
             self.application.add_handler(

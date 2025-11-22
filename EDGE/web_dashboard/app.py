@@ -13,12 +13,18 @@ import sys
 import html
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+
+try:  # optional QR generation
+    import qrcode
+except Exception:  # pragma: no cover - не критично
+    qrcode = None
 
 try:  # streamlit_autorefresh входит в стандартный дистрибутив Streamlit
     from streamlit_autorefresh import st_autorefresh
@@ -37,11 +43,26 @@ from web_dashboard.services.room_data import (
 )
 from web_dashboard.styles.dashboard_css import DASHBOARD_CSS
 from modbus.modbus_storage import DB_FILE
+from core.config_manager import get_config
+from core.security_manager import get_security_manager
+
+try:
+    TELEGRAM_BOT_USERNAME = getattr(get_config().telegram, "bot_username", None)
+except Exception:
+    TELEGRAM_BOT_USERNAME = None
+
+if not TELEGRAM_BOT_USERNAME:
+    try:
+        secrets = get_security_manager().load_encrypted_config("bot_secrets")
+        TELEGRAM_BOT_USERNAME = secrets.get("telegram", {}).get("bot_username")
+    except Exception:
+        TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME")
 
 try:
     from core.device_registry import DeviceInfo, DeviceRegistry, DeviceType
-    from core.device_adapters.catalog import DEVICE_DEFINITIONS
+    from core.device_adapters.catalog import DEVICE_DEFINITIONS, import_adapter_class
     from core.device_adapters.factory import get_device_metric_metadata
+    from core.user_registry import ALLOWED_ROLES, UserRegistry
 
     DEVICE_REGISTRY_AVAILABLE = True
 except ImportError as exc:  # pragma: no cover - optional dependency
@@ -82,6 +103,36 @@ def _normalize_interval(value: Any) -> int:
     if ivalue <= 0:
         ivalue = 60
     return max(60, min(600, ivalue))
+
+
+def _maybe_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _build_invite_link(code: str) -> Optional[str]:
+    if not TELEGRAM_BOT_USERNAME or not code:
+        return None
+    handle = TELEGRAM_BOT_USERNAME.lstrip("@").strip()
+    if not handle:
+        return None
+    return f"https://t.me/{handle}?start=invite{code}"
+
+
+def _generate_qr_image(link: str) -> Optional[bytes]:
+    if not qrcode or not link:
+        return None
+    try:
+        img = qrcode.make(link)
+    except Exception:
+        return None
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def load_user_preferences() -> Dict[str, Any]:
@@ -202,11 +253,37 @@ def build_device_metrics_map() -> Dict[str, List[str]]:
         except Exception:
             continue
         metadata = get_device_metric_metadata(dtype)
-        mapping[definition.type] = list(metadata.keys())
+        keys = list(metadata.keys())
+        if not keys:
+            try:
+                adapter_cls = import_adapter_class(definition)
+                adapter = adapter_cls()
+                reg_map = getattr(adapter, "register_map", {})
+                if callable(reg_map):
+                    reg_map = reg_map()
+                if isinstance(reg_map, dict):
+                    keys = list(reg_map.keys())
+            except Exception:
+                keys = []
+        mapping[definition.type] = keys
     return mapping
 
 
 DEVICE_METRICS = build_device_metrics_map()
+
+
+def default_metrics_for_device(device_type: str) -> List[str]:
+    keys = DEVICE_METRICS.get(device_type)
+    if keys:
+        return [key for key in keys if key not in ALWAYS_ON_METRICS][:6]
+    try:
+        dtype = DeviceType(device_type)
+        metadata = get_device_metric_metadata(dtype)
+        if metadata:
+            return [key for key in metadata.keys() if key not in ALWAYS_ON_METRICS][:6]
+    except Exception:
+        pass
+    return [key for key in DEFAULT_ROOM_METRICS if key not in ALWAYS_ON_METRICS]
 
 STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal"}
 STATUS_HUMAN_READABLE = {
@@ -219,41 +296,90 @@ STATUS_HUMAN_READABLE = {
 ADMIN_PIN_ENV = os.getenv("EDGE_DASHBOARD_ADMIN_PIN")
 
 
-def get_admin_pin() -> Optional[str]:
-    """Возвращает PIN администратора из окружения или secrets."""
+@st.cache_resource(show_spinner=False)
+def get_user_registry() -> UserRegistry:
+    return UserRegistry()
 
+
+def get_admin_pin() -> Optional[str]:
     pin = ADMIN_PIN_ENV
     if pin:
         return pin
     try:
         return st.secrets.get("dashboard_admin_pin")  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover - secrets могут отсутствовать
+    except Exception:
         return None
 
 
-def render_access_controls() -> bool:
-    """Рисует блок управления ролью в сайдбаре и возвращает флаг админа."""
+def ensure_user_session() -> dict[str, Any]:
+    """Гейт авторизации: без пользователя остальной UI не отображается."""
 
-    pin = get_admin_pin()
-    if not pin:
-        st.info("Режим администратора активен по умолчанию (PIN не задан)")
-        return True
+    registry = get_user_registry()
+    admin_pin = get_admin_pin()
+    if admin_pin:
+        registry.ensure_default_admin(admin_pin)
 
-    if st.session_state.get("is_admin"):
-        st.success("Режим: администратор")
-        if st.button("Выйти из админ-режима", key="logout_admin"):
-            st.session_state["is_admin"] = False
-            st.rerun()
-    else:
-        admin_input = st.text_input("PIN администратора", type="password", key="admin_pin_input")
-        if st.button("Войти", key="login_admin"):
-            if admin_input == pin:
-                st.session_state["is_admin"] = True
-                st.rerun()
-            else:
-                st.error("Неверный PIN")
+    current = st.session_state.get("current_user")
+    if current:
+        return current
 
-    return st.session_state.get("is_admin", False)
+    users = registry.list_users(active_only=True)
+    col_left, col_center, col_right = st.columns([1, 1.2, 1])
+    with col_center:
+        st.markdown("## 🔐 Вход в EDGE Dashboard")
+        if users:
+            selected_index = st.selectbox(
+                "Пользователь",
+                range(len(users)),
+                format_func=lambda idx: f"{users[idx].display_name} ({users[idx].role})",
+                key="gate_user_select",
+            )
+            pin_value = st.text_input("PIN", type="password", key="gate_pin_input")
+            if st.button("Войти", key="gate_login_btn"):
+                selected_user = users[selected_index]
+                if registry.authenticate(selected_user.id, pin_value):
+                    session_payload = {
+                        "id": selected_user.id,
+                        "name": selected_user.display_name,
+                        "role": selected_user.role,
+                        "telegram_id": selected_user.telegram_id,
+                    }
+                    st.session_state["current_user"] = session_payload
+                    st.success("Добро пожаловать!")
+                    st.rerun()
+                else:
+                    st.error("Неверный PIN или пользователь деактивирован")
+        else:
+            st.info("Нет пользователей в реестре — используйте PIN из переменных окружения")
+            pin_value = st.text_input("PIN администратора", type="password", key="gate_env_pin")
+            if st.button("Войти", key="gate_env_login"):
+                if not admin_pin or pin_value == admin_pin:
+                    st.session_state["current_user"] = {
+                        "id": "env-admin",
+                        "name": "Env Admin",
+                        "role": "admin",
+                        "telegram_id": None,
+                    }
+                    st.success("Режим администратора активирован")
+                    st.rerun()
+                else:
+                    st.error("Неверный PIN")
+
+    st.stop()
+
+
+def render_access_controls(current_user: dict[str, Any]) -> bool:
+    """Блок в сайдбаре с информацией о текущем пользователе и кнопкой выхода."""
+
+    if not current_user:
+        st.warning("Требуется вход")
+        return False
+
+    st.success(f"Пользователь: {current_user['name']} ({current_user['role']})")
+    if st.button("Выйти", key="sidebar_logout"):
+        st.session_state.pop("current_user", None)
+        st.rerun()
+    return str(current_user.get("role", "")).lower() == "admin"
 
 
 
@@ -424,6 +550,106 @@ def collect_device_payloads(registry: DeviceRegistry) -> Dict[int, Dict[str, Any
     return payloads
 
 
+def render_device_detail_panel(device: DeviceInfo, payload: Dict[str, Any]) -> None:
+    st.markdown(
+        f"""
+**ID**: {device.device_id}  
+**Slave**: {device.slave_id}  
+**Тип**: {device.device_type.value}  
+**Помещение**: {device.room or '—'}  
+**Локация**: {device.location or '—'}
+"""
+    )
+
+    metric_keys = DEVICE_METRICS.get(device.device_type.value) or list(payload.keys())
+    if metric_keys:
+        cols = st.columns(min(4, len(metric_keys)))
+        for idx, key in enumerate(metric_keys):
+            column = cols[idx % len(cols)]
+            with column:
+                label = default_metric_label(device.device_type.value, key)
+                value = payload.get(key)
+                column.metric(label, format_metric_value(key, value))
+    else:
+        st.info("Нет описанных показателей для этого устройства")
+
+    st.markdown("---")
+    st.subheader("Все данные")
+    if payload:
+        rows = []
+        for k, v in payload.items():
+            text = "—" if v is None else str(v)
+            rows.append({"Параметр": k, "Значение": text})
+        df = pd.DataFrame(rows)
+        st.dataframe(df, width="stretch")
+    else:
+        st.info("Нет данных — ожидайте опрос")
+
+
+def render_devices_tab(registry: DeviceRegistry, device_payloads: Dict[int, Dict[str, Any]]) -> None:
+    st.subheader("🗂️ Устройства")
+    devices = registry.get_devices(enabled_only=True)
+
+    rooms = sorted({d.room or "—" for d in devices})
+    types = sorted({d.device_type.value for d in devices})
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        room_filter = st.multiselect("Помещение", rooms, default=rooms)
+    with c2:
+        type_filter = st.multiselect("Тип устройства", types, default=types)
+    with c3:
+        search = st.text_input("Поиск по имени/ID/slave", "").strip().lower()
+
+    filtered: List[DeviceInfo] = []
+    for device in devices:
+        if (device.room or "—") not in room_filter:
+            continue
+        if device.device_type.value not in type_filter:
+            continue
+        if search:
+            haystack = f"{device.device_id} {device.slave_id} {device.name} {device.location or ''}".lower()
+            if search not in haystack:
+                continue
+        filtered.append(device)
+
+    rows = []
+    for dev in filtered:
+        payload = device_payloads.get(dev.device_id) or {}
+        status = payload.get("connection_status") or payload.get("status") or "unknown"
+        rows.append(
+            {
+                "ID": dev.device_id,
+                "Slave": dev.slave_id,
+                "Имя": dev.name,
+                "Тип": dev.device_type.value,
+                "Помещение": dev.room or "—",
+                "Локация": dev.location or "—",
+                "Статус": status,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, width="stretch")
+
+    st.markdown("---")
+    st.subheader("🔍 Детали устройства")
+    options = [dev.device_id for dev in filtered] or [d.device_id for d in devices]
+    selected_id = st.selectbox(
+        "Выберите устройство",
+        options,
+        format_func=lambda did: next((d.name for d in devices if d.device_id == did), str(did)),
+    )
+
+    selected_device = registry.get_device(selected_id)
+    if not selected_device:
+        st.info("Устройство не найдено")
+        return
+
+    payload = device_payloads.get(selected_id) or {}
+    render_device_detail_panel(selected_device, payload)
+
+
 def build_overview(rooms: List[RoomSnapshot], device_payloads: Dict[int, Dict[str, Any]]) -> FarmOverview:
     overview = FarmOverview()
     overview.rooms_total = len(rooms)
@@ -540,11 +766,18 @@ def get_room_metric_preferences(room: RoomSnapshot) -> Dict[int, List[str]]:
             room_pref.pop(device_id)
 
     for device in room.devices:
-        if device.device_id not in room_pref:
-            defaults = DEVICE_METRICS.get(device.device_type.value) or DEFAULT_ROOM_METRICS
-            room_pref[device.device_id] = [key for key in defaults if key not in ALWAYS_ON_METRICS]
+        default_keys = set(default_metrics_for_device(device.device_type.value))
+        default_keys -= ALWAYS_ON_METRICS
+        default_keys -= DEVICE_STATUS_FIELDS
 
-        room_pref[device.device_id] = list(room_pref[device.device_id])
+        if device.device_id not in room_pref:
+            room_pref[device.device_id] = list(default_keys)
+
+        current_selection = [key for key in room_pref[device.device_id] if key in ALLOWED_METRIC_KEYS]
+        if not current_selection:
+            # если пользователь ничего не выбирал или все ключи устарели — возвращаемся к дефолту
+            current_selection = list(default_keys)
+        room_pref[device.device_id] = current_selection
 
     return {device_id: list(keys) for device_id, keys in room_pref.items()}
 
@@ -797,8 +1030,12 @@ def render_room_settings(
         payload = device_payloads.get(device.device_id, {})
         device_snapshot = device_metric_records.get(device.device_id, {})
         available_keys = set(DEVICE_METRICS.get(device.device_type.value, []))
-        available_keys |= set(payload.keys())
-        available_keys |= set(device_snapshot.keys())
+        fallback_keys = set(payload.keys()) | set(device_snapshot.keys())
+        if not available_keys:
+            available_keys = {key for key in fallback_keys if key in METRIC_DESCRIPTORS}
+        else:
+            available_keys |= {key for key in fallback_keys if key in METRIC_DESCRIPTORS}
+
         available_keys -= ALWAYS_ON_METRICS
         available_keys -= DEVICE_STATUS_FIELDS
 
@@ -1075,6 +1312,133 @@ def render_configuration_tab(registry: DeviceRegistry) -> None:
         else:
             st.info("Изменений нет")
 
+def render_user_management_panel() -> None:
+    registry = get_user_registry()
+    users = registry.list_users(active_only=False)
+    if users:
+        df = pd.DataFrame(
+            [
+                {
+                    "ID": user.id,
+                    "Имя": user.display_name,
+                    "Роль": user.role,
+                    "Активен": "Да" if user.is_active else "Нет",
+                    "Telegram ID": str(user.telegram_id) if user.telegram_id else "—",
+                }
+                for user in users
+            ]
+        )
+        st.dataframe(df, hide_index=True, width="stretch")
+    else:
+        st.info("Пользователей пока нет — создайте первого")
+
+    with st.expander("➕ Добавить пользователя", expanded=False):
+        with st.form("create_user_form"):
+            name = st.text_input("Имя")
+            role = st.selectbox("Роль", ALLOWED_ROLES, format_func=lambda r: r.capitalize())
+            pin = st.text_input("PIN", type="password")
+            telegram_raw = st.text_input("Telegram ID (опционально)")
+            submitted = st.form_submit_button("Создать")
+            if submitted:
+                if not name or not pin:
+                    st.error("Имя и PIN обязательны")
+                else:
+                    try:
+                        telegram_id = _maybe_int(telegram_raw)
+                        registry.create_user(name, pin, role=role, telegram_id=telegram_id)
+                        st.success("Пользователь создан")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Не удалось создать: {exc}")
+
+    if users:
+        with st.expander("✏️ Изменить пользователя", expanded=False):
+            options = {f"{u.display_name} (#{u.id})": u for u in users}
+            selected_label = st.selectbox("Пользователь", list(options.keys()), key="edit_user_select")
+            user = options[selected_label]
+            with st.form("edit_user_form"):
+                new_name = st.text_input("Имя", value=user.display_name)
+                new_role = st.selectbox(
+                    "Роль",
+                    ALLOWED_ROLES,
+                    index=max(0, ALLOWED_ROLES.index(user.role) if user.role in ALLOWED_ROLES else 0),
+                )
+                new_pin = st.text_input("Новый PIN (опционально)", type="password")
+                telegram_raw = st.text_input("Telegram ID", value=str(user.telegram_id or ""))
+                active_flag = st.checkbox("Активен", value=user.is_active)
+                submitted = st.form_submit_button("Сохранить изменения")
+                if submitted:
+                    try:
+                        registry.update_user(
+                            user.id,
+                            display_name=new_name,
+                            role=new_role,
+                            telegram_id=_maybe_int(telegram_raw),
+                            is_active=active_flag,
+                        )
+                        if new_pin:
+                            registry.set_pin(user.id, new_pin)
+                        st.success("Изменения сохранены")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Не удалось обновить: {exc}")
+
+    with st.expander("✉️ Приглашения для Telegram", expanded=False):
+        current_user = st.session_state.get("current_user", {})
+        invited_by = current_user.get("telegram_id") if isinstance(current_user.get("telegram_id"), int) else None
+        with st.form("create_invite_form"):
+            invite_role = st.selectbox("Роль приглашения", ALLOWED_ROLES, index=0)
+            valid_hours = st.slider("Срок действия, часов", min_value=1, max_value=168, value=24)
+            submitted = st.form_submit_button("Создать приглашение")
+            if submitted:
+                try:
+                    code = registry.create_invitation(
+                        invited_by=invited_by, role=invite_role, hours_valid=valid_hours
+                    )
+                    st.success(f"Приглашение создано: {code}")
+                    link = _build_invite_link(code)
+                    if link:
+                        st.markdown(f"Ссылка: [{link}]({link})")
+                        qr_bytes = _generate_qr_image(link)
+                        if qr_bytes:
+                            st.image(qr_bytes, caption="QR-код приглашения", width=200)
+                    st.info("Отправьте код или ссылку пользователю, чтобы он активировал доступ в Telegram-боте.")
+                except Exception as exc:
+                    st.error(f"Не удалось создать приглашение: {exc}")
+
+        invites = registry.list_invitations()
+        if invites:
+            table_data = []
+            for item in invites:
+                link = _build_invite_link(item["code"])
+                table_data.append(
+                    {
+                        "Код": item["code"],
+                        "Роль": item["access_level"],
+                        "Ссылка": link or "—",
+                        "Создан": item["created_at"],
+                        "Истекает": item["expires_at"] or "—",
+                    }
+                )
+            st.table(table_data)
+
+            if qrcode:
+                selected_code = st.selectbox(
+                    "Показать QR для приглашения",
+                    [item["code"] for item in invites],
+                    format_func=lambda c: f"{c} ({_build_invite_link(c) or 'без ссылки'})",
+                    key="invite_qr_select",
+                )
+                link = _build_invite_link(selected_code)
+                if link:
+                    qr_bytes = _generate_qr_image(link)
+                    if qr_bytes:
+                        st.image(qr_bytes, caption=link, width=220)
+                    else:
+                        st.warning("Не удалось создать QR-код")
+        else:
+            st.info("Активных приглашений нет")
+
 
 def load_data(registry: DeviceRegistry) -> Tuple[List[RoomSnapshot], Dict[int, Dict[str, Any]]]:
     rooms = build_room_snapshots(registry)
@@ -1110,9 +1474,11 @@ def main() -> None:
     )
     _ensure_prefs_cache_initialized()
 
+    current_user = ensure_user_session()
+
     with st.sidebar:
         st.header("🔐 Доступ")
-        is_admin = render_access_controls()
+        is_admin = render_access_controls(current_user)
         st.header("⚙️ Обновление")
         auto_refresh_enabled = st.checkbox(
             "Автообновление",
@@ -1152,21 +1518,26 @@ def main() -> None:
         st.error(f"Не удалось загрузить данные: {exc}")
         return
 
-    tab_titles = ["Дашборд", "Графики", "Аварии"] + (["Конфигурация"] if is_admin else [])
+    tab_titles = ["Дашборд", "Устройства", "Графики", "Аварии"] + (["Конфигурация", "Пользователи"] if is_admin else [])
     tabs = st.tabs(tab_titles)
 
     with tabs[0]:
         render_dashboard_tab(rooms, device_payloads)
 
     with tabs[1]:
-        render_charts_tab(rooms)
+        render_devices_tab(registry, device_payloads)
 
     with tabs[2]:
+        render_charts_tab(rooms)
+
+    with tabs[3]:
         render_alarms_tab(rooms)
 
-    if is_admin and len(tabs) > 3:
-        with tabs[3]:
+    if is_admin and len(tabs) > 4:
+        with tabs[4]:
             render_configuration_tab(registry)
+        with tabs[5]:
+            render_user_management_panel()
 
 
 if __name__ == "__main__":

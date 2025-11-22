@@ -21,6 +21,7 @@ def show_secrets():
         
         telegram_config = secrets.get("telegram", {})
         bot_token = telegram_config.get("bot_token", "НЕ УСТАНОВЛЕН")
+        bot_username = telegram_config.get("bot_username", "НЕ УСТАНОВЛЕН")
         admin_users = telegram_config.get("admin_users", [])
         
         # Маскируем токен
@@ -31,6 +32,7 @@ def show_secrets():
         
         print("🔐 Telegram секреты:")
         print(f"Bot Token: {masked_token}")
+        print(f"Bot Username: {bot_username}")
         print(f"Admin Users: {admin_users}")
         
     except FileNotFoundError:
@@ -183,25 +185,47 @@ def export_env():
     try:
         sm = get_security_manager()
         secrets = sm.load_encrypted_config("bot_secrets")
-        
         telegram_config = secrets.get("telegram", {})
         bot_token = telegram_config.get("bot_token")
         admin_users = telegram_config.get("admin_users", [])
-        
+        bot_username = telegram_config.get("bot_username")
+
         if bot_token:
             print(f"export TELEGRAM_BOT_TOKEN='{bot_token}'")
-        
+        if bot_username:
+            print(f"export TELEGRAM_BOT_USERNAME='{bot_username}'")
         if admin_users:
             admin_str = ",".join(str(uid) for uid in admin_users)
             print(f"export TELEGRAM_ADMIN_USERS='{admin_str}'")
-        
+
         print("# Добавьте эти строки в ~/.bashrc или ~/.zshrc")
         print("# Или выполните: source <(python telegram_secrets_cli.py export-env)")
-        
     except FileNotFoundError:
         print("❌ Секреты не настроены")
     except Exception as e:
         print(f"❌ Ошибка экспорта: {e}")
+
+
+def set_username(username: str):
+    """Сохранить имя Telegram-бота (без @)."""
+    username = username.strip()
+    if username.startswith("@"):
+        username = username[1:]
+    if not username:
+        print("❌ Имя бота не может быть пустым")
+        return
+    try:
+        sm = get_security_manager()
+        try:
+            secrets = sm.load_encrypted_config("bot_secrets")
+        except FileNotFoundError:
+            secrets = {}
+        secrets.setdefault("telegram", {})["bot_username"] = username
+        sm.save_encrypted_config("bot_secrets", secrets)
+        print(f"✅ Имя бота сохранено: @{username}")
+        sm.log_security_event("TELEGRAM_USERNAME_SET", details={"username": username})
+    except Exception as e:
+        print(f"❌ Ошибка сохранения имени бота: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Управление секретами Telegram бота")
@@ -225,7 +249,11 @@ def main():
     # Удалить админа
     remove_admin_parser = subparsers.add_parser("remove-admin", help="Удалить админа")
     remove_admin_parser.add_argument("admin_id", help="ID админа")
-    
+
+    # Имя бота
+    username_parser = subparsers.add_parser("set-username", help="Установить имя бота")
+    username_parser.add_argument("username", help="Имя вида @mybot или mybot")
+
     # Экспорт переменных
     subparsers.add_parser("export-env", help="Экспорт переменных окружения")
     
@@ -245,6 +273,8 @@ def main():
         add_admin(args.admin_id)
     elif args.command == "remove-admin":
         remove_admin(args.admin_id)
+    elif args.command == "set-username":
+        set_username(args.username)
     elif args.command == "export-env":
         export_env()
 

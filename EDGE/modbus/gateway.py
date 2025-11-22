@@ -238,6 +238,8 @@ def main():
                             registers=registers_payload,
                             alarms=alarms_list,
                             warnings=warnings_list,
+                            room=device.room,
+                            location=device.location,
                             **payload,
                         )
                         logger.info("💾 Данные от %s сохранены в БД", device_name)

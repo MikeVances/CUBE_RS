@@ -5,7 +5,7 @@
 """
 
 from typing import Dict, List, Any, Union
-from .base import DeviceAdapter, RegisterInfo, DeviceData, ValueType
+from .base import DeviceAdapter, RegisterInfo, DeviceData, ValueType, RegisterType
 from .variable_system import (
     KUBVariableMapper, DeviceVariableManager, VariableTypeDefinition, 
     VariableReference, VariableType
@@ -46,11 +46,11 @@ class KUB1063Adapter(DeviceAdapter):
                 special_values={0xFFFF: "pending", 0xFFFE: "break", 0xFFFD: "error", 0xFFFC: "disabled"},
                 description="Относительная влажность в десятых долях процента"
             ),
-            # Давление (знаковое)
+            # Давление (беззнаковое, отрицательное давление - положительное число)
             VariableTypeDefinition(
                 id=3, name="Pressure", var_type=VariableType.FLOAT,
-                scale=0.1, signed=True, unit="Па", min_val=-1000.0, max_val=1000.0,
-                special_values={0x7FFF: "pending", 0x7FFE: "break", 0x7FFD: "error", 0x7FFC: "disabled"},
+                scale=0.1, signed=False, unit="Па", min_val=0.0, max_val=10000.0,
+                special_values={0xFFFF: "pending", 0xFFFE: "break", 0xFFFD: "error", 0xFFFC: "disabled"},
                 description="Отрицательное давление в десятых долях Паскаля"
             ),
             # CO2 концентрация
@@ -71,6 +71,7 @@ class KUB1063Adapter(DeviceAdapter):
             VariableTypeDefinition(
                 id=6, name="Percentage", var_type=VariableType.PERCENTAGE,
                 scale=0.1, signed=False, unit="%", min_val=0.0, max_val=100.0,
+                special_values={0xFFFF: "pending", 0xFFFE: "break", 0xFFFD: "error", 0xFFFC: "disabled"},
                 description="Процентный выход в десятых долях"
             ),
             # Битовые поля (цифровые выходы)
@@ -79,7 +80,7 @@ class KUB1063Adapter(DeviceAdapter):
                 scale=1.0, signed=False, unit=None,
                 description="Битовое поле цифровых выходов"
             ),
-            # Целые числа
+            # Целые числа без знака
             VariableTypeDefinition(
                 id=8, name="Integer", var_type=VariableType.USHORT,
                 scale=1.0, signed=False, unit=None, min_val=0.0, max_val=65535.0,
@@ -90,6 +91,13 @@ class KUB1063Adapter(DeviceAdapter):
                 id=9, name="SoftwareVersion", var_type=VariableType.VERSION,
                 scale=1.0, signed=False, unit=None,
                 description="Версия программного обеспечения"
+            ),
+            # Целые числа со знаком
+            VariableTypeDefinition(
+                id=10, name="SignedInteger", var_type=VariableType.SHORT,
+                scale=1.0, signed=True, unit=None, min_val=-32768.0, max_val=32767.0,
+                special_values={0x7FFF: "disabled"},
+                description="Целое число со знаком"
             ),
         ]
         
@@ -150,17 +158,32 @@ class KUB1063Adapter(DeviceAdapter):
             VariableReference("timer_2_output_3", 0x009E, 6, description="Таймер 2, выход 3"),
             VariableReference("timer_2_output_4", 0x009F, 6, description="Таймер 2, выход 4"),
             
-            # Аварии и предупреждения
-            VariableReference("active_alarms", 0x00C3, 7, description="Активные аварии"),
-            VariableReference("registered_alarms", 0x00C7, 7, description="Зарегистрированные аварии"),
-            VariableReference("active_warnings", 0x00CB, 7, description="Активные предупреждения"),
-            VariableReference("registered_warnings", 0x00CF, 7, description="Зарегистрированные предупреждения"),
+            # Аварии и предупреждения (по 4 регистра на каждую категорию)
+            VariableReference("active_alarms_0", 0x00C0, 7, description="Активные аварии (часть 1)"),
+            VariableReference("active_alarms_1", 0x00C1, 7, description="Активные аварии (часть 2)"),
+            VariableReference("active_alarms_2", 0x00C2, 7, description="Активные аварии (часть 3)"),
+            VariableReference("active_alarms_3", 0x00C3, 7, description="Активные аварии (часть 4)"),
+
+            VariableReference("registered_alarms_0", 0x00C4, 7, description="Зарегистрированные аварии (часть 1)"),
+            VariableReference("registered_alarms_1", 0x00C5, 7, description="Зарегистрированные аварии (часть 2)"),
+            VariableReference("registered_alarms_2", 0x00C6, 7, description="Зарегистрированные аварии (часть 3)"),
+            VariableReference("registered_alarms_3", 0x00C7, 7, description="Зарегистрированные аварии (часть 4)"),
+
+            VariableReference("active_warnings_0", 0x00C8, 7, description="Активные предупреждения (часть 1)"),
+            VariableReference("active_warnings_1", 0x00C9, 7, description="Активные предупреждения (часть 2)"),
+            VariableReference("active_warnings_2", 0x00CA, 7, description="Активные предупреждения (часть 3)"),
+            VariableReference("active_warnings_3", 0x00CB, 7, description="Активные предупреждения (часть 4)"),
+
+            VariableReference("registered_warnings_0", 0x00CC, 7, description="Зарегистрированные предупреждения (часть 1)"),
+            VariableReference("registered_warnings_1", 0x00CD, 7, description="Зарегистрированные предупреждения (часть 2)"),
+            VariableReference("registered_warnings_2", 0x00CE, 7, description="Зарегистрированные предупреждения (часть 3)"),
+            VariableReference("registered_warnings_3", 0x00CF, 7, description="Зарегистрированные предупреждения (часть 4)"),
             
             # Система вентиляции
             VariableReference("ventilation_target", 0x00D0, 6, description="Целевой уровень вентиляции"),
             VariableReference("ventilation_level", 0x00D1, 6, description="Фактический уровень вентиляции"),
             VariableReference("ventilation_scheme", 0x00D2, 8, description="Активная схема вентиляции"),
-            VariableReference("day_counter", 0x00D3, 8, description="Счетчик дней"),
+            VariableReference("day_counter", 0x00D3, 10, description="Счетчик дней"),  # Знаковое целое
             
             # Температурная система
             VariableReference("temp_target", 0x00D4, 1, description="Целевая температура"),
@@ -205,6 +228,7 @@ class KUB1063Adapter(DeviceAdapter):
                 signed=type_def.signed,
                 description=type_def.description,
                 special_values=type_def.special_values,
+                register_type=RegisterType.INPUT,  # КУБ-1063 использует Input Registers (FC04)
             )
 
         return legacy_map
@@ -306,11 +330,16 @@ class KUB1063Adapter(DeviceAdapter):
             # TODO: Заполнение из DeviceData - будет реализовано позже
         
         alarms = []
-        
-        # Проверяем активные аварии
-        alarm_value = device_manager.get_variable_value("active_alarms")
-        if alarm_value and alarm_value > 0:
-            alarms.append(f"🚨 Активные аварии: 0x{alarm_value:04X}")
+
+        # Проверяем активные аварии (4 регистра)
+        alarm_values = []
+        for i in range(4):
+            alarm_val = device_manager.get_variable_value(f"active_alarms_{i}")
+            if alarm_val and alarm_val > 0:
+                alarm_values.append(f"0x{alarm_val:04X}")
+
+        if alarm_values:
+            alarms.append(f"🚨 Активные аварии: {', '.join(alarm_values)}")
         
         # Проверяем статусы критичных сенсоров
         critical_sensors = ["temp_inside_1", "temp_inside_2", "pressure"]
@@ -332,11 +361,16 @@ class KUB1063Adapter(DeviceAdapter):
             # TODO: Заполнение из DeviceData - будет реализовано позже
         
         warnings = []
-        
-        # Проверяем активные предупреждения
-        warning_value = device_manager.get_variable_value("active_warnings")
-        if warning_value and warning_value > 0:
-            warnings.append(f"⚠️ Предупреждения: 0x{warning_value:04X}")
+
+        # Проверяем активные предупреждения (4 регистра)
+        warning_values = []
+        for i in range(4):
+            warning_val = device_manager.get_variable_value(f"active_warnings_{i}")
+            if warning_val and warning_val > 0:
+                warning_values.append(f"0x{warning_val:04X}")
+
+        if warning_values:
+            warnings.append(f"⚠️ Предупреждения: {', '.join(warning_values)}")
         
         # Проверяем отключенные датчики
         disabled_sensors = device_manager.get_variables_by_status("disabled")

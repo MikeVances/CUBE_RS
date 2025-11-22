@@ -113,6 +113,8 @@ BITMASK_FIELDS = {
 REGISTERS_COLUMN = "registers_blob"
 ALARMS_COLUMN = "alarms_json"
 WARNINGS_COLUMN = "warnings_json"
+ROOM_COLUMN = "room"
+LOCATION_COLUMN = "location"
 
 
 def _normalize_value_for_storage(key: str, value):
@@ -145,6 +147,8 @@ CREATE TABLE IF NOT EXISTS latest_data (
     device_type TEXT,
     connection_status TEXT DEFAULT 'unknown',
     last_error TEXT,
+    room TEXT,
+    location TEXT,
     software_version TEXT,
     device_uid_hi INTEGER,
     device_uid_lo INTEGER,
@@ -334,6 +338,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         REGISTERS_COLUMN: "TEXT",
         ALARMS_COLUMN: "TEXT",
         WARNINGS_COLUMN: "TEXT",
+        ROOM_COLUMN: "TEXT",
+        LOCATION_COLUMN: "TEXT",
     }
 
     _ensure_columns("latest_data", vfd_column_types)
@@ -393,6 +399,8 @@ def update_data(
     registers: Optional[Dict[str, Any]] = None,
     alarms: Optional[Any] = None,
     warnings: Optional[Any] = None,
+    room: Optional[str] = None,
+    location: Optional[str] = None,
     **payload: Any,
 ) -> None:
     """Upsert latest snapshot for a particular device.
@@ -454,6 +462,8 @@ def update_data(
                     registers_blob=registers_json,
                     alarms_blob=alarms_json,
                     warnings_blob=warnings_json,
+                    room=room,
+                    location=location,
                 )
 
                 _append_history_tx(
@@ -510,6 +520,8 @@ def _insert_or_update_latest(
     registers_blob: Optional[str],
     alarms_blob: Optional[str],
     warnings_blob: Optional[str],
+    room: Optional[str],
+    location: Optional[str],
 ) -> None:
     columns: List[str] = ["device_id", "updated_at"]
     values: List[Any] = [device_id, updated_at]
@@ -527,6 +539,8 @@ def _insert_or_update_latest(
     _push(REGISTERS_COLUMN, registers_blob)
     _push(ALARMS_COLUMN, alarms_blob)
     _push(WARNINGS_COLUMN, warnings_blob)
+    _push(ROOM_COLUMN, room)
+    _push(LOCATION_COLUMN, location)
 
     for field, value in payload.items():
         columns.append(field)

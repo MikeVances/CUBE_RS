@@ -21,6 +21,12 @@ class ValueType(Enum):
     VERSION = "version"
 
 
+class RegisterType(Enum):
+    """Тип регистра Modbus"""
+    HOLDING = "holding"  # Function Code 03 (Read Holding Registers)
+    INPUT = "input"      # Function Code 04 (Read Input Registers)
+
+
 @dataclass
 class RegisterInfo:
     """Информация о регистре"""
@@ -31,7 +37,8 @@ class RegisterInfo:
     scale: float = 1.0
     signed: bool = False
     description: Optional[str] = None
-    
+    register_type: RegisterType = RegisterType.HOLDING  # По умолчанию Holding (FC03)
+
     # Специальные значения для обработки
     special_values: Optional[Dict[int, str]] = None  # {0xFFFF: "not_ready", 0x8000: "error"}
 

@@ -16,6 +16,7 @@ import crcmod
 from core.log_filter import get_secure_logger
 from core.device_registry import DeviceInfo, DeviceType
 from core.device_adapters import get_device_adapter
+from core.device_adapters.base import RegisterType
 
 logger = get_secure_logger(__name__)
 
@@ -70,16 +71,64 @@ class UniversalModbusReader:
 
     def disconnect(self):
         """Отключение от serial порта"""
-        if self.serial_connection and self.serial_connection.is_open:
-            self.serial_connection.close()
+        if self.serial_connection:
+            try:
+                # Принудительное закрытие для macOS
+                if hasattr(self.serial_connection, 'cancel_read'):
+                    self.serial_connection.cancel_read()
+                if hasattr(self.serial_connection, 'reset_input_buffer'):
+                    self.serial_connection.reset_input_buffer()
+                if hasattr(self.serial_connection, 'reset_output_buffer'):
+                    self.serial_connection.reset_output_buffer()
+            except Exception:
+                pass
+
+            try:
+                if self.serial_connection.is_open:
+                    self.serial_connection.close()
+                    # Задержка для macOS - порт освобождается не мгновенно
+                    import time
+                    time.sleep(0.1)
+            except Exception:
+                pass
+
+            # Полностью удаляем ссылку на объект
+            self.serial_connection = None
             logger.info(f"🔌 Отключено от {self.port}")
 
-    def _build_modbus_request(self, slave_id: int, register_address: int, count: int = 1) -> bytes:
+    def __del__(self):
+        """Деструктор - гарантированное закрытие порта"""
+        try:
+            self.disconnect()
+        except Exception:
+            pass  # Игнорируем ошибки в деструкторе
+
+    def __enter__(self):
+        """Поддержка context manager (with statement)"""
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Поддержка context manager - автоматическое закрытие"""
+        self.disconnect()
+        return False  # Не подавляем исключения
+
+    def _build_modbus_request(self, slave_id: int, register_address: int, count: int = 1, register_type: RegisterType = RegisterType.HOLDING) -> bytes:
         """
         Построение Modbus RTU запроса
         Function Code 03 (Read Holding Registers) или 04 (Read Input Registers)
+
+        Args:
+            slave_id: Адрес устройства
+            register_address: Адрес регистра
+            count: Количество регистров
+            register_type: Тип регистра (HOLDING или INPUT)
         """
-        function_code = 0x03  # Read Holding Registers (стандартно)
+        # Выбираем function code в зависимости от типа регистра
+        if register_type == RegisterType.INPUT:
+            function_code = 0x04  # Read Input Registers
+        else:
+            function_code = 0x03  # Read Holding Registers
 
         # Формируем запрос без CRC
         request = bytes([
@@ -153,14 +202,24 @@ class UniversalModbusReader:
 
         return registers
 
-    def read_register(self, slave_id: int, register_address: int) -> Optional[int]:
+    def read_register(
+        self,
+        slave_id: int,
+        register_address: int,
+        register_type: RegisterType = RegisterType.HOLDING,
+    ) -> Optional[int]:
         """Чтение одного регистра"""
         if not self.connect():
             return None
 
         try:
             # Формируем запрос
-            request = self._build_modbus_request(slave_id, register_address, count=1)
+            request = self._build_modbus_request(
+                slave_id,
+                register_address,
+                count=1,
+                register_type=register_type,
+            )
 
             # Отправляем запрос
             self.serial_connection.write(request)
@@ -311,6 +370,82 @@ class UniversalModbusReader:
 
         return results
 
+    def _read_registers_with_types(
+        self,
+        slave_id: int,
+        register_map: Dict[str, Any],
+        batch_size: int = 10
+    ) -> Dict[int, int]:
+        """
+        Чтение регистров с учётом их типов (Holding/Input)
+
+        Args:
+            slave_id: Адрес устройства
+            register_map: Карта регистров из адаптера
+            batch_size: Размер пакета
+
+        Returns:
+            Dict[address] = value
+        """
+        results: Dict[int, int] = {}
+
+        if not self.connect():
+            return results
+
+        # Группируем регистры по типу (Holding/Input)
+        holding_regs = []
+        input_regs = []
+
+        for reg_info in register_map.values():
+            if reg_info.register_type == RegisterType.INPUT:
+                input_regs.append(reg_info.address)
+            else:
+                holding_regs.append(reg_info.address)
+
+        # Читаем Holding Registers
+        if holding_regs:
+            holding_regs.sort()
+            logger.debug(f"  Читаем {len(holding_regs)} Holding регистров (FC03)")
+            for addr in holding_regs:
+                try:
+                    request = self._build_modbus_request(slave_id, addr, count=1, register_type=RegisterType.HOLDING)
+                    self.serial_connection.write(request)
+                    time.sleep(0.01)  # Минимальная задержка
+
+                    # Читаем фиксированный размер ответа: slave_id(1) + func(1) + byte_count(1) + data(2) + crc(2) = 7 bytes
+                    response = self.serial_connection.read(7)
+                    registers = self._parse_modbus_response(response, expected_count=1)
+
+                    if registers and len(registers) > 0:
+                        results[addr] = registers[0]
+
+                except Exception as e:
+                    logger.error(f"❌ Ошибка чтения Holding регистра 0x{addr:04X}: {e}")
+                    continue
+
+        # Читаем Input Registers
+        if input_regs:
+            input_regs.sort()
+            logger.debug(f"  Читаем {len(input_regs)} Input регистров (FC04)")
+            for addr in input_regs:
+                try:
+                    request = self._build_modbus_request(slave_id, addr, count=1, register_type=RegisterType.INPUT)
+                    self.serial_connection.write(request)
+                    time.sleep(0.01)  # Минимальная задержка
+
+                    # Читаем фиксированный размер ответа: slave_id(1) + func(1) + byte_count(1) + data(2) + crc(2) = 7 bytes
+                    response = self.serial_connection.read(7)
+                    registers = self._parse_modbus_response(response, expected_count=1)
+
+                    if registers and len(registers) > 0:
+                        results[addr] = registers[0]
+
+                except Exception as e:
+                    logger.error(f"❌ Ошибка чтения Input регистра 0x{addr:04X}: {e}")
+                    continue
+
+        return results
+
     def read_device(self, device_info: DeviceInfo) -> Optional[Dict[str, Any]]:
         """
         Чтение всех данных устройства через его адаптер
@@ -328,22 +463,22 @@ class UniversalModbusReader:
             logger.error(f"❌ Адаптер для {device_info.device_type} не найден")
             return None
 
-        # Получаем список регистров для чтения
-        register_addresses = adapter.get_register_addresses()
+        # Получаем карту регистров (содержит адреса И типы)
+        register_map = adapter.register_map
 
-        if not register_addresses:
+        if not register_map:
             logger.warning(f"⚠️ Нет регистров для чтения у {device_info.name}")
             return None
 
         logger.debug(
-            f"📖 Читаем {len(register_addresses)} регистров для {device_info.name} "
+            f"📖 Читаем {len(register_map)} регистров для {device_info.name} "
             f"(slave_id={device_info.slave_id})"
         )
 
-        # Читаем регистры пакетами
-        raw_registers = self.read_registers_batch(
+        # Читаем регистры с учётом их типов (Holding/Input)
+        raw_registers = self._read_registers_with_types(
             slave_id=device_info.slave_id,
-            register_addresses=register_addresses,
+            register_map=register_map,
             batch_size=20  # Читаем по 20 регистров за раз
         )
 

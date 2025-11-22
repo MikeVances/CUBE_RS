@@ -40,6 +40,7 @@ class DeviceType(Enum):
     KUB_1063 = "KUB-1063"  # Вентиляция
     KUB_1112 = "KUB-1112"  # Обогрев
     VFD_INVERTER = "VFD-INVERTER"  # Регулятор скорости / Частотный преобразователь
+    ESQ_230 = "ESQ-230"  # Частотный преобразователь ESQ-230
     UNKNOWN = "UNKNOWN"
 
 

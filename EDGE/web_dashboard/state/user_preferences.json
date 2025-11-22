@@ -11,14 +11,19 @@
       ],
       "2": [
         "igbt_temperature",
+        "motor_temperature",
         "output_current",
         "output_power",
         "output_voltage",
         "running_frequency",
+        "running_speed",
         "running_state",
         "set_frequency"
       ],
       "3": [
+        "device_id",
+        "device_name",
+        "device_type",
         "flame_level",
         "flame_present",
         "min_work_time",
@@ -51,21 +56,11 @@
         "temp_inside",
         "temp_target",
         "ventilation_level"
-      ],
-      "2": [
-        "output_current",
-        "running_frequency"
-      ],
-      "3": [
-        "flame_level",
-        "operation_mode",
-        "temp_inside",
-        "temp_target"
       ]
     }
   },
   "auto_refresh": {
-    "enabled": false,
+    "enabled": true,
     "interval": 60
   }
 }

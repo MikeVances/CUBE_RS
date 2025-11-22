@@ -505,6 +505,8 @@ class EDGEService:
                                 registers=registers_payload,
                                 alarms=alarms_list,
                                 warnings=warnings_list,
+                                room=device.room,
+                                location=device.location,
                                 **payload,
                             )
                             logger.debug("💾 Данные сохранены в базу для устройства %s", device.device_id)

@@ -16,6 +16,28 @@ from .base import (
 )
 
 
+READABLE_KEYS = {
+    "running_state",
+    "fault_code",
+    "set_frequency",
+    "running_frequency",
+    "running_speed",
+    "output_voltage",
+    "output_current",
+    "output_power",
+    "dc_bus_voltage",
+    "output_torque",
+    "motor_temperature",
+    "igbt_temperature",
+    "di_input_state",
+    "current_power_on_time",
+    "current_running_time",
+    "cumulative_running_time",
+    "accumulated_power_on_time",
+    "cumulative_power_consumption",
+}
+
+
 class VFDInverterAdapter(DeviceAdapter):
     """Адаптер для регулятора скорости VFD/Inverter"""
 
@@ -96,7 +118,7 @@ class VFDInverterAdapter(DeviceAdapter):
         Карта регистров VFD Inverter
         Базовый адрес: 0x1000H
         """
-        return {
+        regs = {
             # === MONITORING PARAMETERS (Read-Only) ===
 
             # U0-00: Inverter Running State (1: forward, 2: reverse, 3: stop)
@@ -650,6 +672,18 @@ class VFDInverterAdapter(DeviceAdapter):
                 description="Накопленное время работы к моменту 1-й аварии"
             ),
         }
+
+        # Некоторые реальные VFD (например, модель на объекте) реализуют только
+        # диапазон U0-00..U0-26 (0x1000–0x101B). Чтобы избежать Modbus
+        # исключений при чтении несуществующих адресов, ограничиваем карту теми
+        # регистрами, чей адрес <= 0x101B. Остальные остаются задокументированными,
+        # но не участвуют в live polling.
+        supported_regs = {
+            name: info
+            for name, info in regs.items()
+            if name in READABLE_KEYS
+        }
+        return supported_regs
 
     def parse_register_value(
         self, register_name: str, raw_value: int

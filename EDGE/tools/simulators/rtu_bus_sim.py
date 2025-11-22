@@ -75,17 +75,17 @@ class BaseMap:
 class VFDMap(BaseMap):
     def __init__(self) -> None:
         self.regs: Dict[int, int] = {
-            0x1000: 3,      # running_state (3=stop)
-            0x1001: 0,      # fault_code
-            0x1002: 263,    # set_frequency (26.3 Hz)
-            0x1003: 0,      # running_frequency
-            0x1004: 0,      # speed
-            0x1005: 0,      # output voltage
-            0x1006: 0,      # output current (0.1A)
-            0x101A: 29,     # motor temp
-            0x101B: 35,     # igbt temp
-            0x102B: 0xAAAA,
-            0x102C: 0xBBBB,
+            0x1000: 3,      # Состояние: стоп
+            0x1001: 0,      # Код ошибки
+            0x1002: 263,    # Заданная частота 26.3 Гц (0.1)
+            0x1003: 0,      # Текущая частота
+            0x1004: 0,      # Скорость
+            0x1005: 0,      # Выходное напряжение
+            0x1006: 0,      # Выходной ток (0.1 А)
+            0x101A: 29,     # Температура двигателя
+            0x101B: 35,     # Температура IGBT
+            0x102B: 0xAAAA, # Серийный номер (младшие)
+            0x102C: 0xBBBB, # Серийный номер (старшие)
         }
 
     def read(self, start: int, count: int) -> List[int] | None:
@@ -105,16 +105,16 @@ class KUBMap(BaseMap):
         # Many values are scaled by 0.1 like in app_config mapping.
         self.regs: Dict[int, int] = {
             # Basic sensors
-            0x0083: 1010,   # pressure (101.0 units)
-            0x0084: 550,    # humidity 55.0%
-            0x0085: 3000,   # CO2 ppm (raw)
-            0x0086: 0,      # NH3 (raw)
-            0x0087: 0,      # grv_base
-            0x0088: 0,      # grv_tunnel
-            0x0089: 450,    # damper (45.0%)
-            0x008A: 100,    # air_intake_1
-            0x008B: 200,    # air_intake_2
-            0x008C: 300,    # air_intake_tunnel
+            0x0083: 1010,   # Давление 101.0 (0.1)
+            0x0084: 550,    # Влажность 55.0%
+            0x0085: 3000,   # CO2 ppm
+            0x0086: 0,      # NH3
+            0x0087: 0,      # ГРВ базовой схемы
+            0x0088: 0,      # ГРВ туннельной схемы
+            0x0089: 450,    # Демпфер 45.0%
+            0x008A: 100,    # Воздухозаборник 1
+            0x008B: 200,    # Воздухозаборник 2
+            0x008C: 300,    # Воздухозаборник туннель
             0x0092: 400,
             0x0093: 500,
             0x0094: 0,
@@ -131,9 +131,9 @@ class KUBMap(BaseMap):
             0x009F: 0,
 
             # Digital outputs bitfields
-            0x0081: 0,      # digital_outputs_1
-            0x0082: 0,      # digital_outputs_2
-            0x00A2: 0,      # digital_outputs_3
+            0x0081: 0,      # Биты ГНВ
+            0x0082: 0,      # Биты ГРВ, нагревы, авария
+            0x00A2: 0,      # Таймеры
 
             # Runtime counters and targets
             0x00D5: 230,    # temp_inside 23.0 C
@@ -163,7 +163,7 @@ class KUBMap(BaseMap):
             0x00CF: 0,      # registered_warnings
 
             # Software/identity
-            0x0301: 0x0102, # software_version stub
+            0x0301: 0x0102, # Версия ПО
             0x0302: 0,
             0x0303: 0,
         }
@@ -182,22 +182,22 @@ class KUB1112Map(BaseMap):
 
     def __init__(self) -> None:
         self.regs: Dict[int, int] = {
-            0x0301: 0x0201,
-            0x0400: 500,
-            0x0401: 1,
-            0x0402: 150,
-            0x0403: 50,
-            0x0404: 80,
-            0x0405: 350,
-            0x0406: 120,
-            0x0407: 0b0011,
-            0x0408: 0b0101,
-            0x0409: 2,
-            0x0410: 0,
+            0x0301: 0x0201, # Версия ПО
+            0x0400: 500,    # Уровень пламени
+            0x0401: 1,      # Пламя есть
+            0x0402: 150,    # Мин. время работы
+            0x0403: 50,     # Задержка старт
+            0x0404: 80,     # Продувка
+            0x0405: 350,    # Температура корпуса
+            0x0406: 120,    # Сопротивление датчика
+            0x0407: 0b0011, # Состояние реле
+            0x0408: 0b0101, # Дискретные входы
+            0x0409: 2,      # Режим работы
+            0x0410: 0,      # Зарегистрированные аварии
             0x0411: 0,
             0x0412: 0,
             0x0413: 0,
-            0x0220: 1,
+            0x0220: 1,      # Modbus адрес
             0x0221: 9600,
         }
 
@@ -208,6 +208,31 @@ class KUB1112Map(BaseMap):
             val = self.regs.get(addr, 0)
             out.append(val & 0xFFFF)
         return out
+
+
+class ESQ230Map(BaseMap):
+    def __init__(self) -> None:
+        self.regs: Dict[int, int] = {
+            0x1010: 0,      # Уставка PID
+            0x1011: 0,      # Обратная связь PID
+            0x1012: 0,      # Шаг ПЛК
+            0x1013: 0,      # Частота HDI
+            0x1015: 1000,   # Оставшееся время
+            0x1016: 0,      # AI1 до коррекции
+            0x1017: 5000,   # AI2 до коррекции
+            0x1018: 34,     # AI3 до коррекции
+            0x1019: 0,      # Линейная скорость
+            0x101A: 0,      # Текущее время включения
+            0x101B: 5000,   # Текущее время работы
+            0x101C: 0,      # Вход HDI
+            0x101D: 1500,   # Задание протокола
+            0x101F: 0,      # Канал X
+            0x1020: 1200,   # Канал Y
+            0x3000: 3,      # Статус: стоп
+        }
+
+    def read(self, start: int, count: int) -> List[int] | None:
+        return [(self.regs.get(start + off, 0) & 0xFFFF) for off in range(count)]
 
 
 def set_raw(fd: int) -> None:
@@ -223,6 +248,7 @@ def run_bus(
     vfd_ids: List[int],
     kub_ids: List[int],
     kub1112_ids: List[int],
+    esq_ids: List[int],
     rfd: int | None = None,
     wfd: int | None = None,
     display_port: str | None = None,
@@ -251,6 +277,8 @@ def run_bus(
         devices.setdefault(sid, KUBMap())
     for sid in kub1112_ids:
         devices.setdefault(sid, KUB1112Map())
+    for sid in esq_ids:
+        devices.setdefault(sid, ESQ230Map())
 
     port_label = display_port or slave_name
     print("─" * 80)
@@ -262,6 +290,8 @@ def run_bus(
         print(f"• KUB IDs: {kub_ids}")
     if kub1112_ids:
         print(f"• KUB-1112 IDs: {kub1112_ids}")
+    if esq_ids:
+        print(f"• ESQ-230 IDs: {esq_ids}")
     print("─" * 80, flush=True)
 
     poller = select.poll()
@@ -329,6 +359,7 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--vfd", default="10-33", help="VFD slave IDs (e.g. '10-33' or '10-15,20')")
     ap.add_argument("--kub", default="1-6", help="KUB-1063 slave IDs (e.g. '1-6')")
     ap.add_argument("--kub1112", default="", help="KUB-1112 slave IDs")
+    ap.add_argument("--esq230", default="", help="ESQ-230 slave IDs")
     ap.add_argument("--stdio", action="store_true", help="Use stdin/stdout instead of creating PTY (for use with socat link)")
     ap.add_argument("--port", help="Bind to fixed PTY path (requires write access)")
     args = ap.parse_args(argv)
@@ -336,11 +367,13 @@ def main(argv: List[str]) -> int:
     vfd_ids = parse_id_ranges(args.vfd) if args.vfd else []
     kub_ids = parse_id_ranges(args.kub) if args.kub else []
     kub1112_ids = parse_id_ranges(args.kub1112) if args.kub1112 else []
+    esq_ids = parse_id_ranges(args.esq230) if args.esq230 else []
     if args.stdio:
         return run_bus(
             vfd_ids,
             kub_ids,
             kub1112_ids,
+            esq_ids,
             rfd=sys.stdin.fileno(),
             wfd=sys.stdout.fileno(),
             display_port="<stdio>",
@@ -361,11 +394,12 @@ def main(argv: List[str]) -> int:
                 vfd_ids,
                 kub_ids,
                 kub1112_ids,
+                esq_ids,
                 rfd=proc.stdout.fileno(),
                 wfd=proc.stdin.fileno(),
                 display_port=args.port,
             )
-    return run_bus(vfd_ids, kub_ids, kub1112_ids)
+    return run_bus(vfd_ids, kub_ids, kub1112_ids, esq_ids)
 
 
 if __name__ == "__main__":

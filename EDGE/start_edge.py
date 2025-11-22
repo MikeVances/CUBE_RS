@@ -170,15 +170,16 @@ AUTOSCAN_DEVICE_PROBES = [
     (
         "KUB-1112",
         [
-            {"kind": "holding", "address": 0x0405, "require_non_zero": True},
-            {"kind": "holding", "address": 0x0400, "require_non_zero": False},
+            {"kind": "input", "address": 0x0405, "require_non_zero": True},  # temperature (FC04)
+            {"kind": "input", "address": 0x0400, "require_non_zero": False},  # flame_level (FC04)
+            {"kind": "holding", "address": 0x0220, "require_non_zero": True},  # modbus address (FC03)
         ],
     ),
     (
         "KUB-1063",
         [
-            {"kind": "holding", "address": 0x160E, "expected_value": 1},
-            {"kind": "holding", "address": 0x0301, "require_non_zero": True},
+            {"kind": "input", "address": 0x0301, "require_non_zero": True},  # software_version (FC04)
+            {"kind": "input", "address": 0x0302, "require_non_zero": True},  # factory_number (FC04)
         ],
     ),
 ]
@@ -287,8 +288,22 @@ async def run(args: argparse.Namespace) -> int:
 
     # Optional autoscan to generate devices.yaml
     if args.autoscan:
-        print(f"🔎 Автоскан шины {rs485_port} (ID {args.scan_start}-{args.scan_end}) и обновление config/devices.yaml…")
-        _autoscan_and_write_config(rs485_port, args.scan_start, args.scan_end)
+        should_scan = True
+        warning_text = (
+            "⚠️ Автоскан перезапишет config/devices.yaml и сбросит помещения/локации.\n"
+            "   После запуска обновите настройки на вкладке 'Конфигурация'."
+        )
+        print(warning_text)
+        if not args.autoscan_yes and sys.stdin.isatty():
+            answer = input("Продолжить автосканирование? [y/N]: ").strip().lower()
+            if answer not in {"y", "yes", "д", "да"}:
+                print("ℹ️ Автоскан отменён пользователем. Используем текущий devices.yaml.")
+                should_scan = False
+        elif not args.autoscan_yes:
+            print("ℹ️ Автоскан запущен без подтверждения (неинтерактивный режим).")
+        if should_scan:
+            print(f"🔎 Автоскан шины {rs485_port} (ID {args.scan_start}-{args.scan_end}) и обновление config/devices.yaml…")
+            _autoscan_and_write_config(rs485_port, args.scan_start, args.scan_end)
 
     # Propagate overrides to environment so gateway/start.py see consistent values
     os.environ["MODBUS_RTU_PORT"] = rs485_port
@@ -379,6 +394,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--modbus-port", type=int, help="Override Modbus TCP port")
     parser.add_argument("--shutdown-timeout", type=float, default=5.0, help="Grace period for shutdown")
     parser.add_argument("--autoscan", action="store_true", help="Scan RTU bus and regenerate config/devices.yaml before start")
+    parser.add_argument("--autoscan-yes", action="store_true", help="Skip confirmation prompt when running with --autoscan")
     parser.add_argument("--scan-start", type=int, default=1, help="Autoscan start slave ID")
     parser.add_argument("--scan-end", type=int, default=40, help="Autoscan end slave ID")
     return parser.parse_args()

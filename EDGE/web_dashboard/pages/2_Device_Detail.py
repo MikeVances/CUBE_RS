@@ -204,7 +204,7 @@ def main():
         rows = []
         for k, v in data.items():
             rows.append({"Параметр": k, "Значение": v})
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch")
     else:
         st.info("Нет данных для отображения (ожидайте опрос)")
 

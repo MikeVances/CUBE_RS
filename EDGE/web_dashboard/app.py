@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
+import html
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -30,9 +32,11 @@ from web_dashboard.services.room_data import (
     DEVICE_STATUS_FIELDS,
     MetricRecord,
     RoomSnapshot,
+    UNASSIGNED_ROOM_NAME,
     build_room_snapshots,
 )
 from web_dashboard.styles.dashboard_css import DASHBOARD_CSS
+from modbus.modbus_storage import DB_FILE
 
 try:
     from core.device_registry import DeviceInfo, DeviceRegistry
@@ -61,6 +65,7 @@ class FarmOverview:
     avg_temp: Optional[float] = None
     active_alarms_total: int = 0
     last_update: Optional[datetime] = None
+    rooms_unassigned: int = 0
 
 
 STATE_DIR = Path(__file__).resolve().parent / "state"
@@ -233,6 +238,13 @@ DEVICE_METRICS: Dict[str, List[str]] = {
 }
 
 STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal"}
+STATUS_HUMAN_READABLE = {
+    "offline": "Нет связи",
+    "disconnected": "Нет связи",
+    "error": "Ошибка",
+    "fault": "Авария",
+    "stop": "Остановлено",
+}
 ADMIN_PIN_ENV = os.getenv("EDGE_DASHBOARD_ADMIN_PIN")
 
 
@@ -324,6 +336,87 @@ def metric_color(key: str, value: Any) -> str:
     return "#58a6ff"
 
 
+def humanize_status(raw_status: Optional[str]) -> Optional[str]:
+    if not raw_status:
+        return None
+    status_lower = str(raw_status).lower()
+    return STATUS_HUMAN_READABLE.get(status_lower, raw_status)
+
+
+def normalize_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def normalize_fault(fault_value: Any) -> Optional[str]:
+    if fault_value is None:
+        return None
+    text = str(fault_value).strip()
+    if not text:
+        return None
+    if text.lower() in {"0", "none", "no_fault", "ok"}:
+        return None
+    return text
+
+
+def escape_html(value: str) -> str:
+    return html.escape(value, quote=False)
+
+
+def collect_problem_reasons(
+    *,
+    status_obj: Optional[Any],
+    payload: Dict[str, Any],
+    human_status: Optional[str],
+    alarms_count: int,
+) -> List[str]:
+    reasons: List[str] = []
+    connection_status = None
+    if status_obj and getattr(status_obj, "connection_status", None):
+        connection_status = status_obj.connection_status
+    elif payload.get("connection_status"):
+        connection_status = payload.get("connection_status")
+
+    if connection_status and not is_status_ok(connection_status):
+        reasons.append(f"Связь: {humanize_status(connection_status) or connection_status}")
+
+    if human_status and human_status.lower() not in STATUS_OK_VALUES:
+        reasons.append(f"Состояние: {human_status}")
+
+    last_error = None
+    if status_obj and getattr(status_obj, "last_error", None):
+        last_error = status_obj.last_error
+    elif payload.get("last_error"):
+        last_error = payload.get("last_error")
+    if last_error:
+        text = normalize_fault(last_error)
+        if text:
+            reasons.append(text)
+
+    if alarms_count:
+        if status_obj and getattr(status_obj, "alarms", None):
+            reasons.extend(status_obj.alarms[:3])
+        else:
+            reasons.append(f"Активных тревог: {alarms_count}")
+    elif status_obj and getattr(status_obj, "warnings", None):
+        warnings = status_obj.warnings[:2]
+        if warnings:
+            reasons.extend([f"Предупреждение: {msg}" for msg in warnings])
+
+    fault_code = None
+    if status_obj and getattr(status_obj, "fault_code", None):
+        fault_code = status_obj.fault_code
+    elif payload.get("fault_code"):
+        fault_code = payload.get("fault_code")
+    fault_norm = normalize_fault(fault_code)
+    if fault_norm:
+        reasons.append(f"Fault: {fault_norm}")
+
+    return [escape_html(str(reason)) for reason in reasons if reason][:3]
+
+
 def default_metric_label(device_type: str, key: str) -> str:
     overrides = DEVICE_METRIC_LABEL_OVERRIDES.get(device_type)
     if overrides and key in overrides:
@@ -374,6 +467,8 @@ def build_overview(rooms: List[RoomSnapshot], device_payloads: Dict[int, Dict[st
         alarm_total += room.alarms.get("active_alarms", 0)
         if room.timestamp:
             timestamps.append(room.timestamp)
+        if room.room == UNASSIGNED_ROOM_NAME:
+            overview.rooms_unassigned += 1
         metric = room.metrics.get("temp_inside")
         if metric and isinstance(metric.value, (int, float)):
             temps.append(float(metric.value))
@@ -397,12 +492,18 @@ def render_overview(overview: FarmOverview) -> None:
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
+        unassigned_hint = (
+            "<small style='color:#dc3545;'>Есть устройства без помещения</small>"
+            if overview.rooms_unassigned
+            else ""
+        )
         st.markdown(
             dedent(
                 f"""
                 <div class="kpi-box">
                     <h4>Помещения (тревоги)</h4>
                     <p>{overview.rooms_with_alarms}/{overview.rooms_total}</p>
+                    {unassigned_hint}
                 </div>
                 """
             ),
@@ -423,13 +524,12 @@ def render_overview(overview: FarmOverview) -> None:
         )
 
     with col3:
-        avg_temp = "—" if overview.avg_temp is None else f"{overview.avg_temp:.1f}°C"
         st.markdown(
             dedent(
                 f"""
                 <div class="kpi-box">
-                    <h4>Средняя температура</h4>
-                    <p>{avg_temp}</p>
+                    <h4>Активные аварии</h4>
+                    <p>{overview.active_alarms_total}</p>
                 </div>
                 """
             ),
@@ -438,12 +538,20 @@ def render_overview(overview: FarmOverview) -> None:
 
     with col4:
         updated = overview.last_update.strftime("%d.%m %H:%M:%S") if overview.last_update else "—"
+        refresh_interval = st.session_state.get("auto_refresh_interval", 60)
+        freshness_color = "#238636"
+        if not overview.last_update:
+            freshness_color = "#ffc107"
+        else:
+            age = (datetime.utcnow() - overview.last_update).total_seconds()
+            if age > max(refresh_interval, 1):
+                freshness_color = "#dc3545"
         st.markdown(
             dedent(
                 f"""
                 <div class="kpi-box">
                     <h4>Последнее обновление</h4>
-                    <p>{updated}</p>
+                    <p style="color:{freshness_color};">{updated}</p>
                 </div>
                 """
             ),
@@ -465,12 +573,7 @@ def get_room_metric_preferences(room: RoomSnapshot) -> Dict[int, List[str]]:
             defaults = DEVICE_METRICS.get(device.device_type.value) or DEFAULT_ROOM_METRICS
             room_pref[device.device_id] = [key for key in defaults if key not in ALWAYS_ON_METRICS]
 
-        filtered = [
-            key
-            for key in room_pref[device.device_id]
-            if key in ALLOWED_METRIC_KEYS
-        ]
-        room_pref[device.device_id] = filtered
+        room_pref[device.device_id] = list(room_pref[device.device_id])
 
     return {device_id: list(keys) for device_id, keys in room_pref.items()}
 
@@ -485,19 +588,13 @@ def get_room_device_metrics(room: RoomSnapshot) -> Dict[int, Dict[str, MetricRec
     if getattr(room, "device_metrics", None):
         filtered: Dict[int, Dict[str, MetricRecord]] = {}
         for device_id, metrics in room.device_metrics.items():
-            filtered[device_id] = {
-                key: record
-                for key, record in metrics.items()
-                if key in ALLOWED_METRIC_KEYS
-            }
+            filtered[device_id] = dict(metrics)
         return filtered
 
     # Fallback: собираем из плоского snapshot.metrics
     grouped: Dict[int, Dict[str, MetricRecord]] = {}
     for key, record in room.metrics.items():
         if not record or record.device_id is None:
-            continue
-        if key not in ALLOWED_METRIC_KEYS:
             continue
         grouped.setdefault(record.device_id, {})[key] = record
     return grouped
@@ -520,44 +617,54 @@ def render_room_metrics(
         device_snapshot = device_metric_records.get(device.device_id, {})
         selected_keys = preferences.get(device.device_id, [])
         status = device_statuses.get(device.device_id)
+        raw_status = None
+        if status and getattr(status, "status", None):
+            raw_status = status.status
+        elif payload.get("status"):
+            raw_status = payload.get("status")
+        status_human = humanize_status(raw_status)
+
+        connection_state = None
+        if status and getattr(status, "connection_status", None):
+            connection_state = status.connection_status
+        elif payload.get("connection_status"):
+            connection_state = payload.get("connection_status")
+
+        alarms_value = None
+        if status and getattr(status, "active_alarms", None) is not None:
+            alarms_value = status.active_alarms
+        elif payload.get("active_alarms") is not None:
+            alarms_value = payload.get("active_alarms")
+        alarm_value_int = normalize_int(alarms_value)
+
+        status_ok = (
+            (status_human is None or status_human.lower() in STATUS_OK_VALUES)
+            and (connection_state is None or is_status_ok(connection_state))
+            and alarm_value_int == 0
+        )
+
+        problem_reasons = []
+        if not status_ok:
+            problem_reasons = collect_problem_reasons(
+                status_obj=status,
+                payload=payload,
+                human_status=status_human,
+                alarms_count=alarm_value_int,
+            )
+        detail_html = "<br/>".join(problem_reasons)
 
         st.markdown(f"#### {device.name} · {device.device_type.value}")
 
         cards_html: List[str] = []
-
-        alarm_record = device_snapshot.get("active_alarms")
-        alarm_value: Any = None
-        if status and status.active_alarms is not None:
-            alarm_value = status.active_alarms
-        elif payload.get("active_alarms") is not None:
-            alarm_value = payload.get("active_alarms")
-        elif alarm_record is not None:
-            alarm_value = alarm_record.value
-        try:
-            alarm_value_int = int(alarm_value or 0)
-        except (TypeError, ValueError):
-            alarm_value_int = 0
-
-        fault_record = device_snapshot.get("fault_code")
-        fault_code = None
-        if status and status.fault_code is not None:
-            fault_code = status.fault_code
-        elif payload.get("fault_code") is not None:
-            fault_code = payload.get("fault_code")
-        elif fault_record is not None:
-            fault_code = fault_record.value
-
-        alarm_color = "#dc3545" if alarm_value_int else "#238636"
-        alarm_text = f"{alarm_value_int} активны" if alarm_value_int else "Норма"
-        alarm_details: List[str] = []
-        if status and status.alarms:
-            alarm_details.append(str(status.alarms[0]))
-        if status and status.warnings:
-            alarm_details.append(str(status.warnings[0]))
-        fault_text = f"Fault: {fault_code}" if fault_code not in (None, 0, "0", "OK", "") else ""
-        if fault_text:
-            alarm_details.append(fault_text)
-        detail_html = "<br/>".join(alarm_details)
+        alarm_color = "#238636" if status_ok else "#dc3545"
+        if status_ok:
+            alarm_text = "Норма"
+        elif alarm_value_int:
+            alarm_text = f"Тревог: {alarm_value_int}"
+        elif status_human:
+            alarm_text = status_human
+        else:
+            alarm_text = "Проблема"
         cards_html.append(
             dedent(
                 f"""
@@ -613,59 +720,80 @@ def render_device_cards(room: RoomSnapshot, device_payloads: Dict[int, Dict[str,
     for device in room.devices:
         payload = device_payloads.get(device.device_id, {})
         status_obj = device_statuses.get(device.device_id)
-        status = (
-            (status_obj.connection_status if status_obj else None)
-            or (status_obj.status if status_obj else None)
-            or payload.get("connection_status")
+        raw_status = (
+            (status_obj.status if status_obj else None)
             or payload.get("status")
-            or "unknown"
+            or (status_obj.connection_status if status_obj else None)
+            or payload.get("connection_status")
         )
+        status_human = humanize_status(raw_status)
+
+        connection_state = None
+        if status_obj and getattr(status_obj, "connection_status", None):
+            connection_state = status_obj.connection_status
+        elif payload.get("connection_status"):
+            connection_state = payload.get("connection_status")
+
         alarms_value = None
         if status_obj and status_obj.active_alarms is not None:
             alarms_value = status_obj.active_alarms
         elif payload.get("active_alarms") is not None:
             alarms_value = payload.get("active_alarms")
-        try:
-            alarms_count = int(alarms_value or 0)
-        except (TypeError, ValueError):
-            alarms_count = 0
-        status_ok = is_status_ok(status) and alarms_count == 0
+        alarms_count = normalize_int(alarms_value)
+
+        status_ok = (
+            (status_human is None or status_human.lower() in STATUS_OK_VALUES)
+            and (connection_state is None or is_status_ok(connection_state))
+            and alarms_count == 0
+        )
+
+        problem_reasons = []
+        if not status_ok:
+            problem_reasons = collect_problem_reasons(
+                status_obj=status_obj,
+                payload=payload,
+                human_status=status_human,
+                alarms_count=alarms_count,
+            )
+        detail_html = "<br/>".join(problem_reasons)
         pill_color = "#238636" if status_ok else "#dc3545"
         updated = parse_timestamp(payload.get("timestamp"))
         updated_str = updated.strftime("%d.%m %H:%M:%S") if updated else "—"
 
-        extra_status = ""
-        if status_obj and status_obj.alarms:
-            extra_status = status_obj.alarms[0]
-        elif status_obj and status_obj.warnings:
-            extra_status = status_obj.warnings[0]
+        extra_status_html = ""
+        if status_obj:
+            if status_obj.alarms:
+                extra_status_html = escape_html(status_obj.alarms[0])
+            elif status_obj.warnings:
+                extra_status_html = escape_html(status_obj.warnings[0])
 
-        st.markdown(
-            dedent(
-                f"""
-                <div class="device-card">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                        <div>
-                            <strong>{device.name}</strong><br/>
-                            <small>ID {device.device_id} · Slave {device.slave_id} · {device.device_type.value}</small><br/>
-                            <small>Обновлено: {updated_str}</small><br/>
-                            <small>{extra_status}</small>
-                        </div>
-                        <div class="status-pill" style="background-color:{pill_color}22; color:{pill_color};">
-                            <span>{'OK' if status_ok else 'Проблема'}</span>
-                        </div>
-                    </div>
-                """
-            ),
-            unsafe_allow_html=True,
+        status_label = "OK" if status_ok else "Проблема"
+        status_html = (
+            f'<div class="device-card">'
+            f'<div style="display:flex; justify-content:space-between; align-items:center;">'
+            f'<div>'
+            f'<strong>{device.name}</strong><br/>'
+            f'<small>ID {device.device_id} · Slave {device.slave_id} · {device.device_type.value}</small><br/>'
+            f'<small>Обновлено: {updated_str}</small><br/>'
+            f'{f"<small>{extra_status_html}</small>" if extra_status_html else ""}'
+            f'</div>'
+            f'<div class="status-pill" style="background-color:{pill_color}22; color:{pill_color};">'
+            f'<div style="display:flex; flex-direction:column; align-items:flex-end;">'
+            f'<span>{status_label}</span>'
+            f'{f"<small>{detail_html}</small>" if detail_html else ""}'
+            f'</div>'
+            f'</div>'
+            f'</div>'
+            f'</div>'
         )
+
+        st.markdown(status_html, unsafe_allow_html=True)
 
         metric_keys = DEVICE_METRICS.get(device.device_type.value)
         if not metric_keys:
-            metric_keys = list(payload.keys())
+            metric_keys = [key for key in payload.keys() if key in METRIC_DESCRIPTORS]
         if not metric_keys:
             st.write("Нет описанных метрик для отображения")
-            st.markdown("</div>", unsafe_allow_html=True)
             continue
 
         metrics_html = []
@@ -683,7 +811,6 @@ def render_device_cards(room: RoomSnapshot, device_payloads: Dict[int, Dict[str,
                 )
             )
         st.markdown(f"<div class='metric-grid'>{''.join(metrics_html)}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_room_settings(
@@ -751,6 +878,7 @@ def render_room_panel(room: RoomSnapshot, device_payloads: Dict[int, Dict[str, A
                         <span>{badge_text}</span>
                     </div>
                 </div>
+            </div>
             """
         ),
         unsafe_allow_html=True,
@@ -774,7 +902,129 @@ def render_room_panel(room: RoomSnapshot, device_payloads: Dict[int, Dict[str, A
         if updated:
             update_room_metric_preferences(room, updated)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+
+def build_alarm_records(rooms: List[RoomSnapshot]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for room in rooms:
+        statuses = getattr(room, "device_statuses", {})
+        for device in room.devices:
+            status = statuses.get(device.device_id)
+            if not status:
+                continue
+            timestamp = status.timestamp or room.timestamp
+            timestamp_str = (
+                timestamp.strftime("%d.%m %H:%M:%S") if isinstance(timestamp, datetime) else "—"
+            )
+            if status.alarms:
+                for msg in status.alarms:
+                    records.append(
+                        {
+                            "Тип": "Авария",
+                            "Сообщение": msg,
+                            "Устройство": device.name,
+                            "Помещение": room.room,
+                            "Локация": room.location or "—",
+                            "Время": timestamp_str,
+                        }
+                    )
+            if status.warnings:
+                for msg in status.warnings:
+                    records.append(
+                        {
+                            "Тип": "Предупреждение",
+                            "Сообщение": msg,
+                            "Устройство": device.name,
+                            "Помещение": room.room,
+                            "Локация": room.location or "—",
+                            "Время": timestamp_str,
+                        }
+                    )
+    return records
+
+
+def render_alarms_tab(rooms: List[RoomSnapshot]) -> None:
+    st.subheader("⚠️ Аварии и предупреждения")
+    records = build_alarm_records(rooms)
+    if not records:
+        st.success("Активных аварий и предупреждений нет")
+        return
+    df = pd.DataFrame(records)
+    st.dataframe(df, hide_index=True)
+
+
+def load_metric_history(device_id: int, metric_key: str, hours: int) -> List[tuple[datetime, float]]:
+    since = datetime.utcnow() - timedelta(hours=hours)
+    cutoff = since.strftime("%Y-%m-%d %H:%M:%S")
+    result: List[tuple[datetime, float]] = []
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                """
+                SELECT timestamp, value
+                FROM registers_history
+                WHERE device_id = ? AND name = ? AND timestamp >= ?
+                ORDER BY timestamp
+                """,
+                (device_id, metric_key, cutoff),
+            )
+            for row in cur.fetchall():
+                ts = row["timestamp"]
+                if isinstance(ts, datetime):
+                    ts_dt = ts
+                else:
+                    try:
+                        ts_dt = datetime.fromisoformat(str(ts))
+                    except Exception:
+                        continue
+                try:
+                    value = float(row["value"])
+                except (TypeError, ValueError):
+                    continue
+                result.append((ts_dt, value))
+    except Exception as exc:
+        st.warning(f"Не удалось загрузить историю метрики: {exc}")
+    return result
+
+
+def render_charts_tab(rooms: List[RoomSnapshot]) -> None:
+    st.subheader("📈 Графики показаний")
+    if not rooms:
+        st.info("Нет помещений для отображения")
+        return
+
+    room_names = [room.room for room in rooms]
+    selected_room_name = st.selectbox("Помещение", room_names)
+    room = next((r for r in rooms if r.room == selected_room_name), rooms[0])
+
+    if not room.devices:
+        st.info("В помещении нет устройств")
+        return
+
+    device_options = {f"{d.name} · {d.device_type.value}": d for d in room.devices}
+    device_label = st.selectbox("Устройство", list(device_options.keys()))
+    device = device_options[device_label]
+
+    meta_keys = list(getattr(room, "metric_metadata", {}).get(device.device_id, {}).keys())
+    if not meta_keys:
+        meta_keys = list(room.device_metrics.get(device.device_id, {}).keys())
+    if not meta_keys:
+        st.info("Для устройства нет метрик")
+        return
+
+    selected_metric = st.selectbox("Метрика", meta_keys)
+    hours = st.slider("Интервал (часы)", 1, 72, 24)
+
+    history = load_metric_history(device.device_id, selected_metric, hours)
+    if not history:
+        st.info("Нет данных за выбранный период")
+        return
+
+    df = pd.DataFrame(history, columns=["timestamp", "value"]).set_index("timestamp")
+    st.line_chart(df, width="stretch")
+    meta = getattr(room, "metric_metadata", {}).get(device.device_id, {}).get(selected_metric)
+    unit = f" {meta.unit}" if meta and meta.unit else ""
+    st.caption(f"Период: последние {hours} ч. Значения{unit}.")
 
 
 def render_dashboard_tab(rooms: List[RoomSnapshot], device_payloads: Dict[int, Dict[str, Any]]) -> None:
@@ -931,14 +1181,20 @@ def main() -> None:
         st.error(f"Не удалось загрузить данные: {exc}")
         return
 
-    tab_titles = ["Дашборд"] + (["Конфигурация"] if is_admin else [])
+    tab_titles = ["Дашборд", "Графики", "Аварии"] + (["Конфигурация"] if is_admin else [])
     tabs = st.tabs(tab_titles)
 
     with tabs[0]:
         render_dashboard_tab(rooms, device_payloads)
 
-    if is_admin and len(tabs) > 1:
-        with tabs[1]:
+    with tabs[1]:
+        render_charts_tab(rooms)
+
+    with tabs[2]:
+        render_alarms_tab(rooms)
+
+    if is_admin and len(tabs) > 3:
+        with tabs[3]:
             render_configuration_tab(registry)
 
 

@@ -8,6 +8,7 @@ from .base import DeviceAdapter
 from .kub1063 import KUB1063Adapter
 from .kub1112 import KUB1112Adapter
 from .vfd_inverter import VFDInverterAdapter
+from .esq230 import ESQ230Adapter
 from core.device_registry import DeviceType
 
 
@@ -16,6 +17,7 @@ _ADAPTER_REGISTRY: Dict[DeviceType, type] = {
     DeviceType.KUB_1063: KUB1063Adapter,
     DeviceType.KUB_1112: KUB1112Adapter,
     DeviceType.VFD_INVERTER: VFDInverterAdapter,
+    DeviceType.ESQ_230: ESQ230Adapter,
 }
 
 # Кэш экземпляров адаптеров

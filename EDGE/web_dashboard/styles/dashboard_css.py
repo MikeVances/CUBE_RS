@@ -42,6 +42,16 @@ DASHBOARD_CSS = """
         color: var(--edge-text) !important;
     }
 
+    div[data-testid="stHeader"],
+    div[data-testid="stToolbar"] {
+        background-color: var(--edge-bg) !important;
+        border-bottom: 1px solid var(--edge-border);
+    }
+
+    div[data-testid="stDecoration"] {
+        background: var(--edge-bg) !important;
+    }
+
     section[data-testid="stSidebar"] * {
         color: var(--edge-text) !important;
     }

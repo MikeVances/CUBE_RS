@@ -5,11 +5,44 @@
 """
 
 from typing import Dict, List, Any, Union, Optional
-from .base import DeviceAdapter, RegisterInfo, DeviceData, ValueType
+from .base import DeviceAdapter, RegisterInfo, DeviceData, ValueType, RegisterType
 from .variable_system import (
     KUBVariableMapper, DeviceVariableManager, VariableTypeDefinition, 
     VariableReference, VariableType
 )
+
+
+ALARM_BIT_DESCRIPTIONS: Dict[int, str] = {
+    0: "Резерв",
+    1: "Не обнаружено пламя при запуске",
+    2: "Низкое давление / обрыв датчика",
+    3: "Пламя погасло",
+    4: "Обдув при выключенном вентиляторе",
+    5: "Отсутствует обдув камеры",
+    6: "Обрыв или неисправность датчика температуры",
+    7: "Пламя не гаснет",
+    8: "Неправильный сигнал пламени",
+    9: "Длительный сигнал сброса аварии",
+    10: "Частые попытки сброса аварий",
+    11: "Сигнал STL",
+    12: "Сигнал STM",
+    13: "Отключился обдув камеры",
+    14: "Короткий промежуток между пусками",
+    15: "Ошибка при перепрошивке",
+    16: "Подача газа блокирована резервом",
+    20: "Ошибка инициализации системы",
+    21: "Ошибка доступа к устройству",
+    22: "Включен режим тестирования",
+    28: "Низкое напряжение питания",
+    33: "Перегрузка системы",
+}
+
+ALARM_REGISTER_OFFSETS = {
+    "registered_alarms_0": 0,
+    "registered_alarms_1": 16,
+    "registered_alarms_2": 32,
+    "registered_alarms_3": 48,
+}
 
 
 class KUB1112Adapter(DeviceAdapter):
@@ -181,11 +214,11 @@ class KUB1112Adapter(DeviceAdapter):
             # Настройки Modbus
             VariableReference(
                 name="modbus_address", register_address=0x0220, type_id=9,
-                description="Адрес устройства Modbus"
+                description="Адрес устройства Modbus", function_code=3
             ),
             VariableReference(
                 name="modbus_baudrate", register_address=0x0221, type_id=9,
-                description="Скорость передачи Modbus"
+                description="Скорость передачи Modbus", function_code=3
             ),
         ]
         
@@ -442,46 +475,71 @@ class KUB1112Adapter(DeviceAdapter):
     
     def _decode_critical_alarms(self, register_name: str, alarm_value: int) -> List[str]:
         """Декодирование критичных аварий из битового поля"""
-        alarms = []
-        
-        if register_name == "registered_alarms_0":
-            # Младшие 16 бит (биты 0-15)
-            alarm_bits = {
-                1: "Не обнаружено пламя при запуске",
-                2: "Низкое давление / обрыв датчика",
-                3: "Пламя погасло",
-                4: "Зафиксирован обдув при выключенном вентиляторе",
-                5: "Отсутствует обдув камеры сгорания",
-                6: "Обрыв датчика температуры",
-                7: "Пламя не гаснет",
-                8: "Неправильный сигнал пламени"
-            }
-        elif register_name == "registered_alarms_1":
-            # Биты 16-31
-            alarm_bits = {
-                0: "Продолжительный сигнал сброса аварии",  # бит 16
-                1: "Частые попытки сброса аварий",          # бит 17
-                11: "Сигнал от STL",                       # бит 27
-                12: "Низкое напряжение питания"            # бит 28
-            }
-        else:
-            return alarms
-        
-        for bit, description in alarm_bits.items():
+        offset = ALARM_REGISTER_OFFSETS.get(register_name)
+        if offset is None:
+            return []
+
+        alarms: List[str] = []
+        for bit in range(16):
             if alarm_value & (1 << bit):
-                alarms.append(f"🚨 {description}")
-        
+                absolute_bit = offset + bit
+                description = ALARM_BIT_DESCRIPTIONS.get(absolute_bit)
+                if description and not description.startswith("Резерв"):
+                    alarms.append(f"🚨 {description}")
+
         return alarms
 
     # Legacy methods для совместимости
     @property
     def register_map(self) -> Dict[str, RegisterInfo]:
-        """Legacy метод - используйте variable_mapper"""
-        return {}
+        """Формируем legacy карту регистров для UniversalModbusReader."""
+        legacy_map: Dict[str, RegisterInfo] = {}
+        value_type_map = {
+            VariableType.TEMPERATURE: ValueType.TEMPERATURE,
+            VariableType.PERCENTAGE: ValueType.PERCENTAGE,
+            VariableType.FLOAT: ValueType.FLOAT,
+            VariableType.BOOL: ValueType.BOOLEAN,
+            VariableType.BITFIELD: ValueType.BITFIELD,
+            VariableType.VERSION: ValueType.VERSION,
+            VariableType.SHORT: ValueType.INTEGER,
+            VariableType.USHORT: ValueType.INTEGER,
+            VariableType.INT: ValueType.INTEGER,
+            VariableType.UINT: ValueType.INTEGER,
+            VariableType.BYTE: ValueType.INTEGER,
+        }
+
+        for var_name, var_ref in self._mapper.variable_references.items():
+            type_def = self._mapper.type_definitions.get(var_ref.type_id)
+            if not type_def:
+                continue
+
+            register_type = RegisterType.INPUT if var_ref.function_code == 4 else RegisterType.HOLDING
+
+            legacy_map[var_name] = RegisterInfo(
+                address=var_ref.register_address,
+                name=var_name,
+                value_type=value_type_map.get(type_def.var_type, ValueType.INTEGER),
+                unit=type_def.unit,
+                scale=type_def.scale,
+                signed=type_def.signed,
+                description=type_def.description,
+                special_values=type_def.special_values,
+                register_type=register_type,
+            )
+
+        return legacy_map
     
     def parse_register_value(self, register_name: str, raw_value: int) -> tuple[Any, str]:
-        """Legacy метод - используйте DeviceVariableManager"""
-        return raw_value, "ok"
+        """Парсинг сырого значения регистра (legacy compatibility)."""
+        var_ref = self._mapper.variable_references.get(register_name)
+        if not var_ref:
+            return raw_value, "error"
+
+        type_def = self._mapper.type_definitions.get(var_ref.type_id)
+        if not type_def:
+            return raw_value, "error"
+
+        return self._mapper.parse_raw_value(raw_value, type_def)
     
     def format_for_display_legacy(self, data: DeviceData) -> str:
         """Legacy метод - используйте format_for_display с DeviceVariableManager"""

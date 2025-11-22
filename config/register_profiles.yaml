@@ -1,0 +1,47 @@
+# Профили регистров для различных режимов работы
+# Используется для оптимизации чтения - читаем только нужные регистры
+
+profiles:
+  # Минимальный набор для dashboard
+  KUB-1063-dashboard:
+    device_type: KUB-1063
+    registers:
+      - software_version      # 0x0301 - версия ПО
+      - digital_outputs_1     # 0x0081 - состояние выходов
+      - digital_outputs_2     # 0x0082 - состояние выходов
+      - pressure              # 0x0083 - давление
+      - humidity              # 0x0084 - влажность
+      - co2                   # 0x0085 - CO2
+      - nh3                   # 0x0086 - NH3
+      - grv_base              # 0x0087 - ГРВ базовая
+      - temp_inside_1         # 0x008D - температура 1
+      - temp_inside_2         # 0x008E - температура 2
+      - temp_outside          # 0x008F - температура наружная
+      - active_alarms_0       # 0x00C0 - аварии (часть 1)
+      - active_alarms_1       # 0x00C1 - аварии (часть 2)
+      - active_alarms_2       # 0x00C2 - аварии (часть 3)
+      - active_alarms_3       # 0x00C3 - аварии (часть 4)
+      - ventilation_level     # 0x00D1 - уровень вентиляции
+      - ventilation_scheme    # 0x00D2 - схема вентиляции
+      - temp_inside           # 0x00D5 - текущая температура
+
+  # Полный набор для детального анализа
+  KUB-1063-full:
+    device_type: KUB-1063
+    registers: all  # Читать все доступные регистры
+
+  # Минимальный набор для VFD
+  VFD-INVERTER-dashboard:
+    device_type: VFD-INVERTER
+    registers:
+      - running_state
+      - fault_code
+      - set_frequency
+      - running_frequency
+      - output_voltage
+      - output_current
+      - motor_temperature
+
+  VFD-INVERTER-full:
+    device_type: VFD-INVERTER
+    registers: all

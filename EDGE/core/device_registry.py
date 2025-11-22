@@ -16,6 +16,11 @@ from enum import Enum
 
 from core.log_filter import get_secure_logger
 from core.utils.paths import get_project_root
+from core.device_adapters.catalog import (
+    DEVICE_DEFINITIONS,
+    DEVICE_DEFINITION_BY_TYPE,
+    sanitize_device_type_name,
+)
 
 logger = get_secure_logger(__name__)
 
@@ -35,13 +40,9 @@ except Exception as e:  # pragma: no cover - optional dependency
     logger.warning(f"⚠️ Modbus storage недоступен: {e}")
 
 
-class DeviceType(Enum):
-    """Поддерживаемые типы устройств"""
-    KUB_1063 = "KUB-1063"  # Вентиляция
-    KUB_1112 = "KUB-1112"  # Обогрев
-    VFD_INVERTER = "VFD-INVERTER"  # Регулятор скорости / Частотный преобразователь
-    ESQ_230 = "ESQ-230"  # Частотный преобразователь ESQ-230
-    UNKNOWN = "UNKNOWN"
+_enum_members = {sanitize_device_type_name(defn.type): defn.type for defn in DEVICE_DEFINITIONS}
+_enum_members["UNKNOWN"] = "UNKNOWN"
+DeviceType = Enum("DeviceType", _enum_members)  # type: ignore
 
 
 @dataclass

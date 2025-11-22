@@ -63,4 +63,5 @@ polling:
     KUB-1063: 20.0
     KUB-1112: 20.0
     VFD-INVERTER: 20.0
+    ESQ-230: 20.0
   device_overrides: {}

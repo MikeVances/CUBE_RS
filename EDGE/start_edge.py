@@ -25,6 +25,7 @@ if os.getenv("EDGE_USE_DUMMY_TELEGRAM_TOKEN"):
 # After chdir we can reference config relative to root
 from core.config_manager import get_config, reload_config
 from core.utils.paths import get_project_root
+from core.device_adapters.catalog import DEVICE_DEFINITIONS, DEVICE_DEFINITION_BY_TYPE
 import inspect
 
 PROJECT_ROOT = get_project_root(EDGE_DIR)
@@ -160,28 +161,9 @@ def _make_reader(client):
 
 
 AUTOSCAN_DEVICE_PROBES = [
-    (
-        "VFD-INVERTER",
-        [
-            {"kind": "holding", "address": 0x1000, "require_non_zero": True},
-            {"kind": "input", "address": 0x1000, "require_non_zero": True},
-        ],
-    ),
-    (
-        "KUB-1112",
-        [
-            {"kind": "input", "address": 0x0405, "require_non_zero": True},  # temperature (FC04)
-            {"kind": "input", "address": 0x0400, "require_non_zero": False},  # flame_level (FC04)
-            {"kind": "holding", "address": 0x0220, "require_non_zero": True},  # modbus address (FC03)
-        ],
-    ),
-    (
-        "KUB-1063",
-        [
-            {"kind": "input", "address": 0x0301, "require_non_zero": True},  # software_version (FC04)
-            {"kind": "input", "address": 0x0302, "require_non_zero": True},  # factory_number (FC04)
-        ],
-    ),
+    (definition.type, definition.autoscan_probes)
+    for definition in DEVICE_DEFINITIONS
+    if definition.autoscan_probes
 ]
 
 
@@ -261,6 +243,10 @@ def _autoscan_and_write_config(rs485_port: str, start_id: int, end_id: int) -> N
                     "location": None,
                 }
                 default_interval = interval_defaults.get(dev_type)
+                if default_interval is None:
+                    definition = DEVICE_DEFINITION_BY_TYPE.get(dev_type)
+                    if definition:
+                        default_interval = float(definition.poll_interval)
                 if default_interval and default_interval > 0:
                     entry["poll_interval"] = float(default_interval)
                 discovered.append(entry)

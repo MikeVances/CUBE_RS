@@ -1,19 +1,16 @@
-"""
-Device Adapters - паттерн для поддержки разных типов устройств
-"""
+"""Device adapter helpers and dynamic re-exports."""
+
+from importlib import import_module
 
 from .base import DeviceAdapter, RegisterInfo, DeviceData
-from .kub1063 import KUB1063Adapter  
-from .kub1112 import KUB1112Adapter
-from .esq230 import ESQ230Adapter
 from .factory import get_device_adapter
+from .catalog import DEVICE_DEFINITIONS
 
-__all__ = [
-    'DeviceAdapter',
-    'RegisterInfo', 
-    'DeviceData',
-    'KUB1063Adapter',
-    'KUB1112Adapter', 
-    'ESQ230Adapter',
-    'get_device_adapter'
-]
+__all__ = ['DeviceAdapter', 'RegisterInfo', 'DeviceData', 'get_device_adapter']
+
+for definition in DEVICE_DEFINITIONS:
+    module_name, class_name = definition.adapter.rsplit('.', 1)
+    module = import_module(module_name)
+    cls = getattr(module, class_name)
+    globals()[class_name] = cls
+    __all__.append(class_name)

@@ -1,0 +1,40 @@
+- type: "KUB-1063"
+  adapter: "core.device_adapters.kub1063.KUB1063Adapter"
+  poll_interval: 20.0
+  autoscan_probes:
+    - kind: "input"
+      address: 0x0301
+      require_non_zero: true
+    - kind: "input"
+      address: 0x0302
+      require_non_zero: true
+- type: "KUB-1112"
+  adapter: "core.device_adapters.kub1112.KUB1112Adapter"
+  poll_interval: 20.0
+  autoscan_probes:
+    - kind: "input"
+      address: 0x0405
+      require_non_zero: true
+    - kind: "input"
+      address: 0x0400
+      require_non_zero: false
+    - kind: "holding"
+      address: 0x0220
+      require_non_zero: true
+- type: "VFD-INVERTER"
+  adapter: "core.device_adapters.vfd_inverter.VFDInverterAdapter"
+  poll_interval: 20.0
+  autoscan_probes:
+    - kind: "holding"
+      address: 0x1000
+      require_non_zero: true
+- type: "ESQ-230"
+  adapter: "core.device_adapters.esq230.ESQ230Adapter"
+  poll_interval: 20.0
+  autoscan_probes:
+    - kind: "holding"
+      address: 0x1015
+      require_non_zero: true
+    - kind: "holding"
+      address: 0x1013
+      require_non_zero: false

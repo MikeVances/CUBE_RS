@@ -8,17 +8,25 @@ devices:
   location: null
   poll_interval: 20.0
 - device_id: 2
-  device_type: VFD-INVERTER
+  device_type: KUB-1063
   slave_id: 2
-  name: 'VFD-INVERTER #2'
+  name: 'KUB-1063 #2'
   description: Автоскан EDGE
   enabled: true
   location: null
   poll_interval: 20.0
 - device_id: 3
-  device_type: KUB-1112
+  device_type: VFD-INVERTER
   slave_id: 3
-  name: 'KUB-1112 #3'
+  name: 'VFD-INVERTER #3'
+  description: Автоскан EDGE
+  enabled: true
+  location: null
+  poll_interval: 20.0
+- device_id: 4
+  device_type: ESQ-230
+  slave_id: 4
+  name: 'ESQ-230 #4'
   description: Автоскан EDGE
   enabled: true
   location: null

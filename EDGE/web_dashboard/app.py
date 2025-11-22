@@ -39,7 +39,9 @@ from web_dashboard.styles.dashboard_css import DASHBOARD_CSS
 from modbus.modbus_storage import DB_FILE
 
 try:
-    from core.device_registry import DeviceInfo, DeviceRegistry
+    from core.device_registry import DeviceInfo, DeviceRegistry, DeviceType
+    from core.device_adapters.catalog import DEVICE_DEFINITIONS
+    from core.device_adapters.factory import get_device_metric_metadata
 
     DEVICE_REGISTRY_AVAILABLE = True
 except ImportError as exc:  # pragma: no cover - optional dependency
@@ -153,48 +155,35 @@ def persist_user_preferences(force: bool = False) -> None:
 INITIAL_USER_PREFS = load_user_preferences()
 
 
-METRIC_DESCRIPTORS: Dict[str, MetricDescriptor] = {
-    "temp_inside": MetricDescriptor("temp_inside", "Температура", "°C", "Климат", (18, 28)),
-    "temp_target": MetricDescriptor("temp_target", "Целевая t°", "°C", "Климат", (18, 28)),
-    "temp_vent_activation": MetricDescriptor("temp_vent_activation", "t° вентиляции", "°C", "Климат"),
-    "humidity": MetricDescriptor("humidity", "Влажность", "%", "Климат", (40, 70)),
-    "co2": MetricDescriptor("co2", "CO₂", " ppm", "Климат"),
-    "nh3": MetricDescriptor("nh3", "NH₃", " ppm", "Климат"),
-    "pressure": MetricDescriptor("pressure", "Давление", " Pa", "Климат"),
-    "ventilation_level": MetricDescriptor("ventilation_level", "Вентиляция", "%", "Вентиляция"),
-    "ventilation_target": MetricDescriptor("ventilation_target", "Цель вентиляции", "%", "Вентиляция"),
-    "ventilation_scheme": MetricDescriptor("ventilation_scheme", "Схема вентиляции", "", "Вентиляция"),
-    "grv_base": MetricDescriptor("grv_base", "GRV базовый", "", "Вентиляция"),
-    "grv_tunnel": MetricDescriptor("grv_tunnel", "GRV тоннель", "", "Вентиляция"),
-    "damper": MetricDescriptor("damper", "Заслонка", "%", "Вентиляция"),
+BASE_METRIC_DESCRIPTORS: Dict[str, MetricDescriptor] = {
+    "connection_status": MetricDescriptor("connection_status", "Связь", "", "Общие"),
     "active_alarms": MetricDescriptor("active_alarms", "Активные тревоги", "", "Аварии"),
     "active_warnings": MetricDescriptor("active_warnings", "Предупреждения", "", "Аварии"),
     "registered_alarms": MetricDescriptor("registered_alarms", "История тревог", "", "Аварии"),
     "registered_warnings": MetricDescriptor("registered_warnings", "История предупреждений", "", "Аварии"),
-    "day_counter": MetricDescriptor("day_counter", "Дней работы", "", "Общие"),
-    "running_state": MetricDescriptor("running_state", "Состояние", "", "Приводы"),
-    "set_frequency": MetricDescriptor("set_frequency", "Set frequency", " Hz", "Приводы"),
-    "running_frequency": MetricDescriptor("running_frequency", "Run frequency", " Hz", "Приводы"),
-    "running_speed": MetricDescriptor("running_speed", "Скорость", "", "Приводы"),
-    "output_voltage": MetricDescriptor("output_voltage", "U выход", " V", "Электрика"),
-    "output_current": MetricDescriptor("output_current", "I выход", " A", "Электрика"),
-    "output_power": MetricDescriptor("output_power", "Мощность", " kW", "Электрика"),
-    "motor_temperature": MetricDescriptor("motor_temperature", "t° двигателя", "°C", "Электрика"),
-    "igbt_temperature": MetricDescriptor("igbt_temperature", "t° IGBT", "°C", "Электрика"),
     "fault_code": MetricDescriptor("fault_code", "Fault code", "", "Аварии"),
-    "pressure_status": MetricDescriptor("pressure_status", "Статус давления", "", "Климат"),
-    "humidity_status": MetricDescriptor("humidity_status", "Статус влажности", "", "Климат"),
-    "co2_status": MetricDescriptor("co2_status", "Статус CO₂", "", "Климат"),
-    "nh3_status": MetricDescriptor("nh3_status", "Статус NH₃", "", "Климат"),
-    "connection_status": MetricDescriptor("connection_status", "Связь", "", "Общие"),
-    "flame_level": MetricDescriptor("flame_level", "Уровень пламени", "%", "Обогрев"),
-    "flame_present": MetricDescriptor("flame_present", "Пламя", "", "Обогрев"),
-    "min_work_time": MetricDescriptor("min_work_time", "Мин. время работы", " с", "Обогрев"),
-    "start_delay": MetricDescriptor("start_delay", "Задержка пуска", " с", "Обогрев"),
-    "purge_duration": MetricDescriptor("purge_duration", "Продувка", " с", "Обогрев"),
-    "operation_mode": MetricDescriptor("operation_mode", "Режим работы", "", "Обогрев"),
+    "day_counter": MetricDescriptor("day_counter", "Дней работы", "", "Общие"),
 }
 
+
+def build_metric_descriptors() -> Dict[str, MetricDescriptor]:
+    descriptors = dict(BASE_METRIC_DESCRIPTORS)
+    for definition in DEVICE_DEFINITIONS:
+        try:
+            dtype = DeviceType(definition.type)
+        except Exception:
+            continue
+        metadata = get_device_metric_metadata(dtype)
+        for key, meta in metadata.items():
+            if key in descriptors:
+                continue
+            label = meta.get("label") or key
+            unit = meta.get("unit") or ""
+            descriptors[key] = MetricDescriptor(key, label, unit)
+    return descriptors
+
+
+METRIC_DESCRIPTORS = build_metric_descriptors()
 DEFAULT_ROOM_METRICS = ["temp_inside", "humidity", "co2", "pressure"]
 ALWAYS_ON_METRICS: set[str] = set()
 ALLOWED_METRIC_KEYS = set(METRIC_DESCRIPTORS.keys()) | ALWAYS_ON_METRICS
@@ -205,37 +194,19 @@ DEVICE_METRIC_LABEL_OVERRIDES: Dict[str, Dict[str, str]] = {
     }
 }
 
-DEVICE_METRICS: Dict[str, List[str]] = {
-    "KUB-1063": [
-        "temp_inside",
-        "temp_target",
-        "humidity",
-        "co2",
-        "pressure",
-        "ventilation_level",
-        "ventilation_target",
-    ],
-    "KUB-1112": [
-        "temp_inside",
-        "temp_target",
-        "pressure",
-        "flame_level",
-        "flame_present",
-        "min_work_time",
-        "start_delay",
-        "purge_duration",
-        "operation_mode",
-    ],
-    "VFD-INVERTER": [
-        "running_state",
-        "set_frequency",
-        "running_frequency",
-        "output_current",
-        "output_voltage",
-        "output_power",
-        "igbt_temperature",
-    ],
-}
+def build_device_metrics_map() -> Dict[str, List[str]]:
+    mapping: Dict[str, List[str]] = {}
+    for definition in DEVICE_DEFINITIONS:
+        try:
+            dtype = DeviceType(definition.type)
+        except Exception:
+            continue
+        metadata = get_device_metric_metadata(dtype)
+        mapping[definition.type] = list(metadata.keys())
+    return mapping
+
+
+DEVICE_METRICS = build_device_metrics_map()
 
 STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal"}
 STATUS_HUMAN_READABLE = {

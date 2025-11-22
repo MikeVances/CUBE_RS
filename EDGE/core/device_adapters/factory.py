@@ -5,27 +5,25 @@ Factory для создания адаптеров устройств
 
 from typing import Optional, Dict, Set, Any
 from importlib import import_module
+from enum import Enum
 
 from .base import DeviceAdapter
-from core.device_adapters.catalog import DEVICE_DEFINITIONS, sanitize_device_type_name
-from core.device_registry import DeviceType
+from core.device_adapters.catalog import DEVICE_DEFINITIONS
 
 
 # Реестр доступных адаптеров
-_ADAPTER_REGISTRY: Dict[DeviceType, type] = {}
+_ADAPTER_REGISTRY: Dict[str, type] = {}
 for definition in DEVICE_DEFINITIONS:
     module_name, class_name = definition.adapter.rsplit('.', 1)
     module = import_module(module_name)
     adapter_cls = getattr(module, class_name)
-    enum_name = sanitize_device_type_name(definition.type)
-    device_enum = getattr(DeviceType, enum_name)
-    _ADAPTER_REGISTRY[device_enum] = adapter_cls
+    _ADAPTER_REGISTRY[definition.type] = adapter_cls
 
 # Кэш экземпляров адаптеров
-_adapter_cache: Dict[DeviceType, DeviceAdapter] = {}
+_adapter_cache: Dict[str, DeviceAdapter] = {}
 
 
-def get_device_adapter(device_type: DeviceType) -> Optional[DeviceAdapter]:
+def get_device_adapter(device_type: Enum | str) -> Optional[DeviceAdapter]:
     """
     Получение адаптера для типа устройства
     
@@ -35,20 +33,21 @@ def get_device_adapter(device_type: DeviceType) -> Optional[DeviceAdapter]:
     Returns:
         DeviceAdapter или None если тип не поддерживается
     """
-    if device_type == DeviceType.UNKNOWN:
+    type_key = device_type.value if isinstance(device_type, Enum) else str(device_type)
+    if type_key == "UNKNOWN":
         return None
     
     # Проверяем кэш
-    if device_type in _adapter_cache:
-        return _adapter_cache[device_type]
+    if type_key in _adapter_cache:
+        return _adapter_cache[type_key]
     
     # Создаём новый адаптер
-    adapter_class = _ADAPTER_REGISTRY.get(device_type)
+    adapter_class = _ADAPTER_REGISTRY.get(type_key)
     if adapter_class is None:
         return None
     
     adapter = adapter_class()
-    _adapter_cache[device_type] = adapter
+    _adapter_cache[type_key] = adapter
     
     return adapter
 
@@ -86,7 +85,7 @@ def _collect_adapter_metadata(adapter: DeviceAdapter) -> Dict[str, Dict[str, Any
     return metadata
 
 
-def get_device_metric_keys(device_type: DeviceType) -> Set[str]:
+def get_device_metric_keys(device_type: Enum | str) -> Set[str]:
     """Return set of metric keys relevant for the adapter of this device type."""
     adapter = get_device_adapter(device_type)
     keys: Set[str] = set()
@@ -98,19 +97,19 @@ def get_device_metric_keys(device_type: DeviceType) -> Set[str]:
     return keys
 
 
-def get_device_metric_metadata(device_type: DeviceType) -> Dict[str, Dict[str, Any]]:
+def get_device_metric_metadata(device_type: Enum | str) -> Dict[str, Dict[str, Any]]:
     adapter = get_device_adapter(device_type)
     if not adapter:
         return {}
     return _collect_adapter_metadata(adapter)
 
 
-def get_supported_device_types() -> list[DeviceType]:
+def get_supported_device_types() -> list[str]:
     """Получение списка поддерживаемых типов устройств"""
     return list(_ADAPTER_REGISTRY.keys())
 
 
-def register_adapter(device_type: DeviceType, adapter_class: type):
+def register_adapter(device_type: Enum | str, adapter_class: type):
     """
     Регистрация нового адаптера
     
@@ -119,13 +118,13 @@ def register_adapter(device_type: DeviceType, adapter_class: type):
         adapter_class: Класс адаптера (должен наследоваться от DeviceAdapter)
     """
     if not issubclass(adapter_class, DeviceAdapter):
-        raise ValueError(f"Adapter class must inherit from DeviceAdapter")
-    
-    _ADAPTER_REGISTRY[device_type] = adapter_class
-    
-    # Очищаем кэш для этого типа
-    if device_type in _adapter_cache:
-        del _adapter_cache[device_type]
+        raise ValueError("Adapter class must inherit from DeviceAdapter")
+
+    type_key = device_type.value if isinstance(device_type, Enum) else str(device_type)
+    _ADAPTER_REGISTRY[type_key] = adapter_class
+
+    if type_key in _adapter_cache:
+        del _adapter_cache[type_key]
 
 
 def clear_adapter_cache():

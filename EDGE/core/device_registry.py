@@ -20,6 +20,7 @@ from core.device_adapters.catalog import (
     DEVICE_DEFINITIONS,
     DEVICE_DEFINITION_BY_TYPE,
     sanitize_device_type_name,
+    import_adapter_class,
 )
 
 logger = get_secure_logger(__name__)

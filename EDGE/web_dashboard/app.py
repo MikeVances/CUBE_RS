@@ -7,6 +7,7 @@ description: Операторский Streamlit-дашборд для наблю
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -15,11 +16,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+import re
 from textwrap import dedent
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 try:  # optional QR generation
     import qrcode
@@ -45,6 +48,7 @@ from web_dashboard.styles.dashboard_css import DASHBOARD_CSS
 from modbus.modbus_storage import DB_FILE
 from core.config_manager import get_config
 from core.security_manager import get_security_manager
+from core.user_preferences import get_user_preferences_service
 
 try:
     TELEGRAM_BOT_USERNAME = getattr(get_config().telegram, "bot_username", None)
@@ -93,6 +97,7 @@ class FarmOverview:
 
 STATE_DIR = Path(__file__).resolve().parent / "state"
 PREFERENCES_FILE = STATE_DIR / "user_preferences.json"
+logger = logging.getLogger(__name__)
 
 
 def _normalize_interval(value: Any) -> int:
@@ -135,30 +140,27 @@ def _generate_qr_image(link: str) -> Optional[bytes]:
     return buffer.getvalue()
 
 
-def load_user_preferences() -> Dict[str, Any]:
-    if not PREFERENCES_FILE.exists():
-        return {}
-    try:
-        with open(PREFERENCES_FILE, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception:
-        return {}
-
+def _sanitize_preferences_payload(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data = data or {}
+    rooms_source = data.get("rooms", {}) if isinstance(data, dict) else {}
     rooms_data: Dict[str, Dict[int, List[str]]] = {}
-    for room_name, devices in data.get("rooms", {}).items():
-        if not isinstance(devices, dict):
-            continue
-        room_devices: Dict[int, List[str]] = {}
-        for device_id_raw, metrics in devices.items():
-            try:
-                device_id = int(device_id_raw)
-            except Exception:
+    if isinstance(rooms_source, dict):
+        for room_name, devices in rooms_source.items():
+            if not isinstance(devices, dict):
                 continue
-            if isinstance(metrics, list):
-                room_devices[device_id] = [str(metric) for metric in metrics if isinstance(metric, str)]
-        rooms_data[room_name] = room_devices
+            room_devices: Dict[int, List[str]] = {}
+            for device_id_raw, metrics in devices.items():
+                try:
+                    device_id = int(device_id_raw)
+                except Exception:
+                    continue
+                if isinstance(metrics, list):
+                    room_devices[device_id] = [
+                        str(metric) for metric in metrics if isinstance(metric, str)
+                    ]
+            rooms_data[room_name] = room_devices
 
-    auto_raw = data.get("auto_refresh", {})
+    auto_raw = data.get("auto_refresh", {}) if isinstance(data, dict) else {}
     auto_block = {
         "enabled": bool(auto_raw.get("enabled", True)),
         "interval": _normalize_interval(auto_raw.get("interval", 60)),
@@ -167,7 +169,18 @@ def load_user_preferences() -> Dict[str, Any]:
     return {"rooms": rooms_data, "auto_refresh": auto_block}
 
 
-def save_user_preferences(payload: Dict[str, Any]) -> None:
+def _load_legacy_preferences() -> Dict[str, Any]:
+    if not PREFERENCES_FILE.exists():
+        return _sanitize_preferences_payload({})
+    try:
+        with open(PREFERENCES_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return _sanitize_preferences_payload({})
+    return _sanitize_preferences_payload(data)
+
+
+def _save_legacy_preferences(payload: Dict[str, Any]) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         with open(PREFERENCES_FILE, "w", encoding="utf-8") as fh:
@@ -175,6 +188,42 @@ def save_user_preferences(payload: Dict[str, Any]) -> None:
     except Exception:
         # Логировать не будем, чтобы не мешать UI
         pass
+
+
+def _resolve_current_user_id() -> Optional[int]:
+    current = st.session_state.get("current_user")
+    if not current:
+        return None
+    try:
+        return int(current.get("id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_preferences_for_user(user_id: Optional[int]) -> tuple[Dict[str, Any], Optional[str]]:
+    if user_id is None:
+        return INITIAL_USER_PREFS, None
+    try:
+        service = get_user_preferences_service()
+        record = service.load(user_id)
+        if record:
+            payload = _sanitize_preferences_payload(record.payload)
+            return payload, record.updated_at.isoformat()
+    except Exception as exc:
+        logger.warning("Не удалось загрузить пользовательские настройки: %s", exc)
+    return INITIAL_USER_PREFS, None
+
+
+def _save_preferences_for_user(user_id: Optional[int], payload: Dict[str, Any]) -> None:
+    if user_id is None:
+        _save_legacy_preferences(payload)
+        return
+    try:
+        service = get_user_preferences_service()
+        service.save(user_id, payload)
+    except Exception as exc:
+        logger.warning("Не удалось сохранить настройки в БД, используем fallback: %s", exc)
+        _save_legacy_preferences(payload)
 
 
 def _preferences_snapshot_from_state() -> Dict[str, Any]:
@@ -199,11 +248,55 @@ def persist_user_preferences(force: bool = False) -> None:
     cache_value = st.session_state.get("_user_prefs_cache")
     if not force and cache_value == serialized:
         return
-    save_user_preferences(snapshot)
+    user_id = _resolve_current_user_id()
+    _save_preferences_for_user(user_id, snapshot)
     st.session_state["_user_prefs_cache"] = serialized
 
 
-INITIAL_USER_PREFS = load_user_preferences()
+INITIAL_USER_PREFS = _load_legacy_preferences()
+
+
+def ensure_preferences_loaded_for_user(current_user: dict[str, Any]) -> None:
+    user_id = None
+    if current_user:
+        try:
+            user_id = int(current_user.get("id"))
+        except (TypeError, ValueError):
+            user_id = None
+
+    marker = st.session_state.get("_prefs_loaded_for_user")
+    remote_ts = st.session_state.get("_remote_prefs_ts")
+    cached_ts = st.session_state.get("_last_loaded_prefs_ts")
+    if (
+        marker == user_id
+        and st.session_state.get("room_metric_prefs") is not None
+        and remote_ts
+        and remote_ts == cached_ts
+    ):
+        st.session_state["auto_refresh_interval"] = _normalize_interval(
+            st.session_state.get("auto_refresh_interval", 60)
+        )
+        _ensure_prefs_cache_initialized()
+        return
+
+    payload, remote_ts = _load_preferences_for_user(user_id)
+    if remote_ts:
+        st.session_state["_remote_prefs_ts"] = remote_ts
+    st.session_state["room_metric_prefs"] = payload.get("rooms", {})
+    auto_block = payload.get("auto_refresh", {})
+    st.session_state["auto_refresh_enabled"] = bool(auto_block.get("enabled", True))
+    st.session_state["auto_refresh_interval"] = _normalize_interval(
+        auto_block.get("interval", 60)
+    )
+    st.session_state["_prefs_loaded_for_user"] = user_id
+    st.session_state["_last_loaded_prefs_ts"] = st.session_state.get("_remote_prefs_ts")
+    _ensure_prefs_cache_initialized()
+
+
+def _room_anchor(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower())
+    slug = slug.strip("-") or "room"
+    return f"room-{slug}"
 
 
 BASE_METRIC_DESCRIPTORS: Dict[str, MetricDescriptor] = {
@@ -1065,6 +1158,8 @@ def render_room_settings(
 
 
 def render_room_panel(room: RoomSnapshot, device_payloads: Dict[int, Dict[str, Any]]) -> None:
+    anchor = _room_anchor(room.room)
+    st.markdown(f"<div class='room-frame' id='{anchor}'>", unsafe_allow_html=True)
     alarms = room.alarms.get("active_alarms", 0)
     warnings = room.alarms.get("active_warnings", 0)
     badge_color = "#238636" if alarms == 0 else "#dc3545"
@@ -1109,6 +1204,8 @@ def render_room_panel(room: RoomSnapshot, device_payloads: Dict[int, Dict[str, A
         updated = render_room_settings(room, preferences, device_payloads, device_metric_records)
         if updated:
             update_room_metric_preferences(room, updated)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def build_alarm_records(rooms: List[RoomSnapshot]) -> List[Dict[str, Any]]:
@@ -1213,14 +1310,27 @@ def render_charts_tab(rooms: List[RoomSnapshot]) -> None:
     device_label = st.selectbox("Устройство", list(device_options.keys()))
     device = device_options[device_label]
 
-    meta_keys = list(getattr(room, "metric_metadata", {}).get(device.device_id, {}).keys())
-    if not meta_keys:
-        meta_keys = list(room.device_metrics.get(device.device_id, {}).keys())
-    if not meta_keys:
+    meta_bucket = getattr(room, "metric_metadata", {}).get(device.device_id, {})
+    metric_keys: List[str] = []
+    seen: set[str] = set()
+
+    for key in meta_bucket.keys():
+        if key not in seen:
+            seen.add(key)
+            metric_keys.append(key)
+    for key in room.device_metrics.get(device.device_id, {}).keys():
+        if key not in seen:
+            seen.add(key)
+            metric_keys.append(key)
+    if not metric_keys:
         st.info("Для устройства нет метрик")
         return
 
-    selected_metric = st.selectbox("Метрика", meta_keys)
+    selected_metric = st.selectbox(
+        "Метрика",
+        metric_keys,
+        format_func=lambda key: resolve_metric_label(room, device, key),
+    )
     hours = st.slider("Интервал (часы)", 1, 72, 24)
 
     history = load_metric_history(device.device_id, selected_metric, hours)
@@ -1228,14 +1338,32 @@ def render_charts_tab(rooms: List[RoomSnapshot]) -> None:
         st.info("Нет данных за выбранный период")
         return
 
-    df = pd.DataFrame(history, columns=["timestamp", "value"]).set_index("timestamp")
-    st.line_chart(df, width="stretch")
+    df = pd.DataFrame(history, columns=["timestamp", "value"])
+    chart = (
+        alt.Chart(df)
+        .mark_line(point=False)
+        .encode(
+            x=alt.X("timestamp:T", axis=alt.Axis(format="%H:%M", title="Время")),
+            y=alt.Y("value:Q", title="Значение"),
+            tooltip=[
+                alt.Tooltip("timestamp:T", title="Время"),
+                alt.Tooltip("value:Q", title="Значение"),
+            ],
+        )
+        .properties(width="container", height=320)
+        .interactive()
+    )
+    st.altair_chart(chart, use_container_width=True)
     meta = getattr(room, "metric_metadata", {}).get(device.device_id, {}).get(selected_metric)
     unit = f" {meta.unit}" if meta and meta.unit else ""
     st.caption(f"Период: последние {hours} ч. Значения{unit}.")
 
 
-def render_dashboard_tab(rooms: List[RoomSnapshot], device_payloads: Dict[int, Dict[str, Any]]) -> None:
+def render_dashboard_tab(
+    rooms: List[RoomSnapshot],
+    device_payloads: Dict[int, Dict[str, Any]],
+    selected_room: Optional[str] = None,
+) -> None:
     if not rooms:
         st.info("Нет активных помещений. Заполните config/devices.yaml")
         return
@@ -1245,6 +1373,8 @@ def render_dashboard_tab(rooms: List[RoomSnapshot], device_payloads: Dict[int, D
 
     st.subheader("🏢 Помещения")
     for room in rooms:
+        if selected_room and selected_room != room.room:
+            continue
         render_room_panel(room, device_payloads)
 
 
@@ -1459,31 +1589,31 @@ def main() -> None:
         st.error(f"Не удалось инициализировать Device Registry: {exc}")
         st.stop()
 
-    # Значения по умолчанию загружаем из сохранённых настроек
-    st.session_state.setdefault("room_metric_prefs", INITIAL_USER_PREFS.get("rooms", {}))
-    st.session_state.setdefault(
-        "auto_refresh_enabled",
-        INITIAL_USER_PREFS.get("auto_refresh", {}).get("enabled", True),
-    )
-    st.session_state.setdefault(
-        "auto_refresh_interval",
-        INITIAL_USER_PREFS.get("auto_refresh", {}).get("interval", 60),
-    )
-    st.session_state["auto_refresh_interval"] = _normalize_interval(
-        st.session_state.get("auto_refresh_interval", 60)
-    )
-    _ensure_prefs_cache_initialized()
-
     current_user = ensure_user_session()
+    ensure_preferences_loaded_for_user(current_user)
+    try:
+        rooms, device_payloads = load_data(registry)
+    except Exception as exc:
+        st.error(f"Не удалось загрузить данные: {exc}")
+        return
+
+    room_names: List[str] = [room.room for room in rooms]
+    selected_room = st.session_state.get("room_navigation")
+    if selected_room == "Все помещения":
+        selected_room = None
 
     with st.sidebar:
         st.header("🔐 Доступ")
         is_admin = render_access_controls(current_user)
         st.header("⚙️ Обновление")
-        auto_refresh_enabled = st.checkbox(
-            "Автообновление",
-            key="auto_refresh_enabled",
-        )
+        if st.button("🔄 Обновить настройки", key="reload_user_prefs"):
+            st.session_state.pop("_prefs_loaded_for_user", None)
+            st.session_state.pop("_remote_prefs_ts", None)
+            if hasattr(st, "rerun"):
+                st.rerun()
+            else:
+                st.experimental_rerun()
+        auto_refresh_enabled = st.checkbox("Автообновление", key="auto_refresh_enabled")
         auto_refresh_interval = (
             st.slider(
                 "Интервал, мин",
@@ -1500,8 +1630,24 @@ def main() -> None:
         if auto_refresh_enabled and st_autorefresh is None:
             st.warning("Автообновление недоступно: отсутствует модуль streamlit_autorefresh")
         refresh_now = st.button("Обновить сейчас")
+
+        st.divider()
+        st.header("🏠 Навигация")
+        if room_names:
+            nav_options = ["Все помещения"] + room_names
+            choice = st.radio("Отобразить", nav_options, index=0, key="room_navigation")
+            if choice != "Все помещения":
+                selected_room = choice
+            st.caption("Быстрые ссылки")
+            for room in room_names:
+                anchor = _room_anchor(room)
+                st.markdown(f"- <a href='#{anchor}'>{room}</a>", unsafe_allow_html=True)
+        else:
+            st.caption("Нет помещений")
+
+        st.divider()
         st.header("ℹ️ Справка")
-        st.info("Состав устройств и помещений задаётся в config/devices.yaml")
+        st.caption("Документация и подробные инструкции будут добавлены позже.")
 
     if refresh_now:
         st.rerun()
@@ -1512,17 +1658,11 @@ def main() -> None:
             key="edge_dashboard_autorefresh",
         )
 
-    try:
-        rooms, device_payloads = load_data(registry)
-    except Exception as exc:
-        st.error(f"Не удалось загрузить данные: {exc}")
-        return
-
     tab_titles = ["Дашборд", "Устройства", "Графики", "Аварии"] + (["Конфигурация", "Пользователи"] if is_admin else [])
     tabs = st.tabs(tab_titles)
 
     with tabs[0]:
-        render_dashboard_tab(rooms, device_payloads)
+        render_dashboard_tab(rooms, device_payloads, selected_room)
 
     with tabs[1]:
         render_devices_tab(registry, device_payloads)

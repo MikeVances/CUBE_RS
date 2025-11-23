@@ -64,7 +64,7 @@ class DatabaseConfig:
     """Конфигурация базы данных"""
 
     file: str = "kub_data.db"
-    commands_db: str = "kub_commands.db"
+    commands_db: str = "EDGE/data/kub_commands.db"
     timeout: int = 5
     journal_mode: str = "WAL"
     synchronous: str = "NORMAL"

@@ -12,10 +12,11 @@ import secrets
 import sqlite3
 import sys
 import time
-from html import escape
+from copy import deepcopy
 from contextlib import suppress
+from html import escape
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Импорт централизованного конфиг-менеджера и безопасности  
 try:
@@ -51,7 +52,6 @@ from core.telegram.bot_utils import (
     build_stats_menu,
     decode_active_alarms,
     error_message,
-    format_sensor_data,
     loading_message,
     md_escape,
     send_typing_action,
@@ -61,13 +61,16 @@ from core.telegram.bot_utils import (
 )
 
 # Telegram Bot imports
-from telegram import Update, BotCommand
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 # Наши модули
+from core.device_adapters.factory import get_device_metric_metadata
+from core.room_snapshot_service import RoomSnapshot, build_room_snapshots
 from core.telegram.bot_database import TelegramBotDB
 from core.device_registry import DeviceRegistry
+from core.user_preferences import DEFAULT_PREFERENCES, get_user_preferences_service
 from core.utils.paths import resolve_under_root
 from core.user_registry import UserRegistry
 
@@ -95,6 +98,8 @@ else:
 
 
 BOT_LOCK_PATH = Path(resolve_under_root("data/telegram_bot.lock"))
+STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal"}
+MAX_METRICS_PER_DEVICE = 6
 
 
 def _display_name(user) -> str:
@@ -176,6 +181,12 @@ class KUBTelegramBot:
         except Exception as exc:
             logger.warning(f"⚠️ Не удалось инициализировать UserRegistry: {exc}")
             self.user_registry = None
+        try:
+            self.user_preferences = get_user_preferences_service()
+        except Exception as exc:
+            logger.warning(f"⚠️ Не удалось инициализировать сервис предпочтений: {exc}")
+            self.user_preferences = None
+        self._prefs_cache_timestamp: Dict[int, str] = {}
 
         # Telegram Application
         self.application = None
@@ -190,6 +201,7 @@ class KUBTelegramBot:
         self._optimistic_clear_until: dict[int, float] = {}
         # Управление звуковыми пингами
         self._sound_ping_delete_after = 25  # сек
+        self._callback_tokens: Dict[int, Dict[str, Dict[str, Any]]] = {}
 
         logger.info(
             f"✅ Загружено {len(self.config.telegram.admin_users)} администраторов"
@@ -199,6 +211,334 @@ class KUBTelegramBot:
     def request_shutdown(self) -> None:
         """Инициировать мягкое завершение работы бота."""
         self._shutdown_event.set()
+
+    # =============================================================
+    # Preferences & snapshot helpers
+    # =============================================================
+
+    def _get_edge_user_id(self, telegram_id: int) -> Optional[int]:
+        if not self.user_registry:
+            return None
+        try:
+            user = self.user_registry.get_user_by_telegram(telegram_id)
+            return user.id if user else None
+        except Exception as exc:
+            logger.warning(
+                "⚠️ Не удалось получить EDGE пользователя для %s: %s",
+                telegram_id,
+                exc,
+            )
+            return None
+
+    def _get_preferences_payload(self, telegram_id: int) -> Dict[str, Any]:
+        edge_user_id = self._get_edge_user_id(telegram_id)
+        if not edge_user_id or not self.user_preferences:
+            return deepcopy(DEFAULT_PREFERENCES)
+        try:
+            prefs = deepcopy(self.user_preferences.get_preferences(edge_user_id))
+            updated_at = prefs.pop("_updated_at", None)
+            if updated_at:
+                cache_ts = self._prefs_cache_timestamp.get(edge_user_id)
+                if cache_ts != updated_at:
+                    self._prefs_cache_timestamp[edge_user_id] = updated_at
+            return prefs
+        except Exception as exc:
+            logger.warning("⚠️ Не удалось загрузить настройки для пользователя %s: %s", edge_user_id, exc)
+            return deepcopy(DEFAULT_PREFERENCES)
+
+    def _default_metrics_from_snapshot(
+        self, room: RoomSnapshot, device_id: int
+    ) -> List[str]:
+        device_metrics = room.device_metrics.get(device_id) or {}
+        return list(device_metrics.keys())[:MAX_METRICS_PER_DEVICE]
+
+    def _format_metric_value(self, value: Any) -> str:
+        if value is None:
+            return "нет данных"
+        if isinstance(value, float):
+            return f"{value:.1f}" if abs(value) < 100 else f"{value:.0f}"
+        if isinstance(value, (int, str)):
+            return str(value)
+        return str(value)
+
+    def _render_status_view(
+        self,
+        telegram_id: int,
+        snapshots: Optional[List[RoomSnapshot]] = None,
+    ) -> Tuple[str, Dict[str, int]]:
+        snapshots = snapshots or build_room_snapshots(self.device_registry)
+        if not snapshots:
+            return (
+                error_message(
+                    "Нет данных от устройств\n\n" "Проверьте, запущена ли основная система"
+                ),
+                {"alarms": 0, "warnings": 0},
+            )
+
+        prefs = self._get_preferences_payload(telegram_id)
+        rooms_pref: Dict[str, Dict[int, List[str]]] = {}
+        for room_name, devices in prefs.get("rooms", {}).items():
+            clean_devices: Dict[int, List[str]] = {}
+            if isinstance(devices, dict):
+                for dev_id, keys in devices.items():
+                    try:
+                        dev_int = int(dev_id)
+                    except (TypeError, ValueError):
+                        continue
+                    clean_devices[dev_int] = [str(k) for k in keys]
+            rooms_pref[str(room_name)] = clean_devices
+
+        total_alarms = 0
+        total_warnings = 0
+        content_lines: List[str] = ["📊 **Сводка помещений**"]
+        metrics_rendered = 0
+
+        for room in sorted(snapshots, key=lambda r: (r.room or "").lower()):
+            total_alarms += int(room.alarms.get("active_alarms", 0) or 0)
+            total_warnings += int(room.alarms.get("active_warnings", 0) or 0)
+            header = f"\n🏠 *{md_escape(room.room)}* — {md_escape(room.location)}"
+            if room.timestamp:
+                header += f"\n   Обновлено: {room.timestamp.strftime('%d.%m %H:%M:%S')}"
+            content_lines.append(header)
+
+            room_selection = rooms_pref.get(room.room, {})
+            devices_rendered = 0
+            for device in room.devices:
+                metrics_map = room.device_metrics.get(device.device_id, {})
+                selected = room_selection.get(device.device_id) or []
+                metric_keys = selected or self._default_metrics_from_snapshot(
+                    room, device.device_id
+                )
+
+                status = room.device_statuses.get(device.device_id)
+                connection = (status.connection_status or "").lower() if status else ""
+                icon = "🟢" if connection in STATUS_OK_VALUES else "🔴" if connection else "⚪️"
+                alarms_hint = ""
+                if status and status.active_alarms:
+                    alarms_hint = f" 🚨{status.active_alarms}"
+                elif status and status.active_warnings:
+                    alarms_hint = f" ⚠️{status.active_warnings}"
+                device_line = f"{icon} {md_escape(device.name or f'Устройство {device.device_id}')}{alarms_hint}"
+                content_lines.append(device_line)
+
+                meta_bucket = room.metric_metadata.get(device.device_id, {})
+                device_rendered = 0
+                for key in metric_keys:
+                    record = metrics_map.get(key)
+                    if not record:
+                        continue
+                    meta = meta_bucket.get(key)
+                    label = meta.label if meta and meta.label else key
+                    unit = meta.unit if meta and meta.unit else ""
+                    value_str = self._format_metric_value(record.value)
+                    line = f"    • {md_escape(label)}: `{value_str}`"
+                    if unit:
+                        line += f" {md_escape(unit)}"
+                    content_lines.append(line)
+                    device_rendered += 1
+                    metrics_rendered += 1
+                if device_rendered == 0:
+                    content_lines.append("    • Нет данных от устройства")
+                devices_rendered += 1
+            if devices_rendered == 0:
+                content_lines.append("   Нет активных устройств в помещении")
+
+        if metrics_rendered == 0:
+            content_lines.append(
+                "\nℹ️ Метрики не выбраны. Используйте кнопку `🧩 Настроить отчёт` ниже."
+            )
+
+        text = "\n".join(content_lines)
+        return truncate_text(text, 4000), {
+            "alarms": total_alarms,
+            "warnings": total_warnings,
+        }
+
+    async def _append_alarm_analysis(
+        self, base_text: str, data: Optional[Dict[str, Any]]
+    ) -> str:
+        if not data:
+            return base_text
+        try:
+            assess = await self.compute_alarm_assessment(data)
+        except Exception as exc:
+            logger.debug("Не удалось вычислить анализ аварий: %s", exc)
+            return base_text
+        if not assess.get("items"):
+            return base_text
+        lines = [base_text, "", "**🧯 Анализ аварии:**"]
+        for item in assess["items"][:5]:
+            status = "УСТРАНЕНА" if item.get("neutralized") else "АКТИВНА"
+            lines.append(f"• {item.get('title')} — {status}")
+        if assess.get("all_neutralized") and data.get("alarm_relay") is True:
+            lines.append("✅ Причины устранены — можно сбросить реле аварии")
+        return "\n".join(lines)
+
+    def _register_callback_token(self, telegram_id: int, payload: Dict[str, Any]) -> str:
+        bucket = self._callback_tokens.setdefault(telegram_id, {})
+        token = secrets.token_hex(4)
+        if len(bucket) > 100:
+            # Удаляем самый старый ключ
+            oldest_key = next(iter(bucket))
+            bucket.pop(oldest_key, None)
+        bucket[token] = payload
+        return token
+
+    def _resolve_callback_token(
+        self, telegram_id: int, token: str
+    ) -> Optional[Dict[str, Any]]:
+        return self._callback_tokens.get(telegram_id, {}).get(token)
+
+    def _build_rooms_menu(
+        self, telegram_id: int, snapshots: Optional[List[RoomSnapshot]] = None
+    ) -> Tuple[str, InlineKeyboardMarkup]:
+        snapshots = snapshots or build_room_snapshots(self.device_registry)
+        if not snapshots:
+            return (
+                "Нет доступных помещений. Убедитесь, что устройства активны.",
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]]
+                ),
+            )
+        buttons: List[List[InlineKeyboardButton]] = []
+        for room in sorted(snapshots, key=lambda r: (r.room or "").lower()):
+            token = self._register_callback_token(telegram_id, {"room": room.room})
+            buttons.append(
+                [InlineKeyboardButton(md_escape(room.room), callback_data=f"pref_room:{token}")]
+            )
+        buttons.append(
+            [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+        )
+        text = "🏠 *Настройка отчёта*\n\nВыберите помещение для настройки отображения."
+        return text, InlineKeyboardMarkup(buttons)
+
+    def _build_devices_menu(
+        self,
+        telegram_id: int,
+        room_name: str,
+        snapshots: Optional[List[RoomSnapshot]] = None,
+    ) -> Tuple[str, InlineKeyboardMarkup]:
+        snapshots = snapshots or build_room_snapshots(self.device_registry)
+        room = next((snap for snap in snapshots if snap.room == room_name), None)
+        if not room:
+            return (
+                "Не удалось найти помещение. Обновите список.",
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Помещения", callback_data="pref_rooms")]]
+                ),
+            )
+        buttons: List[List[InlineKeyboardButton]] = []
+        for device in room.devices:
+            token = self._register_callback_token(
+                telegram_id,
+                {"room": room.room, "device_id": device.device_id},
+            )
+            label = device.name or f"Устройство {device.device_id}"
+            buttons.append(
+                [InlineKeyboardButton(md_escape(label), callback_data=f"pref_device:{token}")]
+            )
+        buttons.append(
+            [InlineKeyboardButton("⬅️ Помещения", callback_data="pref_rooms")]
+        )
+        buttons.append(
+            [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+        )
+        text = f"🏠 *{md_escape(room.room)}*\nВыберите устройство для настройки."
+        return text, InlineKeyboardMarkup(buttons)
+
+    def _build_metrics_menu(
+        self,
+        telegram_id: int,
+        room_name: str,
+        device_id: int,
+        snapshots: Optional[List[RoomSnapshot]] = None,
+    ) -> Tuple[str, InlineKeyboardMarkup]:
+        edge_user_id = self._get_edge_user_id(telegram_id)
+        if not edge_user_id or not self.user_preferences:
+            return (
+                "Для изменения настроек необходимо авторизоваться в EDGE Dashboard и привязать Telegram.",
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Помещения", callback_data="pref_rooms")]]
+                ),
+            )
+
+        snapshots = snapshots or build_room_snapshots(self.device_registry)
+        room = next((snap for snap in snapshots if snap.room == room_name), None)
+        if not room:
+            return (
+                "Помещение недоступно. Попробуйте снова.",
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Помещения", callback_data="pref_rooms")]]
+                ),
+            )
+        device = next((dev for dev in room.devices if dev.device_id == device_id), None)
+        if not device:
+            return (
+                "Устройство не найдено в помещении.",
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Устройства", callback_data="pref_rooms")]]
+                ),
+            )
+
+        prefs = self.user_preferences.get_preferences(edge_user_id)
+        room_bucket = prefs.get("rooms", {}).get(room_name, {})
+        current_metrics = room_bucket.get(device_id, [])
+        metrics_from_snapshot = room.device_metrics.get(device_id) or {}
+        meta_bucket = room.metric_metadata.get(device_id, {})
+        adapter_meta = get_device_metric_metadata(device.device_type)
+
+        available_metrics: List[str] = []
+        seen: set[str] = set()
+        for key in metrics_from_snapshot.keys():
+            if key not in seen:
+                seen.add(key)
+                available_metrics.append(key)
+        for key in list(meta_bucket.keys()) + list(adapter_meta.keys()):
+            if key not in seen:
+                seen.add(key)
+                available_metrics.append(key)
+
+        if not available_metrics:
+            return (
+                "Нет доступных метрик для отображения.",
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Устройства", callback_data="pref_rooms")]]
+                ),
+            )
+
+        buttons: List[List[InlineKeyboardButton]] = []
+        for key in available_metrics:
+            meta_obj = meta_bucket.get(key)
+            if meta_obj and getattr(meta_obj, "label", None):
+                label = meta_obj.label
+            else:
+                adapter_info = (
+                    adapter_meta.get(key, {}) if isinstance(adapter_meta, dict) else {}
+                )
+                label = adapter_info.get("label") or key
+            active = key in current_metrics
+            icon = "✅" if active else "☐"
+            token = self._register_callback_token(
+                telegram_id,
+                {"room": room_name, "device_id": device_id, "metric": key},
+            )
+            buttons.append(
+                [InlineKeyboardButton(f"{icon} {md_escape(label)}", callback_data=f"pref_toggle:{token}")]
+            )
+
+        room_token = self._register_callback_token(telegram_id, {"room": room_name})
+        buttons.append(
+            [InlineKeyboardButton("⬅️ Устройства", callback_data=f"pref_room:{room_token}")]
+        )
+        buttons.append(
+            [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+        )
+
+        text = (
+            f"🧩 *{md_escape(device.name or f'Устройство {device.device_id}')}*\n"
+            "Включайте/выключайте метрики одной кнопкой."
+        )
+        return text, InlineKeyboardMarkup(buttons)
 
     # =============================================================
     # EDGE user registry sync
@@ -765,51 +1105,22 @@ class KUBTelegramBot:
 
         try:
             await send_typing_action(update, context)
-
-            # Читаем данные из SQLite
+            snapshots = build_room_snapshots(self.device_registry)
+            status_text, badges = self._render_status_view(user.id, snapshots)
             data = await self.get_current_data_from_db()
-
+            status_text = await self._append_alarm_analysis(status_text, data)
             if data:
-                status_text = format_sensor_data(data)
-                # Добавляем оценку причин аварии и нейтрализации
-                assess = await self.compute_alarm_assessment(data)
-                if assess["items"]:
-                    status_text += "\n**🧯 Анализ аварии:**\n"
-                    for it in assess["items"][:5]:
-                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
-                    if assess["all_neutralized"] and data.get("alarm_relay") is True:
-                        status_text += (
-                            "\n✅ Причины устранены — можно сбросить реле аварии."
-                        )
-                # Подсказка: датчики восстановились, а аварии/реле ещё активны → предложить сброс
                 recovery = await self.get_recent_sensor_recovery(minutes=15)
-                relay_on = (
-                    bool(data.get("alarm_relay")) if "alarm_relay" in data else False
-                )
+                relay_on = bool(data.get("alarm_relay")) if "alarm_relay" in data else False
                 alarms_cnt = int(data.get("active_alarms", 0) or 0)
-                recovered_sensors = [
-                    name.upper() for name, ok in recovery.items() if ok
-                ]
+                recovered_sensors = [name.upper() for name, ok in recovery.items() if ok]
                 if recovered_sensors and (relay_on or alarms_cnt > 0):
                     rec_str = ", ".join(recovered_sensors)
                     status_text += (
                         f"\n\nℹ️ Обнаружено восстановление датчиков: {rec_str}.\n"
                         f"Можно выполнить сброс аварий (кнопка ниже)."
                     )
-            else:
-                status_text = error_message(
-                    "Нет данных от КУБ-1063\n\n"
-                    "Запустите основную систему:\n"
-                    "`python tools/start_all_services.py`"
-                )
-
             access_level = self.bot_db.get_user_access_level(user.id)
-            badges = {}
-            if data:
-                badges = {
-                    "alarms": int(data.get("active_alarms", 0) or 0),
-                    "warnings": int(data.get("active_warnings", 0) or 0),
-                }
             menu = build_main_menu(access_level, badges=badges)
 
             status_text = truncate_text(status_text, 4000)
@@ -829,6 +1140,19 @@ class KUBTelegramBot:
                 reply_markup=back_menu,
                 parse_mode="Markdown",
             )
+
+    async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /report — открыть настройки отображения метрик."""
+        user = update.effective_user
+        if not check_user_permission(user.id, "read", self.bot_db):
+            await update.message.reply_text(
+                error_message("У вас нет прав для просмотра данных"),
+                parse_mode="Markdown",
+            )
+            return
+        await send_typing_action(update, context)
+        text, markup = self._build_rooms_menu(user.id)
+        await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
 
     async def cmd_setpin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /setpin <NNNN> — обновить PIN для доступа к веб-дашборду."""
@@ -877,6 +1201,41 @@ class KUBTelegramBot:
             logger.error(f"❌ Ошибка установки PIN: {exc}")
             await update.message.reply_text(
                 "❌ Не удалось обновить PIN. Попробуйте позже или обратитесь к администратору."
+            )
+
+    async def cmd_reload_devices(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /devices_reload — перечитать devices.yaml без перезапуска бота."""
+        user = update.effective_user
+        access_level = self.bot_db.get_user_access_level(user.id)
+        if user.id not in self.config.telegram.admin_users and access_level not in (
+            "engineer",
+            "admin",
+        ):
+            await update.message.reply_text(
+                error_message("Команда доступна только администраторам и инженерам"),
+                parse_mode="Markdown",
+            )
+            return
+
+        await send_typing_action(update, context)
+        try:
+            self.device_registry.load_devices_from_config()
+            self._callback_tokens.pop(user.id, None)
+            await update.message.reply_text(
+                success_message(
+                    "Конфигурация устройств обновлена. Новые помещения доступны сразу."
+                ),
+                parse_mode="Markdown",
+            )
+            logger.info(
+                "🔄 Пользователь %s инициировал обновление конфигурации устройств",
+                user.id,
+            )
+        except Exception as exc:
+            logger.error("❌ Ошибка обновления устройств: %s", exc)
+            await update.message.reply_text(
+                error_message(f"Не удалось перезагрузить устройства: {exc}"),
+                parse_mode="Markdown",
             )
 
     async def cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1575,6 +1934,19 @@ class KUBTelegramBot:
                 await self._handle_show_help(query, context)
             elif data == "settings":
                 await self._handle_settings(query, context)
+            elif data == "configure_report":
+                await self._handle_configure_report(query, context)
+            elif data == "pref_rooms":
+                await self._handle_configure_report(query, context)
+            elif data.startswith("pref_room:"):
+                token = data.split(":", 1)[1]
+                await self._handle_pref_room_selection(query, context, token)
+            elif data.startswith("pref_device:"):
+                token = data.split(":", 1)[1]
+                await self._handle_pref_device_selection(query, context, token)
+            elif data.startswith("pref_toggle:"):
+                token = data.split(":", 1)[1]
+                await self._handle_pref_toggle_metric(query, context, token)
 
             # НОВЫЕ ОБРАБОТЧИКИ МЕНЮ НАСТРОЕК
             elif data == "manage_users":
@@ -1668,6 +2040,67 @@ class KUBTelegramBot:
             parse_mode="Markdown",
         )
 
+    async def _handle_configure_report(self, query, context):
+        user = query.from_user
+        if not check_user_permission(user.id, "read", self.bot_db):
+            await query.edit_message_text(
+                error_message("У вас нет прав для изменения отчёта"),
+                parse_mode="Markdown",
+                reply_markup=build_back_menu(self.bot_db.get_user_access_level(user.id)),
+            )
+            return
+        text, markup = self._build_rooms_menu(user.id)
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+
+    async def _handle_pref_room_selection(self, query, context, token: str):
+        user = query.from_user
+        payload = self._resolve_callback_token(user.id, token)
+        if not payload or "room" not in payload:
+            await query.answer("Настройки устарели, откройте меню заново", show_alert=True)
+            return
+        text, markup = self._build_devices_menu(user.id, payload["room"])
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+
+    async def _handle_pref_device_selection(self, query, context, token: str):
+        user = query.from_user
+        payload = self._resolve_callback_token(user.id, token)
+        if not payload or "room" not in payload or "device_id" not in payload:
+            await query.answer("Данные устройства устарели", show_alert=True)
+            return
+        text, markup = self._build_metrics_menu(
+            user.id, payload["room"], int(payload["device_id"])
+        )
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+
+    async def _handle_pref_toggle_metric(self, query, context, token: str):
+        user = query.from_user
+        payload = self._resolve_callback_token(user.id, token)
+        if not payload or "room" not in payload or "device_id" not in payload:
+            await query.answer("Элемент недоступен", show_alert=True)
+            return
+        metric_key = payload.get("metric")
+        room_name = payload["room"]
+        device_id = int(payload["device_id"])
+        edge_user_id = self._get_edge_user_id(user.id)
+        if not edge_user_id or not self.user_preferences:
+            await query.answer("Нет привязки к EDGE пользователю", show_alert=True)
+            return
+
+        prefs = self.user_preferences.get_preferences(edge_user_id)
+        current = prefs.get("rooms", {}).get(room_name, {}).get(device_id, [])
+        enabled = metric_key not in current
+        try:
+            self.user_preferences.toggle_metric(
+                edge_user_id, room_name, device_id, metric_key, enabled
+            )
+        except Exception as exc:
+            logger.warning("⚠️ Не удалось обновить предпочтения: %s", exc)
+            await query.answer("Не удалось сохранить настройку", show_alert=True)
+            return
+
+        text, markup = self._build_metrics_menu(user.id, room_name, device_id)
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+
     async def _handle_show_status(self, query, context):
         """Показать статус"""
         await self._handle_refresh_status(query, context)
@@ -1687,40 +2120,13 @@ class KUBTelegramBot:
             return
 
         try:
-            # Читаем данные из SQLite
+            snapshots = build_room_snapshots(self.device_registry)
+            status_text, badges = self._render_status_view(user.id, snapshots)
             data = await self.get_current_data_from_db()
-
-            if data:
-                # Оптимистичный режим: если после сброса прошло <35с, считаем реле ВЫКЛ
-                try:
-                    import time as _t
-
-                    deadline = self._optimistic_clear_until.get(query.message.chat_id)
-                    if deadline and _t.time() < deadline:
-                        data["alarm_relay"] = False
-                except Exception:
-                    pass
-                status_text = format_sensor_data(data)
-                assess = await self.compute_alarm_assessment(data)
-                if assess["items"]:
-                    status_text += "\n**🧯 Анализ аварии:**\n"
-                    for it in assess["items"][:5]:
-                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
-                    if assess["all_neutralized"] and data.get("alarm_relay") is True:
-                        status_text += (
-                            "\n✅ Причины устранены — можно сбросить реле аварии."
-                        )
-            else:
-                status_text = error_message(
-                    "Нет данных от КУБ-1063\n\n"
-                    "Возможные причины:\n"
-                    "• Основная система не запущена\n"
-                    "• Нет связи с контроллером\n\n"
-                    "Запустите: `python tools/start_all_services.py`"
-                )
+            status_text = await self._append_alarm_analysis(status_text, data)
 
             access_level = self.bot_db.get_user_access_level(user.id)
-            menu = build_main_menu(access_level)
+            menu = build_main_menu(access_level, badges=badges)
 
             status_text = truncate_text(status_text, 4000)
 
@@ -1908,20 +2314,21 @@ class KUBTelegramBot:
                     state = self.bot_db.get_bot_state(chat_id)
                     mid = state.get("last_message_id")
                     if mid:
+                        status_text2, badges2 = self._render_status_view(chat_id)
                         data2 = await self.get_current_data_from_db() or {}
-                        data2["alarm_relay"] = False
-                        status_text2 = format_sensor_data(data2)
-                        assess2 = await self.compute_alarm_assessment(data2)
-                        if assess2["items"]:
-                            status_text2 += "\n**🧯 Анализ аварии:**\n"
-                            for it in assess2["items"][:5]:
-                                status_text2 += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
-                            if assess2["all_neutralized"]:
-                                status_text2 += "\n✅ Причины устранены — можно сбросить реле аварии."
+                        status_text2 = await self._append_alarm_analysis(
+                            status_text2, data2
+                        )
+                        status_text2 += "\n⏳ Ожидаем подтверждения отключения реле"
+                        menu2 = build_main_menu(
+                            self.bot_db.get_user_access_level(chat_id),
+                            badges=badges2,
+                        )
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=mid,
                             text=truncate_text(status_text2, 4000),
+                            reply_markup=menu2,
                             parse_mode="Markdown",
                         )
                         logger.info(
@@ -1984,6 +2391,8 @@ class KUBTelegramBot:
                 cleared,
             )
 
+            snapshots_cache: Optional[List[RoomSnapshot]] = None
+
             if changed or periodic:
                 # Кому отправлять: админам и операторам
                 recipients = set(self.config.telegram.admin_users or [])
@@ -2000,28 +2409,25 @@ class KUBTelegramBot:
                 except Exception:
                     pass
                 if recipients:
-                    # Подготовим мастер‑сообщение (редактируемое)
-                    try:
-                        status_text = format_sensor_data(data)
-                        assess = await self.compute_alarm_assessment(data)
-                        if assess["items"]:
-                            status_text += "\n**🧯 Анализ аварии:**\n"
-                            for it in assess["items"][:5]:
-                                status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
-                    except Exception as _e:
-                        logger.warning(f"⚠️ Ошибка подготовки текста аварии: {_e}")
-                        status_text = (
-                            f"🚨 Обнаружены активные аварии: {alarms}\n"
-                            f"⚠️ Предупреждения: {warns}"
-                        )
+                    snapshots_cache = snapshots_cache or build_room_snapshots(
+                        self.device_registry
+                    )
                     for uid in recipients:
                         try:
+                            status_text, badges_for_uid = self._render_status_view(
+                                uid, snapshots_cache
+                            )
+                            status_text = await self._append_alarm_analysis(
+                                status_text, data
+                            )
                             # Пытаемся отредактировать мастер‑сообщение, чтобы не плодить новые
                             state = self.bot_db.get_bot_state(uid)
                             mid = state.get("last_message_id")
                             if mid:
                                 access_level = self.bot_db.get_user_access_level(uid)
-                                menu = build_main_menu(access_level)
+                                menu = build_main_menu(
+                                    access_level, badges=badges_for_uid
+                                )
                                 await context.bot.edit_message_text(
                                     chat_id=uid,
                                     message_id=mid,
@@ -2065,19 +2471,22 @@ class KUBTelegramBot:
                             recipients.add(int(u.get("telegram_id")))
                 except Exception:
                     pass
-                status_text = format_sensor_data(data)
-                assess = await self.compute_alarm_assessment(data)
-                if assess["items"]:
-                    status_text += "\n**🧯 Анализ аварии:**\n"
-                    for it in assess["items"][:5]:
-                        status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
-                status_text += "\n✅ Аварии устранены"
+                snapshots_cache = snapshots_cache or build_room_snapshots(
+                    self.device_registry
+                )
                 for uid in recipients:
                     try:
+                        status_text, badges_for_user = self._render_status_view(
+                            uid, snapshots_cache
+                        )
+                        status_text = await self._append_alarm_analysis(
+                            status_text, data
+                        )
+                        status_text += "\n✅ Аварии устранены"
                         state = self.bot_db.get_bot_state(uid)
                         mid = state.get("last_message_id")
                         access_level = self.bot_db.get_user_access_level(uid)
-                        menu = build_main_menu(access_level)
+                        menu = build_main_menu(access_level, badges=badges_for_user)
                         if mid:
                             await context.bot.edit_message_text(
                                 chat_id=uid,
@@ -2191,26 +2600,20 @@ class KUBTelegramBot:
                 optimistic = bool(deadline and _t.time() < deadline)
             except Exception:
                 optimistic = False
-            data_for_render = dict(data)
+            snapshots = build_room_snapshots(self.device_registry)
+            status_text, badges = self._render_status_view(chat_id, snapshots)
+            status_text = await self._append_alarm_analysis(status_text, data)
             if optimistic:
-                data_for_render["alarm_relay"] = False
-
-            status_text = format_sensor_data(data_for_render)
-            assess = await self.compute_alarm_assessment(data_for_render)
-            if assess["items"]:
-                status_text += "\n**🧯 Анализ аварии:**\n"
-                for it in assess["items"][:5]:
-                    status_text += f"• {it['title']} — {'УСТРАНЕНА' if it['neutralized'] else 'АКТИВНА'}\n"
-            # Итоговая подпись об успехе/остатке
-            if optimistic or (alarms == 0 and not relay_on):
+                status_text += "\n⏳ Ожидаем подтверждения отключения реле"
+            elif alarms == 0 and not relay_on:
                 status_text += "\n✅ Аварии сняты"
             else:
-                if alarms > 0 or relay_on:
-                    tail = []
-                    if alarms > 0:
-                        tail.append(f"Аварии: {alarms}")
-                    if relay_on:
-                        tail.append("реле аварии ВКЛ")
+                tail = []
+                if alarms > 0:
+                    tail.append(f"Аварии: {alarms}")
+                if relay_on:
+                    tail.append("реле аварии ВКЛ")
+                if tail:
                     status_text += "\n❗ " + ", ".join(tail)
 
             # Обновляем мастер‑сообщение вместо отправки нового
@@ -2218,7 +2621,7 @@ class KUBTelegramBot:
                 state = self.bot_db.get_bot_state(chat_id)
                 mid = state.get("last_message_id")
                 access_level = self.bot_db.get_user_access_level(chat_id) or "user"
-                menu = build_main_menu(access_level)
+                menu = build_main_menu(access_level, badges=badges)
                 if mid:
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
@@ -3309,7 +3712,11 @@ class KUBTelegramBot:
             # Регистрируем обработчики команд
             self.application.add_handler(CommandHandler("start", self.cmd_start))
             self.application.add_handler(CommandHandler("status", self.cmd_status))
+            self.application.add_handler(CommandHandler("report", self.cmd_report))
             self.application.add_handler(CommandHandler("stats", self.cmd_stats))
+            self.application.add_handler(
+                CommandHandler("devices_reload", self.cmd_reload_devices)
+            )
             self.application.add_handler(CommandHandler("help", self.cmd_help))
             # Управление авариями
             self.application.add_handler(CommandHandler("reset", self.cmd_reset))
@@ -3335,6 +3742,7 @@ class KUBTelegramBot:
             default_commands = [
                 BotCommand("start", "Запуск бота"),
                 BotCommand("status", "Сводка по помещениям"),
+                 BotCommand("report", "Настроить отображение"),
                 BotCommand("stats", "Краткая статистика"),
                 BotCommand("alarms", "Активные тревоги"),
                 BotCommand("reset", "Сброс тревог"),

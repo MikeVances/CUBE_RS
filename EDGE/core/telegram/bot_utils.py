@@ -371,6 +371,7 @@ def build_main_menu(
                 f"{EMOJI['refresh']} Обновить", callback_data="refresh_status"
             )
         ],
+        [InlineKeyboardButton("🧩 Настроить отчёт", callback_data="configure_report")],
     ]
 
     # Добавляем кнопки по уровню доступа

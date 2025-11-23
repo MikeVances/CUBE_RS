@@ -57,7 +57,7 @@ services:
 # База данных
 database:
   file: kub_data.db
-  commands_db: kub_commands.db
+  commands_db: EDGE/data/kub_commands.db
   timeout: 5
 
 # Все Modbus регистры КУБ-1063

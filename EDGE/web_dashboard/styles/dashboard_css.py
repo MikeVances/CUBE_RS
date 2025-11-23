@@ -124,6 +124,20 @@ DASHBOARD_CSS = """
         color: var(--edge-text) !important;
     }
 
+    /* Контейнеры помещений */
+    .room-frame {
+        background-color: var(--edge-panel);
+        border: 1px solid var(--edge-border);
+        border-radius: 16px;
+        padding: 18px 18px 12px;
+        margin-bottom: 22px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    }
+
+    .room-frame .stTabs {
+        margin-top: 10px;
+    }
+
     /* Карточки помещений и overview */
     .overview-card, .room-panel {
         background-color: var(--edge-panel);

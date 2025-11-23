@@ -20,7 +20,7 @@ modbus_tcp:
   max_connections: 10
 database:
   file: data/kub_data.db
-  commands_db: data/kub_commands.db
+  commands_db: EDGE/data/kub_commands.db
   timeout: 5
   journal_mode: WAL
   synchronous: NORMAL

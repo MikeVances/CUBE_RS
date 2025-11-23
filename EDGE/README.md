@@ -249,7 +249,7 @@ curl http://localhost:8090/errors
 
 EDGE использует SQLite для хранения данных:
 - `data/kub_data.db` - данные устройств
-- `data/kub_commands.db` - команды и пользователи Telegram
+- `EDGE/data/kub_commands.db` - команды и пользователи Telegram
 
 База данных создается автоматически при первом запуске.
 

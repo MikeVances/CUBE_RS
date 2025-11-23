@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
 
+from core.utils.paths import resolve_under_root
+
 try:
     from cryptography.fernet import Fernet
     from cryptography.hazmat.primitives import hashes
@@ -410,7 +412,11 @@ class SecurityManager:
         }
 
         # Проверка прав доступа к критическим файлам
-        critical_files = ["kub_commands.db", "kub_data.db", "config/bot_secrets.json"]
+        critical_files = [
+            resolve_under_root("EDGE/data/kub_commands.db"),
+            resolve_under_root("kub_data.db"),
+            resolve_under_root("config/bot_secrets.json"),
+        ]
 
         permissions_ok = True
         for file_path in critical_files:

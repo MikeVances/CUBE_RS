@@ -95,6 +95,11 @@ class DeviceAdapter(ABC):
     def get_warnings(self, data: DeviceData) -> List[str]:
         """Получение предупреждений"""
         pass
+
+    @property
+    def max_batch_size(self) -> int:
+        """Максимальное количество регистров в одном запросе FC03/FC04."""
+        return 20
     
     def get_register_addresses(self) -> List[int]:
         """Получение списка адресов регистров для чтения"""

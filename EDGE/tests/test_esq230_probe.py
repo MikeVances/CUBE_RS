@@ -13,6 +13,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from modbus.universal_reader import UniversalModbusReader  # noqa: E402
 from core.device_adapters.base import RegisterType  # noqa: E402
 
+# Значения в документации указаны как «только чтение», но на реальном ESQ-230
+# тесты показывают, что регистры читаются только через FC03 (holding).
+# Скрипт оставляем универсальным, но теперь он по умолчанию не шлёт FC04,
+# чтобы не пугать пользователя ошибками.
 DEFAULT_RANGES: List[Tuple[int, int]] = [
     (0x1001, 8),  # set freq .. running speed
     (0x1009, 4),  # IO status + AI voltage
@@ -41,6 +45,11 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--port", required=True)
     parser.add_argument("--slave", type=int, required=True)
     parser.add_argument("--ranges", help="Custom ranges start:count,... in hex", default=None)
+    parser.add_argument(
+        "--fc04",
+        action="store_true",
+        help="Дополнительно попробовать FC04 (по умолчанию только FC03)",
+    )
     args = parser.parse_args(argv)
 
     ranges = DEFAULT_RANGES
@@ -63,7 +72,8 @@ def main(argv: List[str]) -> int:
         for start, count in ranges:
             print(f"Пробуем диапазон 0x{start:04X} len={count}")
             read_block(reader, args.slave, start, count, RegisterType.HOLDING)
-            read_block(reader, args.slave, start, count, RegisterType.INPUT)
+            if args.fc04:
+                read_block(reader, args.slave, start, count, RegisterType.INPUT)
     finally:
         reader.disconnect()
     return 0

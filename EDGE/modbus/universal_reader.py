@@ -402,47 +402,58 @@ class UniversalModbusReader:
             else:
                 holding_regs.append(reg_info.address)
 
-        # Читаем Holding Registers
-        if holding_regs:
-            holding_regs.sort()
-            logger.debug(f"  Читаем {len(holding_regs)} Holding регистров (FC03)")
-            for addr in holding_regs:
+        def read_groups(addresses: List[int], reg_type: RegisterType) -> None:
+            if not addresses:
+                return
+            addresses.sort()
+            logger.debug(
+                "  Читаем %d %s регистров (FC%02d) пакетами до %d",
+                len(addresses),
+                "Holding" if reg_type == RegisterType.HOLDING else "Input",
+                3 if reg_type == RegisterType.HOLDING else 4,
+                batch_size,
+            )
+
+            groups: List[List[int]] = []
+            current_group = [addresses[0]]
+            for addr in addresses[1:]:
+                if addr == current_group[-1] + 1 and len(current_group) < batch_size:
+                    current_group.append(addr)
+                else:
+                    groups.append(current_group)
+                    current_group = [addr]
+            groups.append(current_group)
+
+            for group in groups:
+                start_addr = group[0]
+                count = len(group)
                 try:
-                    request = self._build_modbus_request(slave_id, addr, count=1, register_type=RegisterType.HOLDING)
+                    request = self._build_modbus_request(
+                        slave_id,
+                        start_addr,
+                        count=count,
+                        register_type=reg_type,
+                    )
                     self.serial_connection.write(request)
-                    time.sleep(0.01)  # Минимальная задержка
-
-                    # Читаем фиксированный размер ответа: slave_id(1) + func(1) + byte_count(1) + data(2) + crc(2) = 7 bytes
-                    response = self.serial_connection.read(7)
-                    registers = self._parse_modbus_response(response, expected_count=1)
-
-                    if registers and len(registers) > 0:
-                        results[addr] = registers[0]
-
-                except Exception as e:
-                    logger.error(f"❌ Ошибка чтения Holding регистра 0x{addr:04X}: {e}")
+                    time.sleep(0.01 * count)
+                    response = self.serial_connection.read(5 + count * 2)
+                    registers = self._parse_modbus_response(response, expected_count=count)
+                    if registers:
+                        for idx, value in enumerate(registers):
+                            results[start_addr + idx] = value
+                    time.sleep(0.02)
+                except Exception as exc:
+                    logger.error(
+                        "❌ Ошибка чтения %s регистров 0x%04X-0x%04X: %s",
+                        "Holding" if reg_type == RegisterType.HOLDING else "Input",
+                        start_addr,
+                        start_addr + count - 1,
+                        exc,
+                    )
                     continue
 
-        # Читаем Input Registers
-        if input_regs:
-            input_regs.sort()
-            logger.debug(f"  Читаем {len(input_regs)} Input регистров (FC04)")
-            for addr in input_regs:
-                try:
-                    request = self._build_modbus_request(slave_id, addr, count=1, register_type=RegisterType.INPUT)
-                    self.serial_connection.write(request)
-                    time.sleep(0.01)  # Минимальная задержка
-
-                    # Читаем фиксированный размер ответа: slave_id(1) + func(1) + byte_count(1) + data(2) + crc(2) = 7 bytes
-                    response = self.serial_connection.read(7)
-                    registers = self._parse_modbus_response(response, expected_count=1)
-
-                    if registers and len(registers) > 0:
-                        results[addr] = registers[0]
-
-                except Exception as e:
-                    logger.error(f"❌ Ошибка чтения Input регистра 0x{addr:04X}: {e}")
-                    continue
+        read_groups(holding_regs, RegisterType.HOLDING)
+        read_groups(input_regs, RegisterType.INPUT)
 
         return results
 
@@ -476,10 +487,12 @@ class UniversalModbusReader:
         )
 
         # Читаем регистры с учётом их типов (Holding/Input)
+        batch_size = getattr(adapter, "max_batch_size", 20)
+
         raw_registers = self._read_registers_with_types(
             slave_id=device_info.slave_id,
             register_map=register_map,
-            batch_size=20  # Читаем по 20 регистров за раз
+            batch_size=batch_size  # адаптер задаёт безопасный размер блока
         )
 
         if not raw_registers:

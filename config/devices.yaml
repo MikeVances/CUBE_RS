@@ -1,37 +1,33 @@
 devices:
-- description: Автоскан EDGE
-  device_id: 1
+- device_id: 1
   device_type: KUB-1063
-  enabled: true
-  location: Бережки
-  name: 'KUB-1063 #1'
-  poll_interval: 20.0
-  room: Помещени1
   slave_id: 1
-- description: Автоскан EDGE
-  device_id: 2
+  name: 'KUB-1063 #1'
+  description: Автоскан EDGE
+  enabled: true
+  location: null
+  poll_interval: 20.0
+- device_id: 2
   device_type: KUB-1112
-  enabled: true
-  location: Бережки
-  name: 'KUB-1112 #2'
-  poll_interval: 20.0
-  room: Помещени1
   slave_id: 2
-- description: Автоскан EDGE
-  device_id: 3
+  name: 'KUB-1112 #2'
+  description: Автоскан EDGE
+  enabled: true
+  location: null
+  poll_interval: 20.0
+- device_id: 3
   device_type: VFD-INVERTER
-  enabled: true
-  location: Рузово
-  name: 'VFD-INVERTER #3'
-  poll_interval: 20.0
-  room: Помещени4
   slave_id: 3
-- description: Автоскан EDGE
-  device_id: 4
-  device_type: ESQ-230
+  name: 'VFD-INVERTER #3'
+  description: Автоскан EDGE
   enabled: true
-  location: Бережки
-  name: 'ESQ-230 #4'
+  location: null
   poll_interval: 20.0
-  room: Помещени1
+- device_id: 4
+  device_type: ESQ-230
   slave_id: 4
+  name: 'ESQ-230 #4'
+  description: Автоскан EDGE
+  enabled: true
+  location: null
+  poll_interval: 20.0

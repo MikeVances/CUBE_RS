@@ -60,7 +60,10 @@ class ESQ230Adapter(DeviceAdapter):
 
     def __init__(self) -> None:
         self._registers: Dict[str, RegisterInfo] = {
-            "set_frequency": RegisterInfo(0x1001, "set_frequency", ValueType.INTEGER, unit="Гц", description="Заданная частота"),
+            # Документация называет мониторинговые регистры «input only»,
+            # но реальный привод отвечает только на FC03, поэтому явно
+            # помечаем их как HOLDING, чтобы опросник использовал FC03.
+            "set_frequency": RegisterInfo(0x1001, "set_frequency", ValueType.INTEGER, unit="Гц", description="Заданная частота", register_type=RegisterType.HOLDING),
             "dc_bus_voltage": RegisterInfo(0x1002, "dc_bus_voltage", ValueType.INTEGER, unit="В", description="Напряжение звена постоянного тока"),
             "output_voltage": RegisterInfo(0x1003, "output_voltage", ValueType.INTEGER, unit="В", description="Выходное напряжение"),
             "output_current": RegisterInfo(0x1004, "output_current", ValueType.INTEGER, unit="А", description="Выходной ток"),
@@ -99,6 +102,12 @@ class ESQ230Adapter(DeviceAdapter):
     @property
     def register_map(self) -> Dict[str, RegisterInfo]:
         return self._registers
+
+    @property
+    def max_batch_size(self) -> int:
+        # Привод уверенно отвечает на блоки до ~6 регистров, большие запросы
+        # часто приводят к пустым ответам. Ограничим пакет при опросе.
+        return 6
 
     def parse_register_value(self, register_name: str, raw_value: int) -> tuple[Any, str]:
         info = self._registers.get(register_name)

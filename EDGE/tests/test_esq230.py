@@ -18,19 +18,19 @@ ADAPTER = ESQ230Adapter()
 REGISTER_SPECS = ADAPTER.register_map
 
 
-def read_registers(reader: UniversalModbusReader, slave_id: int) -> Dict[int, int]:
+def read_registers(reader: UniversalModbusReader, slave_id: int, batch_size: int) -> Dict[int, int]:
     addresses = [info.address for info in REGISTER_SPECS.values()]
-    return reader.read_registers_batch(slave_id, addresses, batch_size=16)
+    return reader.read_registers_batch(slave_id, addresses, batch_size=batch_size)
 
 
-def run_live_esq(port: str, slave_id: int, timeout: float = 0.5) -> bool:
+def run_live_esq(port: str, slave_id: int, timeout: float = 0.5, batch_size: int = 8) -> bool:
     reader = UniversalModbusReader(port=port, baudrate=9600, timeout=timeout)
     if not reader.connect():
         print(f"❌ Не удалось подключиться к {port}")
         return False
 
     try:
-        raw = read_registers(reader, slave_id)
+        raw = read_registers(reader, slave_id, batch_size=batch_size)
         if not raw:
             print("❌ Данные не получены")
             return False
@@ -63,8 +63,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--port", required=True, help="Serial port (e.g. /dev/ttyUSB0)")
     parser.add_argument("--slave", type=int, required=True, help="Slave ID of ESQ drive")
     parser.add_argument("--timeout", type=float, default=0.5)
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=8,
+        help="Максимум регистров за один запрос (default: 8)",
+    )
     args = parser.parse_args(argv)
-    return 0 if run_live_esq(args.port, args.slave, args.timeout) else 1
+    return 0 if run_live_esq(args.port, args.slave, args.timeout, args.batch) else 1
 
 
 if __name__ == "__main__":

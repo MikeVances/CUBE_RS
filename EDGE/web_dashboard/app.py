@@ -1350,10 +1350,10 @@ def render_charts_tab(rooms: List[RoomSnapshot]) -> None:
                 alt.Tooltip("value:Q", title="Значение"),
             ],
         )
-        .properties(width="container", height=320)
+        .properties(width=800, height=320)
         .interactive()
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     meta = getattr(room, "metric_metadata", {}).get(device.device_id, {}).get(selected_metric)
     unit = f" {meta.unit}" if meta and meta.unit else ""
     st.caption(f"Период: последние {hours} ч. Значения{unit}.")

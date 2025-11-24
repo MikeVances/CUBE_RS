@@ -59,13 +59,20 @@ def _format_bitfield(value: int, labels: Dict[int, str]) -> str:
     return ", ".join(active) if active else "нет активных"
 
 
-def read_vfd_raw(reader: UniversalModbusReader, device: DeviceInfo) -> Dict[int, int]:
-    return reader._read_registers_with_types(device.slave_id, REGISTER_SPECS)  # type: ignore[attr-defined]
+def read_vfd_raw(
+    reader: UniversalModbusReader,
+    device: DeviceInfo,
+    registers: Dict[str, RegisterInfo],
+) -> Dict[int, int]:
+    return reader._read_registers_with_types(device.slave_id, registers)  # type: ignore[attr-defined]
 
 
-def parse_vfd_registers(raw: Dict[int, int]) -> Dict[str, Tuple[object, str]]:
+def parse_vfd_registers(
+    raw: Dict[int, int],
+    registers: Dict[str, RegisterInfo],
+) -> Dict[str, Tuple[object, str]]:
     parsed: Dict[str, Tuple[object, str]] = {}
-    for name, info in REGISTER_SPECS.items():
+    for name, info in registers.items():
         if info.address not in raw:
             continue
         parsed[name] = _parse_value(info, raw[info.address])
@@ -83,11 +90,18 @@ def describe_fault(code: object) -> str:
     return f"Err{fault_int:02d} – {desc}" if desc else f"Err{fault_int:02d}"
 
 
-def run_live_vfd(port: str, slave_id: int, timeout: float = 1.0) -> bool:
+def run_live_vfd(
+    port: str,
+    slave_id: int,
+    timeout: float = 1.0,
+    only_registers: Dict[str, RegisterInfo] | None = None,
+) -> bool:
     reader = UniversalModbusReader(port=port, baudrate=9600, timeout=timeout)
     if not reader.connect():
         print(f"❌ Не удалось подключиться к {port}")
         return False
+
+    registers = only_registers or REGISTER_SPECS
 
     try:
         device = DeviceInfo(
@@ -99,12 +113,12 @@ def run_live_vfd(port: str, slave_id: int, timeout: float = 1.0) -> bool:
         )
 
         print(f"📡 Читаем VFD (port={port}, slave_id={slave_id})")
-        raw = read_vfd_raw(reader, device)
+        raw = read_vfd_raw(reader, device, registers)
         if not raw:
             print("❌ Данные не получены")
             return False
 
-        parsed = parse_vfd_registers(raw)
+        parsed = parse_vfd_registers(raw, registers)
         print(f"✅ Получены {len(parsed)} регистров")
 
         def show(name: str, formatter=lambda v: v):
@@ -116,25 +130,36 @@ def run_live_vfd(port: str, slave_id: int, timeout: float = 1.0) -> bool:
             else:
                 print(f"   {name}: {formatter(value)}")
 
-        if "running_state" in REGISTER_SPECS:
-            show("running_state", lambda v: RUN_STATE_MAP.get(int(v), f"Состояние {v}"))
-        if "fault_code" in REGISTER_SPECS:
-            show("fault_code", describe_fault)
-        if "running_frequency" in REGISTER_SPECS:
-            show("running_frequency", lambda v: f"{v:.1f} Hz")
-        if "running_speed" in REGISTER_SPECS:
-            show("running_speed", lambda v: f"{int(v)} RPM")
-        if "dc_bus_voltage" in REGISTER_SPECS:
-            show("dc_bus_voltage", lambda v: f"{v:.1f} V")
-        if "cumulative_running_time" in REGISTER_SPECS:
-            show("cumulative_running_time", lambda v: f"{int(v)} ч")
-        if "cumulative_power_consumption" in REGISTER_SPECS:
-            show("cumulative_power_consumption", lambda v: f"{v:.1f} кВт·ч")
+        def show_default():
+            if "running_state" in registers:
+                show("running_state", lambda v: RUN_STATE_MAP.get(int(v), f"Состояние {v}"))
+            if "fault_code" in registers:
+                show("fault_code", describe_fault)
+            if "running_frequency" in registers:
+                show("running_frequency", lambda v: f"{v:.1f} Hz")
+            if "running_speed" in registers:
+                show("running_speed", lambda v: f"{int(v)} RPM")
+            if "dc_bus_voltage" in registers:
+                show("dc_bus_voltage", lambda v: f"{v:.1f} V")
+            if "cumulative_running_time" in registers:
+                show("cumulative_running_time", lambda v: f"{int(v)} ч")
+            if "cumulative_power_consumption" in registers:
+                show("cumulative_power_consumption", lambda v: f"{v:.1f} кВт·ч")
+            if "di_input_state" in registers:
+                di_value, _ = parsed.get("di_input_state", (None, "missing"))
+                if di_value is not None:
+                    print(f"   di_input_state: 0x{int(di_value):04X}")
 
-        if "di_input_state" in REGISTER_SPECS:
-            di_value, _ = parsed.get("di_input_state", (None, "missing"))
-            if di_value is not None:
-                print(f"   di_input_state: 0x{int(di_value):04X}")
+        if only_registers:
+            for name in registers:
+                formatter = (
+                    (lambda v: f"{v:.1f} °C")
+                    if name.endswith("temperature")
+                    else (lambda v: v)
+                )
+                show(name, formatter)
+        else:
+            show_default()
 
         # История аварий и информация недоступны на данной модели
 
@@ -149,9 +174,26 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--port", required=True, help="Serial port (e.g. /dev/ttyUSB0)")
     parser.add_argument("--slave", type=int, required=True, help="Slave ID of VFD")
     parser.add_argument("--timeout", type=float, default=1.0)
+    parser.add_argument(
+        "--regs",
+        help="Comma-separated register names to read (default: все)",
+        default=None,
+    )
     args = parser.parse_args(argv)
 
-    return 0 if run_live_vfd(args.port, args.slave, args.timeout) else 1
+    subset = None
+    if args.regs:
+        subset = {}
+        for name in args.regs.split(","):
+            name = name.strip()
+            if not name:
+                continue
+            info = REGISTER_SPECS.get(name)
+            if not info:
+                raise SystemExit(f"Неизвестный регистр '{name}'")
+            subset[name] = info
+
+    return 0 if run_live_vfd(args.port, args.slave, args.timeout, subset) else 1
 
 
 if __name__ == "__main__":

@@ -333,7 +333,7 @@ class VFDInverterAdapter(DeviceAdapter):
 
             # U0-25: Motor Temperature Value
             "motor_temperature": RegisterInfo(
-                address=0x101A,
+                address=0x1019,
                 name="motor_temperature",
                 value_type=ValueType.TEMPERATURE,
                 unit="°C",
@@ -344,7 +344,7 @@ class VFDInverterAdapter(DeviceAdapter):
 
             # U0-26: IGBT Temperature Value
             "igbt_temperature": RegisterInfo(
-                address=0x101B,
+                address=0x101A,
                 name="igbt_temperature",
                 value_type=ValueType.TEMPERATURE,
                 unit="°C",
@@ -355,7 +355,7 @@ class VFDInverterAdapter(DeviceAdapter):
 
             # U0-27: Actual Switching Frequency
             "actual_switching_frequency": RegisterInfo(
-                address=0x101C,
+                address=0x101B,
                 name="actual_switching_frequency",
                 value_type=ValueType.FLOAT,
                 unit="kHz",
@@ -365,7 +365,7 @@ class VFDInverterAdapter(DeviceAdapter):
 
             # U0-28: M-axis Current Actual Value
             "m_axis_current": RegisterInfo(
-                address=0x101D,
+                address=0x101C,
                 name="m_axis_current",
                 value_type=ValueType.FLOAT,
                 unit="A",
@@ -375,7 +375,7 @@ class VFDInverterAdapter(DeviceAdapter):
 
             # U0-29: T-axis Current Actual Value
             "t_axis_current": RegisterInfo(
-                address=0x101E,
+                address=0x101D,
                 name="t_axis_current",
                 value_type=ValueType.FLOAT,
                 unit="A",
@@ -385,7 +385,7 @@ class VFDInverterAdapter(DeviceAdapter):
 
             # U0-30: Feedback Speed Actual Value
             "feedback_speed": RegisterInfo(
-                address=0x101F,
+                address=0x101E,
                 name="feedback_speed",
                 value_type=ValueType.INTEGER,
                 unit="Hz",

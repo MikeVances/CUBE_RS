@@ -274,7 +274,7 @@ netstat -tulnp
 - 📚 Wiki: GitHub Wiki
 
 ### Полезные ссылки
-- [EDGE Documentation](../EDGE/docs/)
+- [EDGE Documentation](../docs/edge/README.md)
 - [APP Documentation](../APP/docs/)
 - [Architecture Overview](../docs/ARCHITECTURE.md)
 - [Deployment Guide](docs/DEPLOYMENT.md)

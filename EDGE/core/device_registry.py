@@ -507,6 +507,7 @@ class DeviceRegistry:
             "alarms",
             "warnings",
             "fault_code",
+            "relay_assignments",
         }
         allowed.update(always)
         remove_keys = [key for key in data.keys() if key not in allowed and key != "registers"]

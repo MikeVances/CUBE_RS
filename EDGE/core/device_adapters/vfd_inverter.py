@@ -41,6 +41,15 @@ READABLE_KEYS = {
 class VFDInverterAdapter(DeviceAdapter):
     """Адаптер для регулятора скорости VFD/Inverter"""
 
+    DEFAULT_DASHBOARD_METRICS = [
+        "running_speed",
+        "running_frequency",
+        "set_frequency",
+        "output_voltage",
+        "output_current",
+        "output_power",
+    ]
+
     # Предпочтительные параметры Modbus для этого инвертора
     # - регистры мониторинга читаются через FC03 (Holding Registers)
     # - база адресов U0-xx начинается с 0x1000 (смещение 0)

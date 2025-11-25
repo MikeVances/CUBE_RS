@@ -54,13 +54,22 @@ DISCRETE_INPUTS_MAP = [
 
 class KUB1112Adapter(DeviceAdapter):
     """Адаптер для КУБ-1112 с Variable System"""
-    
+
     def __init__(self):
         super().__init__()
         self._mapper = KUBVariableMapper()
         self._setup_variable_definitions()
         self._setup_variable_references()
         self._device_managers: Dict[int, DeviceVariableManager] = {}
+
+    DEFAULT_DASHBOARD_METRICS = [
+        "temperature",
+        "flame_level",
+        "flame_present",
+        "operation_mode",
+        "min_work_time",
+        "purge_duration",
+    ]
     
     @property
     def device_type(self) -> str:

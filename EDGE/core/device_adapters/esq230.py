@@ -11,6 +11,15 @@ from .base import DeviceAdapter, DeviceData, RegisterInfo, RegisterType, ValueTy
 class ESQ230Adapter(DeviceAdapter):
     """Adapter for ESQ-230 inverter (subset of monitoring registers)."""
 
+    DEFAULT_DASHBOARD_METRICS = [
+        "running_speed",
+        "set_frequency",
+        "output_voltage",
+        "output_current",
+        "output_power",
+        "remaining_run_time",
+    ]
+
     FAULT_MAP = {
         0x0000: "Ошибок нет",
         0x0001: "Зарезервировано",

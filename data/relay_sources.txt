@@ -1,0 +1,10 @@
+EDGE/core/config_manager.py
+EDGE/core/telegram/bot_main.py
+EDGE/core/telegram/bot_utils.py
+EDGE/core/device_adapters/kub1063.py
+EDGE/tests/test_telegram_offline.py
+EDGE/tests/test_kub1063.py
+EDGE/tests/verify_kub1063_registers.py
+EDGE/web_dashboard/app.py
+EDGE/modbus/dashboard_reader.py
+EDGE/modbus/modbus_storage.py

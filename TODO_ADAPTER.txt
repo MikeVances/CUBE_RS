@@ -1,0 +1,4 @@
+TODO - KUB-1063 adapter rework
+1. Map relay assignment registers (0x0100-0x013F): GNV, GRV, heaters, lighting, emergency, etc. Document which register corresponds to each function.
+2. Extend kub1063.py to read these registers (VariableReferences) and normalize payload structure relay_assignments with channel+state per function.
+3. Update dashboard to consume relay_assignments list (render cards/buttons per function) and verify on live device.

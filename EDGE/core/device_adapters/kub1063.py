@@ -4,7 +4,7 @@
 Использует Variable System для гибкого маппинга переменных
 """
 
-from typing import Dict, List, Any, Union
+from typing import Dict, List, Any, Union, Optional, TypedDict
 from .base import DeviceAdapter, RegisterInfo, DeviceData, ValueType, RegisterType
 from .variable_system import (
     KUBVariableMapper, DeviceVariableManager, VariableTypeDefinition, 
@@ -12,8 +12,298 @@ from .variable_system import (
 )
 
 
+class RelayFunctionDef(TypedDict):
+    key: str
+    label: str
+    assign_var: str
+    register_address: int
+    bitfield: Optional[str]
+    bit: Optional[int]
+    category: str
+    order: int
+    require_assignment: bool
+    channel_type: str
+
+
+def _range_definitions(
+    key_template: str,
+    label_template: str,
+    register_start: int,
+    bitfield: Optional[str],
+    bit_start: int,
+    count: int,
+    category: str,
+    index_start: int = 1,
+    channel_type: str = "relay",
+) -> List[RelayFunctionDef]:
+    entries: List[RelayFunctionDef] = []
+    for offset in range(count):
+        index_value = index_start + offset
+        key = key_template.format(index=index_value)
+        entries.append(
+            {
+                "key": key,
+                "label": label_template.format(index=index_value),
+                "assign_var": f"{key}_relay_channel",
+                "register_address": register_start + offset,
+                "bitfield": bitfield,
+                "bit": bit_start + offset,
+                "category": category,
+                "order": 0,  # переопределяется ниже
+                "require_assignment": True,
+                "channel_type": channel_type,
+            }
+        )
+    return entries
+
+
+def _single_definition(
+    key: str,
+    label: str,
+    register_address: int,
+    bitfield: Optional[str],
+    bit: Optional[int],
+    category: str,
+    assign_var: Optional[str] = None,
+    channel_type: str = "relay",
+) -> RelayFunctionDef:
+    return {
+        "key": key,
+        "label": label,
+        "assign_var": assign_var or f"{key}_relay_channel",
+        "register_address": register_address,
+        "bitfield": bitfield,
+        "bit": bit,
+        "category": category,
+        "order": 0,
+        "require_assignment": True,
+        "channel_type": channel_type,
+    }
+
+
+def _build_relay_function_definitions() -> List[RelayFunctionDef]:
+    """Составляет карту назначений реле по документации (0x0100-0x013F)."""
+    specs: List[RelayFunctionDef] = []
+    specs.extend(
+        _range_definitions(
+            key_template="gnv_base_{index}",
+            label_template="ГНВ{index} (база)",
+            register_start=0x0100,
+            bitfield="digital_outputs_1",
+            bit_start=0,
+            count=8,
+            category="ГНВ базовая",
+        )
+    )
+    specs.extend(
+        _range_definitions(
+            key_template="gnv_tunnel_{index}",
+            label_template="ГНВ{index} (туннель)",
+            register_start=0x0108,
+            bitfield="digital_outputs_1",
+            bit_start=8,
+            count=8,
+            category="ГНВ туннельная",
+        )
+    )
+    specs.extend(
+        _range_definitions(
+            key_template="grv_base_{index}",
+            label_template="ГРВ{index} (база)",
+            register_start=0x0110,
+            bitfield="digital_outputs_2",
+            bit_start=0,
+            count=2,
+            category="ГРВ",
+        )
+    )
+    specs.append(
+        _single_definition(
+            key="grv_tunnel",
+            label="ГРВ (туннель)",
+            register_address=0x0112,
+            bitfield="digital_outputs_2",
+            bit=2,
+            category="ГРВ",
+        )
+    )
+    specs.append(
+        _single_definition(
+            key="tunnel_mode_indicator",
+            label="Индикация туннеля",
+            register_address=0x0113,
+            bitfield="digital_outputs_2",
+            bit=3,
+            category="Сигналы",
+        )
+    )
+    specs.extend(
+        _range_definitions(
+            key_template="heater_{index}",
+            label_template="Нагреватель {index}",
+            register_start=0x0114,
+            bitfield="digital_outputs_2",
+            bit_start=4,
+            count=2,
+            category="Нагреватели",
+        )
+    )
+    specs.extend(
+        _range_definitions(
+            key_template="heater_{index}",
+            label_template="Нагреватель {index}",
+            register_start=0x0122,
+            bitfield="digital_outputs_2",
+            bit_start=8,
+            count=2,
+            category="Нагреватели",
+            index_start=3,
+        )
+    )
+    specs.append(
+        _single_definition(
+            key="cooler",
+            label="Охладитель",
+            register_address=0x0116,
+            bitfield="digital_outputs_2",
+            bit=6,
+            category="Охлаждение",
+        )
+    )
+    specs.append(
+        _single_definition(
+            key="emergency",
+            label="Индикация аварии",
+            register_address=0x0117,
+            bitfield="digital_outputs_2",
+            bit=7,
+            category="Сигналы",
+            assign_var="emergency_relay_channel",
+        )
+    )
+    specs[-1]["require_assignment"] = False
+    specs.extend(
+        _range_definitions(
+            key_template="lighting_{index}",
+            label_template="Освещение {index}",
+            register_start=0x0130,
+            bitfield="digital_outputs_2",
+            bit_start=10,
+            count=4,
+            category="Освещение",
+        )
+    )
+    specs.extend(
+        _range_definitions(
+            key_template="timer1_{index}",
+            label_template="Таймер 1 · выход {index}",
+            register_start=0x0134,
+            bitfield="digital_outputs_2",
+            bit_start=14,
+            count=2,
+            category="Таймер 1",
+        )
+    )
+    specs.extend(
+        _range_definitions(
+            key_template="timer1_{index}",
+            label_template="Таймер 1 · выход {index}",
+            register_start=0x0136,
+            bitfield="digital_outputs_3",
+            bit_start=0,
+            count=2,
+            category="Таймер 1",
+            index_start=3,
+        )
+    )
+    specs.extend(
+        _range_definitions(
+            key_template="timer2_{index}",
+            label_template="Таймер 2 · выход {index}",
+            register_start=0x0138,
+            bitfield="digital_outputs_3",
+            bit_start=2,
+            count=4,
+            category="Таймер 2",
+        )
+    )
+
+    analog_input_specs = [
+        ("humidity_input", "Вход датчика влажности", 0x0118),
+        ("pressure_input", "Вход датчика давления", 0x0119),
+        ("co2_input", "Вход датчика CO2", 0x013C),
+        ("nh3_input", "Вход датчика NH3", 0x013D),
+    ]
+    for key, label, reg in analog_input_specs:
+        specs.append(
+            _single_definition(
+                key=key,
+                label=label,
+                register_address=reg,
+                bitfield=None,
+                bit=None,
+                category="Аналоговые входы",
+                assign_var=f"{key}_channel",
+                channel_type="analog_input",
+            )
+        )
+
+    analog_output_specs = [
+        ("grv_base_signal", "Сигнал ГРВ базовой схемы", 0x011A),
+        ("grv_tunnel_signal", "Сигнал ГРВ туннельной схемы", 0x011B),
+        ("damper_signal", "Сигнал демпфера", 0x011C),
+        ("air_intake_1_signal", "Сигнал воздухозаборника 1", 0x011D),
+        ("air_intake_2_signal", "Сигнал воздухозаборника 2", 0x011E),
+        ("air_intake_tunnel_signal", "Сигнал туннельного воздухозаборника", 0x011F),
+        ("air_intake_3_signal", "Сигнал воздухозаборника 3", 0x0120),
+        ("air_intake_4_signal", "Сигнал воздухозаборника 4", 0x0121),
+        ("lighting_1_signal", "Сигнал освещения 1", 0x0124),
+        ("lighting_2_signal", "Сигнал освещения 2", 0x0125),
+        ("lighting_3_signal", "Сигнал освещения 3", 0x0126),
+        ("lighting_4_signal", "Сигнал освещения 4", 0x0127),
+        ("timer1_1_signal", "Таймер 1 · сигнал выхода 1", 0x0128),
+        ("timer1_2_signal", "Таймер 1 · сигнал выхода 2", 0x0129),
+        ("timer1_3_signal", "Таймер 1 · сигнал выхода 3", 0x012A),
+        ("timer1_4_signal", "Таймер 1 · сигнал выхода 4", 0x012B),
+        ("timer2_1_signal", "Таймер 2 · сигнал выхода 1", 0x012C),
+        ("timer2_2_signal", "Таймер 2 · сигнал выхода 2", 0x012D),
+        ("timer2_3_signal", "Таймер 2 · сигнал выхода 3", 0x012E),
+        ("timer2_4_signal", "Таймер 2 · сигнал выхода 4", 0x012F),
+    ]
+    for key, label, reg in analog_output_specs:
+        specs.append(
+            _single_definition(
+                key=key,
+                label=label,
+                register_address=reg,
+                bitfield=None,
+                bit=None,
+                category="Аналоговые выходы",
+                assign_var=f"{key}_channel",
+                channel_type="analog_output",
+            )
+        )
+
+    # Пронумеровываем для сохранения стабильного порядка в выдаче
+    for idx, spec in enumerate(specs):
+        spec["order"] = idx
+    return specs
+
+
+RELAY_FUNCTIONS = _build_relay_function_definitions()
+
+
 class KUB1063Adapter(DeviceAdapter):
     """Адаптер для КУБ-1063 с Variable System"""
+
+    DEFAULT_DASHBOARD_METRICS = [
+        "temp_inside",
+        "temp_target",
+        "humidity",
+        "pressure",
+        "ventilation_level",
+        "ventilation_target",
+    ]
     
     def __init__(self):
         super().__init__()
@@ -190,6 +480,17 @@ class KUB1063Adapter(DeviceAdapter):
             VariableReference("temp_inside", 0x00D5, 1, description="Текущая внутренняя температура"),
             VariableReference("temp_vent_activation", 0x00D6, 1, description="Температура активации вентиляции"),
         ]
+
+        for relay in RELAY_FUNCTIONS:
+            variable_references.append(
+                VariableReference(
+                    relay["assign_var"],
+                    relay["register_address"],
+                    10,
+                    function_code=3,
+                    description=f"Номер реле для {relay['label']}",
+                )
+            )
         
         for var_ref in variable_references:
             self._mapper.register_variable(var_ref)
@@ -197,7 +498,76 @@ class KUB1063Adapter(DeviceAdapter):
     def get_register_addresses(self) -> set:
         """Получение всех адресов регистров для чтения"""
         return set(self._mapper.get_all_register_addresses())
-    
+
+    def parse_device_data(self, device_id: int, raw_registers: Dict[int, int]) -> DeviceData:
+        data = super().parse_device_data(device_id, raw_registers)
+        self._inject_relay_assignments(data)
+        return data
+
+    def _inject_relay_assignments(self, data: DeviceData) -> None:
+        registers = data.registers
+        assignments: List[Dict[str, Any]] = []
+        for info in RELAY_FUNCTIONS:
+            raw_channel = registers.get(info["assign_var"])
+            channel = self._safe_int(raw_channel)
+            bitfield_name = info.get("bitfield")
+            bit_index = info.get("bit")
+            state = None
+            if bitfield_name is not None and bit_index is not None:
+                state = self._read_function_state(bitfield_name, bit_index, registers)
+            if channel is None and state is None:
+                continue
+            require_assignment = info.get("require_assignment", True)
+            if require_assignment and channel is None:
+                continue
+
+            channel_type = info.get("channel_type", "relay")
+
+            entry: Dict[str, Any] = {
+                "key": info["key"],
+                "label": info["label"],
+                "category": info["category"],
+                "channel": channel,
+                "channel_label": self._format_channel_label(channel, channel_type),
+                "state": state,
+                "bitfield": info["bitfield"],
+                "bit": info["bit"],
+                "register": info["register_address"],
+                "order": info["order"],
+                "channel_type": channel_type,
+            }
+            assignments.append(entry)
+        if assignments:
+            registers["relay_assignments"] = sorted(assignments, key=lambda entry: entry.get("order", 0))
+
+    def _read_function_state(self, bitfield_name: str, bit: int, registers: Dict[str, Any]) -> Optional[bool]:
+        value = registers.get(bitfield_name)
+        if value is None:
+            return None
+        try:
+            mask = int(value)
+        except (TypeError, ValueError):
+            return None
+        return bool(mask & (1 << bit))
+
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            return None
+        return result if result >= 0 else None
+
+    @staticmethod
+    def _format_channel_label(channel: Optional[int], channel_type: str = "relay") -> Optional[str]:
+        if channel is None:
+            return None
+        if channel_type == "analog_input":
+            return f"AI{channel + 1}"
+        if channel_type == "analog_output":
+            return f"AO{channel + 1}"
+        return f"K{channel + 1}"
+
     @property
     def register_map(self) -> Dict[str, RegisterInfo]:
         """Карта регистров (legacy compatibility)"""
@@ -219,6 +589,8 @@ class KUB1063Adapter(DeviceAdapter):
 
         for var_name, var_ref in self._mapper.variable_references.items():
             type_def = self._mapper.type_definitions[var_ref.type_id]
+            reg_type = RegisterType.INPUT if getattr(var_ref, "function_code", 4) == 4 else RegisterType.HOLDING
+
             legacy_map[var_name] = RegisterInfo(
                 address=var_ref.register_address,
                 name=var_name,
@@ -228,7 +600,7 @@ class KUB1063Adapter(DeviceAdapter):
                 signed=type_def.signed,
                 description=type_def.description,
                 special_values=type_def.special_values,
-                register_type=RegisterType.INPUT,  # КУБ-1063 использует Input Registers (FC04)
+                register_type=reg_type,
             )
 
         return legacy_map
@@ -451,7 +823,21 @@ ACTIVE_ALARM_DESCRIPTIONS = {
     41: "Обрыв датчика отрицательного давления",
     42: "Обрыв датчика внутренней температуры 1",
     43: "Обрыв датчика внутренней температуры 2",
-    44: "Обрыв датчика внутренней температуры 3",
-    45: "Обрыв датчика внутренней температуры 4",
-    47: "Аварийное реле включено",
+    44: "Обрыв датчика наружной температуры",
+    45: "Включён аварийный режим управления вентиляцией по температуре",
+    46: "Включён аварийный режим контроля влажности",
+    47: "Включён аварийный режим управления охладителем",
+    51: "Включён аварийный режим управления воздухозаборником 1",
+    52: "Включён аварийный режим управления воздухозаборником 2",
+    53: "Включён аварийный режим управления нагревателем 1",
+    54: "Включён аварийный режим управления нагревателем 2",
+    55: "Включён аварийный режим управления демпфером",
+    56: "Неправильные уставки",
+    57: "Высокая внутренняя температура",
+    58: "Включён аварийный режим управления туннельным воздухозаборником",
+    59: "Обрыв датчика температуры",
+    60: "Обрыв датчика внутренней температуры 3",
+    61: "Обрыв датчика внутренней температуры 4",
+    62: "Включён аварийный режим управления нагревателем 3",
+    63: "Включён аварийный режим управления нагревателем 4",
 }

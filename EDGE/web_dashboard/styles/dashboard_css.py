@@ -178,8 +178,127 @@ DASHBOARD_CSS = """
         border: 1px solid var(--edge-border);
         padding: 12px;
     }
+
+    .metric-card.status-error {
+        border: 1px solid rgba(220, 53, 69, 0.4);
+        background-color: rgba(220, 53, 69, 0.08);
+    }
+
+    .metric-card.status-error .metric-card-marker {
+        background-color: #dc3545;
+    }
+
+    .metric-card.status-ok .metric-card-marker {
+        background-color: #238636;
+    }
     .metric-card small {
         color: var(--edge-muted);
+    }
+
+    /* Карточки назначений реле */
+    .relay-section {
+        margin-top: 16px;
+    }
+    .relay-section h5 {
+        margin-bottom: 8px;
+    }
+    .relay-category {
+        margin-bottom: 14px;
+    }
+    .relay-category-title {
+        font-size: 0.85rem;
+        color: var(--edge-muted);
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .relay-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 10px;
+    }
+    .relay-card {
+        background-color: var(--edge-panel-light);
+        border: 1px solid var(--edge-border);
+        border-radius: 8px;
+        padding: 10px;
+    }
+    .relay-card small {
+        color: var(--edge-muted);
+    }
+    .relay-card-channel {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: var(--edge-text);
+        margin-top: 2px;
+    }
+    .relay-card-meta {
+        font-size: 0.75rem;
+        color: var(--edge-muted);
+        margin-top: 2px;
+    }
+    .relay-card-state {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        margin-top: 8px;
+        font-weight: 600;
+    }
+    .relay-card-state.relay-state-on {
+        background-color: rgba(46, 160, 67, 0.2);
+        color: #2ea043;
+    }
+    .relay-card-state.relay-state-off {
+        background-color: rgba(255, 255, 255, 0.1);
+        color: #c9d1d9;
+    }
+    .relay-card-state.relay-state-unknown {
+        background-color: rgba(210, 153, 34, 0.25);
+        color: #d29922;
+    }
+    .relay-card-state.relay-state-assigned {
+        background-color: rgba(99, 110, 123, 0.25);
+        color: #c9d1d9;
+    }
+    .relay-card-state.relay-state-emergency.relay-state-on {
+        background-color: rgba(220, 53, 69, 0.25);
+        color: #dc3545;
+    }
+    .relay-card-state.relay-state-emergency.relay-state-off {
+        background-color: rgba(46, 160, 67, 0.2);
+        color: #2ea043;
+    }
+
+    .relay-pill {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin-left: 6px;
+    }
+    .relay-pill.relay-pill-on {
+        background-color: rgba(46, 160, 67, 0.2);
+        color: #2ea043;
+    }
+    .relay-pill.relay-pill-off {
+        background-color: rgba(255, 255, 255, 0.1);
+        color: #c9d1d9;
+    }
+    .relay-pill.relay-pill-unknown {
+        background-color: rgba(210, 153, 34, 0.25);
+        color: #d29922;
+    }
+    .relay-pill.relay-pill-emergency.relay-pill-on {
+        background-color: rgba(220, 53, 69, 0.25);
+        color: #dc3545;
+    }
+    .relay-pill.relay-pill-emergency.relay-pill-off {
+        background-color: rgba(46, 160, 67, 0.2);
+        color: #2ea043;
     }
 
     /* Карточки устройств */

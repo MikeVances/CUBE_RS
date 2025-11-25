@@ -92,6 +92,7 @@ class FarmOverview:
     avg_temp: Optional[float] = None
     active_alarms_total: int = 0
     last_update: Optional[datetime] = None
+    last_successful_update: Optional[datetime] = None
     rooms_unassigned: int = 0
 
 
@@ -379,6 +380,7 @@ def default_metrics_for_device(device_type: str) -> List[str]:
     return [key for key in DEFAULT_ROOM_METRICS if key not in ALWAYS_ON_METRICS]
 
 STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal"}
+STALE_DATA_THRESHOLD_SECONDS = 60
 STATUS_HUMAN_READABLE = {
     "offline": "Нет связи",
     "disconnected": "Нет связи",
@@ -751,6 +753,7 @@ def build_overview(rooms: List[RoomSnapshot], device_payloads: Dict[int, Dict[st
 
     alarm_total = 0
     timestamps: List[datetime] = []
+    success_timestamps: List[datetime] = []
     temps: List[float] = []
 
     for room in rooms:
@@ -770,10 +773,15 @@ def build_overview(rooms: List[RoomSnapshot], device_payloads: Dict[int, Dict[st
         status = payload.get("connection_status") or payload.get("status")
         if not is_status_ok(status):
             overview.devices_offline += 1
+        elif ts:
+            success_timestamps.append(ts)
 
     overview.active_alarms_total = alarm_total
     overview.avg_temp = sum(temps) / len(temps) if temps else None
     overview.last_update = max(timestamps) if timestamps else None
+    overview.last_successful_update = (
+        max(success_timestamps) if success_timestamps else overview.last_update
+    )
     return overview
 
 
@@ -827,14 +835,14 @@ def render_overview(overview: FarmOverview) -> None:
         )
 
     with col4:
-        updated = overview.last_update.strftime("%d.%m %H:%M:%S") if overview.last_update else "—"
-        refresh_interval = st.session_state.get("auto_refresh_interval", 60)
+        updated_dt = overview.last_successful_update
+        updated = updated_dt.strftime("%d.%m %H:%M:%S") if updated_dt else "—"
         freshness_color = "#238636"
-        if not overview.last_update:
-            freshness_color = "#ffc107"
+        if not updated_dt:
+            freshness_color = "#dc3545"
         else:
-            age = (datetime.utcnow() - overview.last_update).total_seconds()
-            if age > max(refresh_interval, 1):
+            age = (datetime.utcnow() - updated_dt).total_seconds()
+            if age > STALE_DATA_THRESHOLD_SECONDS:
                 freshness_color = "#dc3545"
         st.markdown(
             dedent(
@@ -965,10 +973,13 @@ def render_room_metrics(
         cards_html.append(
             dedent(
                 f"""
-                <div class="metric-card">
-                    <small>Аварии</small>
-                    <h4 style="margin: 6px 0; color:{alarm_color};">{alarm_text}</h4>
-                    <small>{detail_html}</small>
+                <div class="metric-card status-{ 'ok' if status_ok else 'error' }">
+                    <div class="metric-card-marker" style="background-color:{alarm_color};"></div>
+                    <div class="metric-card-content">
+                        <small>Аварии</small>
+                        <h4 style="margin: 6px 0; color:{alarm_color};">{alarm_text}</h4>
+                        <small>{detail_html}</small>
+                    </div>
                 </div>
                 """
             )

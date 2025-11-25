@@ -18,6 +18,7 @@ import signal
 import threading
 import time
 from pathlib import Path
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 EDGE_DIR = Path(__file__).resolve().parent
@@ -411,6 +412,7 @@ class EDGEService:
 
         def reader_worker():
             logger.info("📖 Modbus reader запущен (DeviceScheduler)")
+            error_counters: defaultdict[int, int] = defaultdict(int)
 
             while not shutdown_requested.is_set():
                 scheduler = self.scheduler
@@ -425,8 +427,6 @@ class EDGEService:
                     if shutdown_requested.wait(wait_time or 0.1):
                         break
                     continue
-
-                error_counters: dict[int, int] = {}
 
                 for device in devices:
                     if shutdown_requested.is_set():
@@ -473,6 +473,10 @@ class EDGEService:
                             success = True
                             alarms_list = data.get("alarms")
                             warnings_list = data.get("warnings")
+                            if alarms_list is None:
+                                alarms_list = []
+                            if warnings_list is None:
+                                warnings_list = []
                             excluded = {
                                 "connection_status",
                                 "error",
@@ -512,7 +516,7 @@ class EDGEService:
                             logger.debug("💾 Данные сохранены в базу для устройства %s", device.device_id)
                             error_counters[device.device_id] = 0
                         else:
-                            error_counters[device.device_id] = error_counters.get(device.device_id, 0) + 1
+                            error_counters[device.device_id] += 1
                             logger.warning(
                                 "⚠️ Не удалось получить данные от устройства %s (%s/%s)",
                                 device.device_id,

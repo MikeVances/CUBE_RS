@@ -254,9 +254,15 @@ class KUB1063Adapter(DeviceAdapter):
         if isinstance(data, DeviceVariableManager):
             device_manager = data
         else:
-            # Legacy DeviceData - создаем временный менеджер
             device_manager = DeviceVariableManager(data.device_id, self.device_type, self._mapper)
-            # TODO: Заполнение из DeviceData - будет реализовано позже
+            register_data: Dict[int, int] = {}
+            raw = data.raw_registers or {}
+            for name, value in raw.items():
+                var_ref = self._mapper.get_variable_by_name(name)
+                if var_ref:
+                    register_data[var_ref.register_address] = value
+            if register_data:
+                device_manager.update_from_registers(register_data)
         
         lines = []
         lines.append("🔧 <b>КУБ-1063 СТАТУС:</b>")
@@ -325,21 +331,37 @@ class KUB1063Adapter(DeviceAdapter):
         if isinstance(data, DeviceVariableManager):
             device_manager = data
         else:
-            # Legacy DeviceData - создаем временный менеджер
             device_manager = DeviceVariableManager(data.device_id, self.device_type, self._mapper)
-            # TODO: Заполнение из DeviceData - будет реализовано позже
+            register_data: Dict[int, int] = {}
+            raw = data.raw_registers or {}
+            for name, value in raw.items():
+                var_ref = self._mapper.get_variable_by_name(name)
+                if var_ref:
+                    register_data[var_ref.register_address] = value
+            if register_data:
+                device_manager.update_from_registers(register_data)
         
         alarms = []
 
         # Проверяем активные аварии (4 регистра)
-        alarm_values = []
+        alarm_hex_values = []
         for i in range(4):
             alarm_val = device_manager.get_variable_value(f"active_alarms_{i}")
-            if alarm_val and alarm_val > 0:
-                alarm_values.append(f"0x{alarm_val:04X}")
-
-        if alarm_values:
-            alarms.append(f"🚨 Активные аварии: {', '.join(alarm_values)}")
+            if not alarm_val:
+                continue
+            if alarm_val > 0:
+                for bit in range(16):
+                    if alarm_val & (1 << bit):
+                        bit_index = i * 16 + bit
+                        description = ACTIVE_ALARM_DESCRIPTIONS.get(bit_index)
+                        if description:
+                            alarms.append(f"🚨 {description}")
+                        else:
+                            alarm_hex_values.append(f"бит {bit_index}")
+        if alarm_hex_values and not alarms:
+            alarms.append(
+                "🚨 Активные аварии: " + ", ".join(alarm_hex_values)
+            )
         
         # Проверяем статусы критичных сенсоров
         critical_sensors = ["temp_inside_1", "temp_inside_2", "pressure"]
@@ -356,9 +378,15 @@ class KUB1063Adapter(DeviceAdapter):
         if isinstance(data, DeviceVariableManager):
             device_manager = data
         else:
-            # Legacy DeviceData - создаем временный менеджер
             device_manager = DeviceVariableManager(data.device_id, self.device_type, self._mapper)
-            # TODO: Заполнение из DeviceData - будет реализовано позже
+            register_data: Dict[int, int] = {}
+            raw = data.raw_registers or {}
+            for name, value in raw.items():
+                var_ref = self._mapper.get_variable_by_name(name)
+                if var_ref:
+                    register_data[var_ref.register_address] = value
+            if register_data:
+                device_manager.update_from_registers(register_data)
         
         warnings = []
 
@@ -407,3 +435,23 @@ class KUB1063Adapter(DeviceAdapter):
             return f"<code>{value:.1f}{unit}</code>"
         else:
             return f"<code>{value:.1f}{unit}</code>"
+ACTIVE_ALARM_DESCRIPTIONS = {
+    26: "Включён аварийный режим управления воздухозаборником 3",
+    27: "Включён аварийный режим управления воздухозаборником 4",
+    28: "Низкое напряжение питания",
+    30: "Не установлены дата и время",
+    33: "Перегрузка системы",
+    34: "Требуется первичная настройка",
+    35: "Превышена максимальная внутренняя температура",
+    36: "Низкая внутренняя температура",
+    37: "Высокая влажность",
+    38: "Высокое отрицательное давление",
+    39: "Низкое отрицательное давление",
+    40: "Обрыв датчика влажности",
+    41: "Обрыв датчика отрицательного давления",
+    42: "Обрыв датчика внутренней температуры 1",
+    43: "Обрыв датчика внутренней температуры 2",
+    44: "Обрыв датчика внутренней температуры 3",
+    45: "Обрыв датчика внутренней температуры 4",
+    47: "Аварийное реле включено",
+}

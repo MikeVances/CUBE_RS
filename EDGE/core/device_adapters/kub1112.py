@@ -44,6 +44,13 @@ ALARM_REGISTER_OFFSETS = {
     "registered_alarms_3": 48,
 }
 
+DISCRETE_INPUTS_MAP = [
+    ("Флюгер", 2, "Обдув есть", "Обдува нет"),
+    ("Давление газа", 3, "Нормальное", "Низкое"),
+    ("Вентиляция", 4, "Запуск", "Останов"),
+    ("Нагрев", 5, "Запуск", "Останов"),
+]
+
 
 class KUB1112Adapter(DeviceAdapter):
     """Адаптер для КУБ-1112 с Variable System"""
@@ -268,6 +275,17 @@ class KUB1112Adapter(DeviceAdapter):
 
         registers = device_manager.get_all_values()
         statuses = device_manager.get_all_statuses()
+
+        discrete_value = registers.get("discrete_inputs")
+        discrete_status = statuses.get("discrete_inputs")
+        if discrete_value is not None:
+            if discrete_status == "ok":
+                registers["discrete_inputs_state"] = self._format_discrete_inputs_text(int(discrete_value))
+                statuses["discrete_inputs_state"] = "ok"
+            else:
+                registers["discrete_inputs_state"] = discrete_status or "unknown"
+                statuses["discrete_inputs_state"] = discrete_status or "unknown"
+
         raw_named: Dict[str, int] = {}
         for name, ref in self._mapper.variable_references.items():
             if ref.register_address in raw_registers:
@@ -386,20 +404,15 @@ class KUB1112Adapter(DeviceAdapter):
         # Дискретные входы
         lines.append("\n📥 <b>ВХОДЫ:</b>")
         inputs = device_manager.get_variable_value("discrete_inputs")
-        if inputs is not None:
-            inputs_status = device_manager.get_variable_status("discrete_inputs")
-            if inputs_status == "ok":
-                input_names = [
-                    ("Флюгер", 2, "Обдув есть", "Обдува нет"),
-                    ("Давление газа", 3, "Нормальное", "Низкое"),
-                    ("Вентиляция", 4, "Запуск", "Останов"),
-                    ("Нагрев", 5, "Запуск", "Останов")
-                ]
-                
-                for name, bit, on_text, off_text in input_names:
-                    state = on_text if (inputs & (1 << bit)) else off_text
-                    icon = "🟢" if (inputs & (1 << bit)) else "🔴"
-                    lines.append(f"  • {name}: {icon} <code>{state}</code>")
+        inputs_status = device_manager.get_variable_status("discrete_inputs")
+        if inputs is None or inputs_status != "ok":
+            lines.append(f"  • Состояние: {inputs_status or '—'}")
+        else:
+            for name, bit, on_text, off_text in DISCRETE_INPUTS_MAP:
+                active = bool(inputs & (1 << bit))
+                icon = "🟢" if active else "🔴"
+                state = on_text if active else off_text
+                lines.append(f"  • {name}: {icon} <code>{state}</code>")
         
         # Версия ПО
         sw_version = device_manager.get_variable_value("software_version")
@@ -429,10 +442,25 @@ class KUB1112Adapter(DeviceAdapter):
         # Проверяем отсутствие пламени в режиме обогрева
         flame_present = device_manager.get_variable_value("flame_present")
         mode = device_manager.get_variable_value("operation_mode")
-        if (flame_present is not None and mode is not None and 
-            device_manager.get_variable_status("flame_present") == "ok" and
-            device_manager.get_variable_status("operation_mode") == "ok"):
-            if mode in [1, 2, 4] and not flame_present:  # Режимы с обогревом
+        relay_state = device_manager.get_variable_value("relay_state")
+        discrete_inputs = device_manager.get_variable_value("discrete_inputs")
+        flame_status_ok = device_manager.get_variable_status("flame_present") == "ok"
+        mode_status_ok = device_manager.get_variable_status("operation_mode") == "ok"
+        relay_status_ok = device_manager.get_variable_status("relay_state") == "ok"
+        di_status_ok = device_manager.get_variable_status("discrete_inputs") == "ok"
+        heating_command = False
+        if relay_state is not None and relay_status_ok:
+            heating_command = bool(relay_state & (1 << 0))  # бит 0 — клапан газа (обогрев)
+        if discrete_inputs is not None and di_status_ok:
+            heating_command = heating_command or bool(discrete_inputs & (1 << 5))  # бит 5 «Нагрев: Запуск»
+        if (
+            flame_present is not None
+            and mode is not None
+            and flame_status_ok
+            and mode_status_ok
+        ):
+            heating_mode = mode in [1, 2, 4]
+            if (heating_mode and heating_command) and not flame_present:
                 alarms.append("🚨 Нет пламени при включенном обогреве")
         
         # Проверяем температурный датчик
@@ -527,6 +555,14 @@ class KUB1112Adapter(DeviceAdapter):
                 register_type=register_type,
             )
 
+        legacy_map["discrete_inputs_state"] = RegisterInfo(
+            address=-1,
+            name="discrete_inputs_state",
+            value_type=ValueType.STATUS,
+            description="Состояние дискретных входов (текст)",
+            register_type=RegisterType.INPUT,
+        )
+
         return legacy_map
     
     def parse_register_value(self, register_name: str, raw_value: int) -> tuple[Any, str]:
@@ -544,3 +580,11 @@ class KUB1112Adapter(DeviceAdapter):
     def format_for_display_legacy(self, data: DeviceData) -> str:
         """Legacy метод - используйте format_for_display с DeviceVariableManager"""
         return "Используйте новый Variable System API"
+
+    def _format_discrete_inputs_text(self, value: int) -> str:
+        parts: List[str] = []
+        for name, bit, on_text, off_text in DISCRETE_INPUTS_MAP:
+            active = bool(value & (1 << bit))
+            icon = "🟢" if active else "🔴"
+            parts.append(f"{icon} {name}: {on_text if active else off_text}")
+        return "; ".join(parts)

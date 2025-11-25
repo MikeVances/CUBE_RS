@@ -429,14 +429,14 @@ def update_data(
             registers_json = json.dumps({k: str(v) for k, v in registers.items()})
 
     alarms_json = None
-    if alarms:
+    if alarms is not None:
         try:
             alarms_json = json.dumps(alarms)
         except TypeError:
             alarms_json = json.dumps([str(a) for a in alarms])
 
     warnings_json = None
-    if warnings:
+    if warnings is not None:
         try:
             warnings_json = json.dumps(warnings)
         except TypeError:

@@ -32,8 +32,15 @@ DEVICE_STATUS_FIELDS = {
     "alarms",
     "warnings",
 }
+STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal", "partial"}
 _DEVICE_METRIC_CACHE: Dict[str, set[str]] = {}
 _DEVICE_METADATA_CACHE: Dict[str, Dict[str, "MetricMeta"]] = {}
+
+
+def is_status_ok(status: Any) -> bool:
+    if not status:
+        return False
+    return str(status).lower() in STATUS_OK_VALUES
 
 
 @dataclass
@@ -90,7 +97,12 @@ def build_room_snapshots(registry: DeviceRegistry) -> List[RoomSnapshot]:
 
         payload = registry.get_device_data(device.device_id) or {}
         payload_ts = _parse_timestamp(payload.get("timestamp"))
-        if payload_ts and (snapshot.timestamp is None or payload_ts > snapshot.timestamp):
+        connection_ok = is_status_ok(payload.get("connection_status") or payload.get("status"))
+        if (
+            payload_ts
+            and connection_ok
+            and (snapshot.timestamp is None or payload_ts > snapshot.timestamp)
+        ):
             snapshot.timestamp = payload_ts
 
         for key, value in payload.items():

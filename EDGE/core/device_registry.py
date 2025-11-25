@@ -5,6 +5,7 @@ Device Registry - система регистрации и управления 
 """
 
 import json
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from core.device_adapters.catalog import (
 )
 
 logger = get_secure_logger(__name__)
+STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal", "partial"}
 
 try:
     from modbus.modbus_storage import (
@@ -114,27 +116,65 @@ class DeviceRegistry:
 
     def _load_devices(self):
         """Загрузка устройств из конфигурации"""
-        try:
-            self.devices.clear()
-            if not self.config_path.exists():
-                logger.info(f"Файл устройств не найден: {self.config_path}, создаём с дефолтными устройствами")
-                self._create_default_config()
-                return
-            
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-            
-            devices_data = config.get('devices', [])
-            for device_data in devices_data:
-                device = DeviceInfo.from_dict(device_data)
-                self.devices[device.device_id] = device
-                logger.debug(f"Загружено устройство: {device.name} (ID: {device.device_id})")
-            
-            logger.info(f"✅ Загружено {len(self.devices)} устройств из {self.config_path}")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки устройств: {e}")
+        if not self.config_path.exists():
+            logger.info(
+                "Файл устройств не найден: %s, создаём с дефолтными устройствами",
+                self.config_path,
+            )
             self._create_default_config()
+            return
+
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                raw_config = yaml.safe_load(f) or {}
+
+            if not isinstance(raw_config, dict):
+                raise ValueError("devices.yaml должен содержать словарь с ключом 'devices'")
+
+            devices_data = raw_config.get("devices") or []
+            if not isinstance(devices_data, list):
+                raise ValueError("'devices' должен быть списком объектов устройства")
+
+            loaded_devices: Dict[int, DeviceInfo] = {}
+            active_slave_usage: Dict[int, DeviceInfo] = {}
+
+            for device_data in devices_data:
+                try:
+                    device = DeviceInfo.from_dict(device_data)
+                except Exception as exc:
+                    logger.warning("⚠️ Пропускаем запись устройства из-за ошибки: %s", exc)
+                    continue
+
+                if device.enabled:
+                    conflict = active_slave_usage.get(device.slave_id)
+                    if conflict:
+                        logger.error(
+                            "❌ Конфликт slave_id %s между '%s' и '%s'. "
+                            "Устройство '%s' помечено как отключённое.",
+                            device.slave_id,
+                            conflict.name,
+                            device.name,
+                            device.name,
+                        )
+                        device.enabled = False
+                    else:
+                        active_slave_usage[device.slave_id] = device
+
+                loaded_devices[device.device_id] = device
+                logger.debug(
+                    "Загружено устройство: %s (ID: %s)", device.name, device.device_id
+                )
+
+            self.devices = loaded_devices
+            logger.info(
+                "✅ Загружено %s устройств из %s", len(self.devices), self.config_path
+            )
+
+        except Exception as e:
+            logger.error("❌ Ошибка загрузки устройств: %s", e)
+            self._backup_invalid_config()
+            if not self.devices:
+                self._create_default_config()
     
     def _create_default_config(self):
         """Создание конфигурации по умолчанию"""
@@ -199,10 +239,14 @@ class DeviceRegistry:
             return False
 
         # Проверка на дублирование slave_id
-        for existing_device in self.devices.values():
-            if existing_device.slave_id == device.slave_id and existing_device.enabled:
-                logger.warning(f"Slave ID {device.slave_id} уже используется устройством {existing_device.name}")
-                return False
+        conflict = self._find_slave_conflict(device.slave_id)
+        if conflict:
+            logger.warning(
+                "Slave ID %s уже используется устройством %s",
+                device.slave_id,
+                conflict.name,
+            )
+            return False
         
         self.devices[device.device_id] = device
         self.save_config()
@@ -232,10 +276,21 @@ class DeviceRegistry:
     
     def enable_device(self, device_id: int) -> bool:
         """Включение устройства"""
-        if device_id not in self.devices:
+        device = self.devices.get(device_id)
+        if device is None:
             return False
-        
-        self.devices[device_id].enabled = True
+
+        conflict = self._find_slave_conflict(device.slave_id, exclude_device_id=device_id)
+        if conflict:
+            logger.warning(
+                "Нельзя включить устройство %s: slave_id %s занят устройством %s",
+                device_id,
+                device.slave_id,
+                conflict.name,
+            )
+            return False
+
+        device.enabled = True
         self.save_config()
         logger.info(f"✅ Устройство {device_id} включено")
         return True
@@ -256,6 +311,42 @@ class DeviceRegistry:
             if device.slave_id == slave_id and device.enabled:
                 return device
         return None
+
+    def _find_slave_conflict(
+        self, slave_id: int, *, exclude_device_id: Optional[int] = None
+    ) -> Optional[DeviceInfo]:
+        """Ищет включённое устройство с тем же slave_id."""
+        for existing_device in self.devices.values():
+            if not existing_device.enabled:
+                continue
+            if exclude_device_id is not None and existing_device.device_id == exclude_device_id:
+                continue
+            if existing_device.slave_id == slave_id:
+                return existing_device
+        return None
+
+    def _backup_invalid_config(self) -> None:
+        """Создаёт резервную копию проблемного devices.yaml, чтобы не потерять данные."""
+        if not self.config_path.exists():
+            return
+
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        backup_path = self.config_path.with_suffix(
+            f"{self.config_path.suffix}.invalid.{timestamp}"
+        )
+
+        try:
+            shutil.copy2(self.config_path, backup_path)
+            logger.warning(
+                "⚠️ Сохранена резервная копия повреждённого devices.yaml: %s",
+                backup_path,
+            )
+        except Exception as copy_exc:
+            logger.error(
+                "❌ Не удалось создать резервную копию %s: %s",
+                self.config_path,
+                copy_exc,
+            )
 
     # --- Работа с данными устройств -------------------------------------------------
 
@@ -324,7 +415,16 @@ class DeviceRegistry:
         iso_ts = timestamp_dt.isoformat()
         data["timestamp"] = iso_ts
         data["updated_at"] = iso_ts
-        data.setdefault("status", "online")
+        data_status = data.get("status")
+        connection_status = data.get("connection_status")
+        if connection_status:
+            normalized = str(connection_status).lower()
+            if normalized not in STATUS_OK_VALUES:
+                data["status"] = connection_status
+            else:
+                data["status"] = data_status or "online"
+        else:
+            data["status"] = data_status or "online"
         if alarms_list:
             data["alarms"] = alarms_list
             if not data.get("active_alarms"):
@@ -390,7 +490,24 @@ class DeviceRegistry:
         from core.device_adapters.factory import get_device_metric_keys  # локальный импорт, чтобы избежать циклов
 
         allowed = get_device_metric_keys(device.device_type)
-        always = {"connection_status", "last_error", "status", "timestamp", "updated_at", "device_id", "device_name", "device_type", "slave_id"}
+        always = {
+            "connection_status",
+            "last_error",
+            "status",
+            "timestamp",
+            "updated_at",
+            "device_id",
+            "device_name",
+            "device_type",
+            "slave_id",
+            "active_alarms",
+            "active_warnings",
+            "registered_alarms",
+            "registered_warnings",
+            "alarms",
+            "warnings",
+            "fault_code",
+        }
         allowed.update(always)
         remove_keys = [key for key in data.keys() if key not in allowed and key != "registers"]
         for key in remove_keys:

@@ -4,7 +4,7 @@ Device Scheduler - планировщик опроса устройств с п�
 Решает проблему масштабирования для большого количества устройств
 """
 
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -123,6 +123,8 @@ class DeviceScheduler:
         DeviceType.UNKNOWN: 5.0,       # Неизвестные - раз в 5 секунд
     }
 
+    MIN_POLL_INTERVAL = 0.5  # Нижняя граница, чтобы не забить шину бесконечными запросами
+
     # Дефолтные приоритеты по типам устройств
     DEFAULT_PRIORITIES = {
         DeviceType.KUB_1063: PollPriority.HIGH,
@@ -173,17 +175,7 @@ class DeviceScheduler:
         Args:
             device: Информация об устройстве
         """
-        # Определяем интервал (приоритет: YAML > custom_intervals > DEFAULT)
-        if device.poll_interval is not None:
-            poll_interval = device.poll_interval
-        else:
-            poll_interval = self.custom_intervals.get(
-                device.device_id,
-                self.default_intervals_by_type.get(
-                    device.device_type,
-                    self.DEFAULT_INTERVALS.get(device.device_type, 5.0),
-                ),
-            )
+        poll_interval = self._resolve_poll_interval(device)
 
         # Определяем приоритет (приоритет: YAML > custom_priorities > DEFAULT)
         if device.priority is not None:
@@ -255,6 +247,58 @@ class DeviceScheduler:
 
         # Возвращаем DeviceInfo
         return [scheduled.device_info for scheduled in devices_to_poll]
+
+    def _resolve_poll_interval(self, device: DeviceInfo) -> float:
+        """Определяет валидный интервал опроса с учётом ограничений."""
+        source = "device.poll_interval"
+        candidate = device.poll_interval
+
+        if candidate is None:
+            candidate = self.custom_intervals.get(device.device_id)
+            source = "custom_intervals"
+
+        if candidate is None:
+            candidate = self._default_interval(device.device_type)
+            source = "default"
+
+        return self._sanitize_interval(candidate, device, source)
+
+    def _default_interval(self, device_type: DeviceType) -> float:
+        return self.default_intervals_by_type.get(
+            device_type,
+            self.DEFAULT_INTERVALS.get(device_type, 5.0),
+        )
+
+    def _sanitize_interval(
+        self, candidate: Any, device: DeviceInfo, source: str
+    ) -> float:
+        try:
+            interval = float(candidate)
+        except (TypeError, ValueError):
+            fallback = max(self.MIN_POLL_INTERVAL, self._default_interval(device.device_type))
+            logger.warning(
+                "⚠️ Некорректный poll_interval '%s' для устройства %s из %s, "
+                "используем %.2fс",
+                candidate,
+                device.name,
+                source,
+                fallback,
+            )
+            return fallback
+
+        if interval < self.MIN_POLL_INTERVAL:
+            fallback = max(self.MIN_POLL_INTERVAL, self._default_interval(device.device_type))
+            logger.warning(
+                "⚠️ Слишком маленький poll_interval %.3fс для устройства %s (%s), "
+                "повышаем до %.2fс",
+                interval,
+                device.name,
+                source,
+                fallback,
+            )
+            return fallback
+
+        return interval
 
     def mark_poll_result(self, device_id: int, success: bool):
         """

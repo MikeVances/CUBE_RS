@@ -89,6 +89,8 @@ try:
 except ImportError as e:
     raise ImportError("Universal Modbus Reader обязателен для EDGE") from e
 
+from modbus.command_executor import CommandExecutor
+
 USE_UNIVERSAL_READER = os.getenv("USE_UNIVERSAL_READER", "true").lower() in {"1", "true", "yes", "on"}
 if not USE_UNIVERSAL_READER:
     raise RuntimeError(
@@ -135,6 +137,7 @@ class EDGEService:
         self.config = get_config()
         self.device_registry = DeviceRegistry()
         self._init_scheduler()
+        self.command_executor: Optional[CommandExecutor] = None
 
         # Инициализация Universal Modbus Reader (обязательна)
         try:
@@ -149,6 +152,12 @@ class EDGEService:
         except Exception as e:
             logger.error(f"❌ Критическая ошибка инициализации Universal Reader: {e}")
             raise
+
+        try:
+            self.command_executor = CommandExecutor(device_registry=self.device_registry)
+        except Exception as exc:
+            logger.error(f"❌ Не удалось инициализировать CommandExecutor: {exc}")
+            self.command_executor = None
 
     def _maybe_run_discovery(self) -> None:
         if not SCAN_CLI_AVAILABLE:
@@ -390,9 +399,20 @@ class EDGEService:
             logger.error("❌ Не удалось запустить Health API")
 
     async def start_modbus_writer(self):
-        """Writer временно отключён в универсальном режиме."""
-        logger.info("✍️ Modbus writer пропущен (доступен только в legacy режиме)")
-        return
+        """Запуск фонового исполнителя write_commands (универсальный режим)."""
+        if not self.command_executor:
+            try:
+                self.command_executor = CommandExecutor(device_registry=self.device_registry)
+            except Exception as exc:
+                logger.error(f"❌ Не удалось создать CommandExecutor: {exc}")
+                return
+
+        try:
+            self.command_executor.start()
+        except Exception as exc:
+            logger.error(f"❌ Ошибка запуска CommandExecutor: {exc}")
+        else:
+            logger.info("✍️ CommandExecutor активирован")
 
     def start_modbus_reader(self, interval: float | None = None):
         """Запуск фонового опроса RS485"""
@@ -712,6 +732,15 @@ class EDGEService:
         # Ждем завершения reader thread (он демонический, но лучше подождать)
         if self.reader_thread and self.reader_thread.is_alive():
             self.reader_thread.join(timeout=3)
+
+        if self.command_executor:
+            try:
+                self.command_executor.stop()
+                logger.info("🛑 CommandExecutor остановлен")
+            except Exception as exc:
+                logger.error(f"❌ Ошибка остановки CommandExecutor: {exc}")
+            finally:
+                self.command_executor = None
 
         # Останавливаем Universal Reader (если используется)
         if self.use_universal_reader:

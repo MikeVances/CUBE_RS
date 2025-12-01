@@ -121,6 +121,45 @@ def _resolve_port_overrides(args: argparse.Namespace) -> tuple[str, int]:
     return rs485_port, modbus_port
 
 
+def _persist_port_overrides(rs485_port: str | None, modbus_port: int | None) -> None:
+    """Обновляет config/app_config.yaml, если CLI заданы новые порты."""
+
+    if not rs485_port and modbus_port is None:
+        return
+    cfg_path = CONFIG_DIR / "app_config.yaml"
+    try:
+        if cfg_path.exists():
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+        else:
+            data = {}
+    except Exception as exc:  # pragma: no cover - защита от повреждённых файлов
+        print(f"⚠️ Не удалось прочитать {cfg_path}: {exc}. Попробуем создать заново.")
+        data = {}
+
+    updated = False
+    if rs485_port:
+        rs_section = data.setdefault("rs485", {})
+        if rs_section.get("port") != rs485_port:
+            rs_section["port"] = rs485_port
+            updated = True
+    if modbus_port is not None:
+        tcp_section = data.setdefault("modbus_tcp", {})
+        if int(tcp_section.get("port", 0)) != modbus_port:
+            tcp_section["port"] = int(modbus_port)
+            updated = True
+
+    if not updated:
+        return
+
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
+    print(
+        f"💾 app_config.yaml обновлён (rs485.port={rs485_port or '—'}, modbus_tcp.port={modbus_port if modbus_port is not None else '—'})"
+    )
+
+
 def read_polling_interval_defaults() -> dict[str, float]:
     cfg_path = CONFIG_DIR / "app_config.yaml"
     if not cfg_path.exists():
@@ -271,6 +310,10 @@ def _autoscan_and_write_config(rs485_port: str, start_id: int, end_id: int) -> N
 async def run(args: argparse.Namespace) -> int:
     # Resolve ports with precedence (args > env > config)
     rs485_port, modbus_port = _resolve_port_overrides(args)
+
+    # Persist CLI overrides so будущие запуски используют те же порты
+    if args.rs485_port or args.modbus_port is not None:
+        _persist_port_overrides(args.rs485_port, args.modbus_port)
 
     # Optional autoscan to generate devices.yaml
     if args.autoscan:

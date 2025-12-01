@@ -36,7 +36,7 @@ rs485:
   cooldown_duration: 10
   databits: 8
   parity: N
-  port: /dev/tty.usbserial-21230
+  port: /dev/tty.usbserial-2130
   slave_id: 1
   stopbits: 1
   timeout: 5.0

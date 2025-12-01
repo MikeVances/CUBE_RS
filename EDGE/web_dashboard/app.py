@@ -46,6 +46,7 @@ from web_dashboard.services.room_data import (
 )
 from web_dashboard.styles.dashboard_css import DASHBOARD_CSS
 from modbus.modbus_storage import DB_FILE
+from modbus.command_queue import enqueue_register_write
 from core.config_manager import get_config
 from core.security_manager import get_security_manager
 from core.user_preferences import get_user_preferences_service
@@ -99,6 +100,46 @@ class FarmOverview:
 STATE_DIR = Path(__file__).resolve().parent / "state"
 PREFERENCES_FILE = STATE_DIR / "user_preferences.json"
 logger = logging.getLogger(__name__)
+
+RESET_ACCESS_ROLES = {"operator", "engineer", "admin"}
+
+
+def _current_user_payload() -> dict[str, Any]:
+    payload = st.session_state.get("current_user")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _dashboard_user_can_reset() -> bool:
+    user = _current_user_payload()
+    role = str(user.get("role", "")).lower()
+    return role in RESET_ACCESS_ROLES
+
+
+def _enqueue_dashboard_reset(device: DeviceInfo, room_name: str) -> tuple[bool, str | None]:
+    user = _current_user_payload()
+    user_label = user.get("name") or "anonymous"
+    user_id = user.get("id")
+    user_info = f"dashboard_user_{user_id}_{user_label}"
+    try:
+        command_id = enqueue_register_write(
+            device_id=device.device_id,
+            slave_id=device.slave_id,
+            register=0x0020,
+            value=1,
+            user_info=user_info,
+            source=f"dashboard:{room_name}",
+        )
+        logger.info(
+            "[DASHBOARD] reset command enqueued (device=%s room=%s id=%s user=%s)",
+            device.device_id,
+            room_name,
+            command_id,
+            user_label,
+        )
+        return True, command_id
+    except Exception as exc:
+        logger.error("❌ Ошибка постановки команды сброса из дашборда: %s", exc)
+        return False, str(exc)
 
 
 def _normalize_interval(value: Any) -> int:
@@ -589,10 +630,20 @@ def _find_relay_assignment(data: Any, key: str) -> Optional[Dict[str, Any]]:
 
 def format_kub1063_emergency_relay(
     payload: Dict[str, Any], status: Optional[Any], device: DeviceInfo
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[bool]]:
     """Определяет состояние аварийного реле для КУБ-1063."""
     if device.device_type.value != "KUB-1063":
-        return None
+        return None, None
+
+    detected_state: Optional[bool] = None
+
+    def _make_response(state: Optional[bool], label_suffix: str = "") -> Optional[str]:
+        nonlocal detected_state
+        if state is None:
+            return None
+        detected_state = state
+        pill = _render_relay_pill(state, emergency=True)
+        return f"Состояние аварийного реле{label_suffix}: {pill}"
 
     relay_assignments = payload.get("relay_assignments")
     relay_info = _find_relay_assignment(relay_assignments, "emergency")
@@ -601,8 +652,9 @@ def format_kub1063_emergency_relay(
         channel_label = relay_info.get("channel_label")
         if state is not None:
             label = f" ({channel_label})" if channel_label else ""
-            pill = _render_relay_pill(state, emergency=True)
-            return f"Состояние аварийного реле{label}: {pill}"
+            html = _make_response(bool(state), label)
+            if html:
+                return html, detected_state
 
         channel = relay_info.get("channel")
         if isinstance(channel, int) and channel >= 0:
@@ -617,8 +669,9 @@ def format_kub1063_emergency_relay(
                 state = _read_digital_output("digital_outputs_3", channel - 16)
             if state is not None:
                 label = f" ({channel_label})" if channel_label else ""
-                pill = _render_relay_pill(state, emergency=True)
-                return f"Состояние аварийного реле{label}: {pill}"
+                html = _make_response(state, label)
+                if html:
+                    return html, detected_state
 
     def _resolve_channel() -> Optional[int]:
         channel = payload.get("emergency_relay_channel")
@@ -655,16 +708,18 @@ def format_kub1063_emergency_relay(
         else:
             state = _read_digital_output("digital_outputs_3", channel - 16)
         if state is not None:
-            pill = _render_relay_pill(state, emergency=True)
-            return f"Состояние аварийного реле: {pill}"
+            html = _make_response(state)
+            if html:
+                return html, detected_state
 
     # Если канал не определён, пробуем бит аварии в digital_outputs_2
     state = _read_digital_output("digital_outputs_2", 7)
     if state is not None:
-        pill = _render_relay_pill(state, emergency=True)
-        return f"Состояние аварийного реле: {pill}"
+        html = _make_response(state)
+        if html:
+            return html, detected_state
 
-    return "Состояние аварийного реле: —"
+    return "Состояние аварийного реле: —", detected_state
 
 
 def format_kub1063_relay_cards(payload: Dict[str, Any], device: DeviceInfo) -> Optional[str]:
@@ -1228,7 +1283,9 @@ def render_room_metrics(
         if problem_reasons:
             detail_segments.append("<br/>".join(problem_reasons))
 
-        relay_detail = format_kub1063_emergency_relay(payload, status, device)
+        relay_detail, detected_emergency_state = format_kub1063_emergency_relay(
+            payload, status, device
+        )
         if relay_detail:
             detail_segments.append(relay_detail)
 
@@ -1293,6 +1350,26 @@ def render_room_metrics(
                 )
 
         st.markdown(f"<div class='metric-grid'>{''.join(cards_html)}</div>", unsafe_allow_html=True)
+
+        relay_flag = bool(payload.get("alarm_relay")) if "alarm_relay" in payload else False
+        if detected_emergency_state is True:
+            relay_flag = True
+        show_reset = ((alarm_value_int or 0) > 0) or relay_flag
+        if show_reset and _dashboard_user_can_reset() and device.device_type.value == "KUB-1063":
+            room_name = room.room or "room"
+            room_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", room_name)
+            reset_cols = st.columns([0.35, 0.65])
+            btn_label = "🔁 Сброс аварии"
+            if reset_cols[0].button(
+                btn_label,
+                key=f"reset_alarm_{room_slug}_{device.device_id}",
+                help="Отправляет команду записи регистра 0x0020 на устройстве",
+            ):
+                success, command_id = _enqueue_dashboard_reset(device, room_name)
+                if success and command_id:
+                    reset_cols[1].success(f"Команда отправлена (ID {command_id})")
+                else:
+                    reset_cols[1].error(f"Не удалось отправить команду: {command_id or 'ошибка'}")
 
         relay_cards_html = format_kub1063_relay_cards(payload, device)
         if relay_cards_html:

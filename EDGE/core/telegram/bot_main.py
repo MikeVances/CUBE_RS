@@ -73,6 +73,7 @@ from core.device_registry import DeviceRegistry
 from core.user_preferences import DEFAULT_PREFERENCES, get_user_preferences_service
 from core.utils.paths import resolve_under_root
 from core.user_registry import UserRegistry
+from modbus.command_queue import enqueue_register_write
 
 # Настройка логирования из конфига
 log_file = config.config_dir / "logs" / "telegram.log"
@@ -787,61 +788,29 @@ class KUBTelegramBot:
             logger.warning(f"⚠️ Ошибка оценки причин аварии: {e}")
             return result
 
-    def add_write_command_to_db(self, register: int, value: int, user_info: str):
-        """Добавляем команду записи в очередь (выполнит основная система)"""
+    def _enqueue_reset_command(self, user_info: str) -> tuple[bool, str | None]:
+        """Ставит команду сброса аварий в очередь через общий модуль."""
+
+        if not self.primary_device:
+            return False, "primary_device_missing"
         try:
-            import sqlite3
-            import uuid
-            from datetime import datetime
-
-            command_id = str(uuid.uuid4())[:8]
-            db_path = resolve_under_root(self.config.database.commands_db)
-
-            with sqlite3.connect(db_path) as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS write_commands (
-                        id TEXT PRIMARY KEY,
-                        register INTEGER NOT NULL,
-                        value INTEGER NOT NULL,
-                        user_info TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        scheduled_at TIMESTAMP,
-                        executed_at TIMESTAMP,
-                        status TEXT DEFAULT 'pending',
-                        attempts INTEGER DEFAULT 0,
-                        max_attempts INTEGER DEFAULT 3,
-                        priority INTEGER DEFAULT 0,
-                        error_message TEXT,
-                        execution_time_ms INTEGER
-                    )
-                """
-                )
-
-                conn.execute(
-                    """
-                    INSERT INTO write_commands
-                    (id, register, value, user_info, created_at, status, priority)
-                    VALUES (?, ?, ?, ?, ?, 'pending', 1)
-                """,
-                    (
-                        command_id,
-                        register,
-                        value,
-                        user_info,
-                        datetime.now().isoformat(),
-                    ),
-                )
-                conn.commit()
-
+            command_id = enqueue_register_write(
+                device_id=self.primary_device.device_id,
+                slave_id=self.primary_device.slave_id,
+                register=0x0020,
+                value=1,
+                user_info=user_info,
+                source="telegram",
+            )
             logger.info(
-                f"📝 Команда записи добавлена: reg=0x{register:04X}, val={value}, id={command_id}"
+                "📝 Команда сброса добавлена (id=%s, user=%s)",
+                command_id,
+                user_info,
             )
             return True, command_id
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка добавления команды: {e}")
-            return False, str(e)
+        except Exception as exc:
+            logger.error("❌ Ошибка постановки команды в очередь: %s", exc)
+            return False, str(exc)
 
     # =======================================================================
     # ОБРАБОТЧИКИ КОМАНД
@@ -1260,7 +1229,7 @@ class KUBTelegramBot:
                 loading_message("Выполняется сброс аварий..."), parse_mode="Markdown"
             )
             user_info = f"telegram_user_{user.id}_{user.username or user.first_name}"
-            success, result = self.add_write_command_to_db(0x0020, 1, user_info)
+            success, result = self._enqueue_reset_command(user_info)
             access_level = self.bot_db.get_user_access_level(user.id)
             data = await self.get_current_data_from_db() or {}
             badges = {
@@ -2277,7 +2246,7 @@ class KUBTelegramBot:
 
             # Добавляем команду сброса в очередь (регистр 0x0020, значение 1)
             user_info = f"telegram_user_{user.id}_{user.username or user.first_name}"
-            success, result = self.add_write_command_to_db(0x0020, 1, user_info)
+            success, result = self._enqueue_reset_command(user_info)
 
             access_level = self.bot_db.get_user_access_level(user.id)
             data = await self.get_current_data_from_db() or {}

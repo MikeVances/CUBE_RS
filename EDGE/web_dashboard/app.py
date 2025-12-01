@@ -66,7 +66,7 @@ if not TELEGRAM_BOT_USERNAME:
 try:
     from core.device_registry import DeviceInfo, DeviceRegistry, DeviceType
     from core.device_adapters.catalog import DEVICE_DEFINITIONS, import_adapter_class
-    from core.device_adapters.factory import get_device_metric_metadata
+    from core.device_adapters.factory import get_device_metric_metadata, get_alarm_catalog
     from core.user_registry import ALLOWED_ROLES, UserRegistry
 
     DEVICE_REGISTRY_AVAILABLE = True
@@ -343,10 +343,10 @@ def _room_anchor(name: str) -> str:
 
 BASE_METRIC_DESCRIPTORS: Dict[str, MetricDescriptor] = {
     "connection_status": MetricDescriptor("connection_status", "Связь", "", "Общие"),
-    "active_alarms": MetricDescriptor("active_alarms", "Активные тревоги", "", "Аварии"),
-    "active_warnings": MetricDescriptor("active_warnings", "Предупреждения", "", "Аварии"),
-    "registered_alarms": MetricDescriptor("registered_alarms", "История тревог", "", "Аварии"),
-    "registered_warnings": MetricDescriptor("registered_warnings", "История предупреждений", "", "Аварии"),
+    "active_alarms_total": MetricDescriptor("active_alarms_total", "Активные тревоги", "", "Аварии"),
+    "active_warnings_total": MetricDescriptor("active_warnings_total", "Предупреждения", "", "Аварии"),
+    "registered_alarms_total": MetricDescriptor("registered_alarms_total", "История тревог", "", "Аварии"),
+    "registered_warnings_total": MetricDescriptor("registered_warnings_total", "История предупреждений", "", "Аварии"),
     "fault_code": MetricDescriptor("fault_code", "Fault code", "", "Аварии"),
     "day_counter": MetricDescriptor("day_counter", "Дней работы", "", "Общие"),
 }
@@ -373,6 +373,98 @@ METRIC_DESCRIPTORS = build_metric_descriptors()
 DEFAULT_ROOM_METRICS = ["temp_inside", "humidity", "co2", "pressure"]
 ALWAYS_ON_METRICS: set[str] = set()
 ALLOWED_METRIC_KEYS = set(METRIC_DESCRIPTORS.keys()) | ALWAYS_ON_METRICS
+HIDDEN_METRIC_PREFIXES = {
+    "active_alarms_",
+    "registered_alarms_",
+    "active_warnings_",
+    "registered_warnings_",
+}
+ALARM_CATALOG_CACHE: Dict[str, Dict[int, Dict[str, Any]]] = {}
+ALARM_BIT_OFFSET = {
+    "KUB-1063": 26,
+}
+DISABLED_VALUE_SENTINELS = {-1, 0xFFFE, 0xFFFC}
+
+
+def is_metric_visible(key: str) -> bool:
+    if not key:
+        return False
+    for prefix in HIDDEN_METRIC_PREFIXES:
+        if key.startswith(prefix):
+            return False
+    return True
+
+
+def _get_alarm_catalog_for_device(device_type: str) -> Dict[int, Dict[str, Any]]:
+    cached = ALARM_CATALOG_CACHE.get(device_type)
+    if cached is not None:
+        return cached
+    try:
+        dtype = DeviceType(device_type)
+    except Exception:
+        dtype = device_type
+    try:
+        catalog = get_alarm_catalog(dtype)
+        if not isinstance(catalog, dict):
+            catalog = {}
+    except Exception:
+        catalog = {}
+    ALARM_CATALOG_CACHE[device_type] = catalog
+    return catalog
+
+
+def _format_alarm_recommendations(device_type: str, mask: int, limit: int = 3) -> List[str]:
+    if mask is None:
+        return []
+    if not isinstance(mask, int):
+        try:
+            mask = int(mask)
+        except (TypeError, ValueError):
+            return []
+    catalog = _get_alarm_catalog_for_device(device_type)
+    if not catalog or mask == 0:
+        return []
+    lines: List[str] = []
+    for bit in range(64):
+        if (mask >> bit) & 1:
+            info = catalog.get(bit)
+            if not info:
+                continue
+            title = info.get("title") or f"Авария (бит {bit})"
+            recommendation = info.get("recommendation")
+            text = f"Бит {bit}: {title}"
+            if recommendation:
+                text += f" — {recommendation}"
+            lines.append(text)
+            if len(lines) >= limit:
+                break
+    return lines
+
+
+def _value_is_enabled(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (int, float)):
+        return int(value) not in DISABLED_VALUE_SENTINELS
+    if isinstance(value, str):
+        try:
+            return int(value.strip()) not in DISABLED_VALUE_SENTINELS
+        except (ValueError, TypeError):
+            return value.strip() not in {"-1", "disabled"}
+    return True
+
+
+def _metric_has_active_value(
+    key: str,
+    payload: Dict[str, Any],
+    records: Dict[str, MetricRecord],
+) -> bool:
+    value = payload.get(key)
+    if value is None:
+        record = records.get(key)
+        if record is not None:
+            value = record.value
+    return _value_is_enabled(value)
 DEVICE_METRIC_LABEL_OVERRIDES: Dict[str, Dict[str, str]] = {
     "KUB-1112": {
         "temp_inside": "Температура корпуса",
@@ -428,20 +520,24 @@ def default_metrics_for_device(device_type: str) -> List[str]:
         return [
             key
             for key in ADAPTER_DEFAULT_METRICS[device_type]
-            if key not in ALWAYS_ON_METRICS
+            if key not in ALWAYS_ON_METRICS and is_metric_visible(key)
         ][:6]
 
     keys = DEVICE_METRICS.get(device_type)
     if keys:
-        return [key for key in keys if key not in ALWAYS_ON_METRICS][:6]
+        return [key for key in keys if key not in ALWAYS_ON_METRICS and is_metric_visible(key)][
+            :6
+        ]
     try:
         dtype = DeviceType(device_type)
         metadata = get_device_metric_metadata(dtype)
         if metadata:
-            return [key for key in metadata.keys() if key not in ALWAYS_ON_METRICS][:6]
+            return [
+                key for key in metadata.keys() if key not in ALWAYS_ON_METRICS and is_metric_visible(key)
+            ][:6]
     except Exception:
         pass
-    return [key for key in DEFAULT_ROOM_METRICS if key not in ALWAYS_ON_METRICS]
+    return [key for key in DEFAULT_ROOM_METRICS if key not in ALWAYS_ON_METRICS and is_metric_visible(key)]
 
 STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal"}
 STALE_DATA_THRESHOLD_SECONDS = 60
@@ -857,6 +953,8 @@ def collect_problem_reasons(
     payload: Dict[str, Any],
     human_status: Optional[str],
     alarms_count: int,
+    device_type: str,
+    alarm_mask: Optional[int] = None,
 ) -> List[str]:
     reasons: List[str] = []
     connection_status = None
@@ -882,9 +980,26 @@ def collect_problem_reasons(
             reasons.append(text)
 
     if alarms_count:
-        if status_obj and getattr(status_obj, "alarms", None):
-            reasons.extend(status_obj.alarms[:3])
-        else:
+        mask_value = alarm_mask
+        if mask_value is not None and not isinstance(mask_value, int):
+            try:
+                mask_value = int(mask_value)
+            except (TypeError, ValueError):
+                mask_value = None
+        if mask_value is None:
+            raw_mask = payload.get("active_alarms")
+            try:
+                mask_value = int(raw_mask)
+            except (TypeError, ValueError):
+                mask_value = None
+        recommendations = []
+        if mask_value:
+            recs = _format_alarm_recommendations(device_type, mask_value)
+            recommendations.extend(recs)
+            reasons.extend(recs)
+        recorded_alarms = status_obj.alarms[:3] if status_obj and getattr(status_obj, "alarms", None) else []
+        reasons.extend(recorded_alarms)
+        if not recommendations and not recorded_alarms:
             reasons.append(f"Активных тревог: {alarms_count}")
     elif status_obj and getattr(status_obj, "warnings", None):
         warnings = status_obj.warnings[:2]
@@ -1187,14 +1302,32 @@ def get_room_metric_preferences(room: RoomSnapshot) -> Dict[int, List[str]]:
             room_pref.pop(device_id)
 
     for device in room.devices:
-        default_keys = set(default_metrics_for_device(device.device_type.value))
-        default_keys -= ALWAYS_ON_METRICS
-        default_keys -= DEVICE_STATUS_FIELDS
+        metrics_map = room.device_metrics.get(device.device_id) or {}
+        if metrics_map:
+            default_keys = [
+                key
+                for key in metrics_map.keys()
+                if is_metric_visible(key)
+                and key not in DEVICE_STATUS_FIELDS
+                and _metric_has_active_value(key, {}, metrics_map)
+            ]
+        else:
+            default_keys = [
+                key
+                for key in default_metrics_for_device(device.device_type.value)
+                if key not in DEVICE_STATUS_FIELDS and is_metric_visible(key)
+            ]
 
         if device.device_id not in room_pref:
             room_pref[device.device_id] = list(default_keys)
 
-        current_selection = [key for key in room_pref[device.device_id] if key in ALLOWED_METRIC_KEYS]
+        current_selection = [
+            key
+            for key in room_pref[device.device_id]
+            if key in ALLOWED_METRIC_KEYS
+            and is_metric_visible(key)
+            and _metric_has_active_value(key, {}, room.device_metrics.get(device.device_id) or {})
+        ]
         if not current_selection:
             # если пользователь ничего не выбирал или все ключи устарели — возвращаемся к дефолту
             current_selection = list(default_keys)
@@ -1242,7 +1375,12 @@ def render_room_metrics(
         device_snapshot = device_metric_records.get(device.device_id, {})
         if not payload:
             device_snapshot = {}
-        selected_keys = preferences.get(device.device_id, [])
+        selected_keys = [
+            key
+            for key in preferences.get(device.device_id, [])
+            if is_metric_visible(key)
+            and _metric_has_active_value(key, payload, device_snapshot)
+        ]
         status = device_statuses.get(device.device_id)
         raw_status = None
         if status and getattr(status, "status", None):
@@ -1270,6 +1408,13 @@ def render_room_metrics(
             and alarm_value_int == 0
         )
 
+        metrics_map = device_metric_records.get(device.device_id, {})
+        alarm_mask_value = payload.get("active_alarms")
+        if alarm_mask_value is None:
+            record_mask = metrics_map.get("active_alarms")
+            if record_mask is not None:
+                alarm_mask_value = record_mask.value
+
         problem_reasons: List[str] = []
         if not status_ok:
             problem_reasons = collect_problem_reasons(
@@ -1277,6 +1422,8 @@ def render_room_metrics(
                 payload=payload,
                 human_status=status_human,
                 alarms_count=alarm_value_int,
+                device_type=device.device_type.value,
+                alarm_mask=alarm_mask_value,
             )
 
         detail_segments: List[str] = []
@@ -1332,6 +1479,8 @@ def render_room_metrics(
             )
         else:
             for key in selected_keys:
+                if not is_metric_visible(key):
+                    continue
                 descriptor = METRIC_DESCRIPTORS.get(key, MetricDescriptor(key, key))
                 label = resolve_metric_label(room, device, key)
                 value = payload.get(key)
@@ -1421,6 +1570,8 @@ def render_device_cards(room: RoomSnapshot, device_payloads: Dict[int, Dict[str,
                 payload=payload,
                 human_status=status_human,
                 alarms_count=alarms_count,
+                device_type=device.device_type.value,
+                alarm_mask=payload.get("active_alarms"),
             )
         detail_html = "<br/>".join(problem_reasons)
         pill_color = "#238636" if status_ok else "#dc3545"
@@ -1492,22 +1643,29 @@ def render_room_settings(
     for device in room.devices:
         payload = device_payloads.get(device.device_id, {})
         device_snapshot = device_metric_records.get(device.device_id, {})
-        base_keys = set(DEVICE_METRICS.get(device.device_type.value, []))
-        fallback_keys = set(payload.keys()) | set(device_snapshot.keys())
-        candidate_keys = base_keys | fallback_keys
+        candidate_keys = set(payload.keys()) | set(device_snapshot.keys())
 
         available_keys = {
             key
             for key in candidate_keys
-            if key not in ALWAYS_ON_METRICS
+            if is_metric_visible(key)
+            and key not in ALWAYS_ON_METRICS
             and key not in DEVICE_STATUS_FIELDS
             and _is_preference_metric(device, key)
+            and _metric_has_active_value(key, payload, device_snapshot)
         }
 
         if not available_keys:
+            updated[device.device_id] = []
             continue
 
-        current_selection = preferences.get(device.device_id, [])
+        current_selection = [
+            key
+            for key in preferences.get(device.device_id, [])
+            if key in ALLOWED_METRIC_KEYS
+            and is_metric_visible(key)
+            and _metric_has_active_value(key, payload, device_snapshot)
+        ]
         with st.expander(f"{device.name} · {device.device_type.value}", expanded=False):
             device_selection: List[str] = []
             for key in sorted(available_keys):
@@ -1521,7 +1679,11 @@ def render_room_settings(
             if not device_selection:
                 device_selection = current_selection
 
-            updated[device.device_id] = device_selection
+            updated[device.device_id] = [
+                key
+                for key in device_selection
+                if _metric_has_active_value(key, payload, device_snapshot)
+            ]
 
     if all((not metrics) for metrics in updated.values()):
         st.info("Нет устройств с настраиваемыми параметрами")

@@ -12,6 +12,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.helpers import escape_markdown
 
 from core.config_manager import get_config
+from core.device_registry import DeviceType
+from core.device_adapters.factory import get_alarm_catalog
 
 _CFG = get_config()
 
@@ -35,43 +37,12 @@ EMOJI = {
     "refresh": "🔄",
 }
 
-# Из документации (фрагмент): карта некоторых битов активных аварий
-# Нумерация битов: 0 — младший бит слова по адресу 0x00C0, 16 — младший бит 0x00C1 и т.д.
-# Здесь приведены только встречающиеся и критичные для UX пункты.
+_ALARM_CATALOG = get_alarm_catalog(DeviceType.KUB_1063)
 ACTIVE_ALARM_BITS: dict[int, str] = {
-    26: "Аварийный режим управления воздухозаборником 3",
-    27: "Аварийный режим управления воздухозаборником 4",
-    28: "Низкое напряжение питания",
-    30: "Не установлены дата и время",
-    33: "Перегрузка системы",
-    34: "Требуется первичная настройка",
-    35: "Превышена максимальная внутренняя температура",
-    36: "Низкая внутренняя температура",
-    37: "Высокая влажность",
-    38: "Высокое отрицательное давление",
-    39: "Низкое отрицательное давление",
-    40: "Обрыв датчика влажности",
-    41: "Обрыв датчика отрицательного давления",
-    42: "Обрыв датчика внутренней температуры 1",
-    43: "Обрыв датчика внутренней температуры 2",
-    44: "Обрыв датчика наружной температуры",
-    45: "Аварийный режим вентиляции по температуре",
-    46: "Аварийный режим контроля влажности",
-    47: "Аварийный режим охладителя",
-    51: "Аварийный режим воздухозаборника 1",
-    52: "Аварийный режим воздухозаборника 2",
-    53: "Аварийный режим нагревателя 1",
-    54: "Аварийный режим нагревателя 2",
-    55: "Аварийный режим демпфера",
-    56: "Неправильные уставки",
-    57: "Высокая внутренняя температура",
-    58: "Аварийный режим туннельным воздухозаборником",
-    59: "Обрыв датчика температуры",
-    60: "Обрыв датчика внутренней температуры 3",
-    61: "Обрыв датчика внутренней температуры 4",
-    62: "Аварийный режим нагревателя 3",
-    63: "Аварийный режим нагревателя 4",
+    bit: info.get("title", f"Авария бит {bit}")
+    for bit, info in _ALARM_CATALOG.items()
 }
+ALARM_HINTS = {bit: info.get("recommendation") for bit, info in _ALARM_CATALOG.items()}
 
 
 def decode_active_alarms(mask: int, max_items: int = 10) -> list[str]:
@@ -86,7 +57,9 @@ def decode_active_alarms(mask: int, max_items: int = 10) -> list[str]:
         if (mask >> bit) & 1:
             name = ACTIVE_ALARM_BITS.get(bit)
             if name:
-                names.append(f"{EMOJI['alarm']} {name} (бит {bit})")
+                hint = ALARM_HINTS.get(bit)
+                suffix = f" — {hint}" if hint else ""
+                names.append(f"{EMOJI['alarm']} {name} (бит {bit}){suffix}")
             else:
                 unknown += 1
     if unknown:

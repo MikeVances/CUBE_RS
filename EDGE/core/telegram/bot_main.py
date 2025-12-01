@@ -16,7 +16,7 @@ from copy import deepcopy
 from contextlib import suppress
 from html import escape
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Импорт централизованного конфиг-менеджера и безопасности  
 try:
@@ -101,6 +101,8 @@ else:
 BOT_LOCK_PATH = Path(resolve_under_root("data/telegram_bot.lock"))
 STATUS_OK_VALUES = {"ok", "online", "connected", "ready", "active", "normal"}
 MAX_METRICS_PER_DEVICE = 6
+METRICS_PAGE_SIZE = 12  # количество метрик на страницу в меню настроек
+DISABLED_VALUE_SENTINELS = {-1, 0xFFFE, 0xFFFC}
 
 
 def _display_name(user) -> str:
@@ -118,6 +120,19 @@ def _mention(user) -> str:
     if username:
         return f"@{md_escape(username)}"
     return md_escape(str(getattr(user, "id", "")))
+
+
+def _value_is_enabled(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (int, float)):
+        return int(value) not in DISABLED_VALUE_SENTINELS
+    if isinstance(value, str):
+        try:
+            return int(value.strip()) not in DISABLED_VALUE_SENTINELS
+        except (ValueError, TypeError):
+            return value.strip() not in {"-1", "disabled"}
+    return True
 
 
 def _read_lock_pid() -> Optional[int]:
@@ -252,6 +267,16 @@ class KUBTelegramBot:
     ) -> List[str]:
         device_metrics = room.device_metrics.get(device_id) or {}
         return list(device_metrics.keys())[:MAX_METRICS_PER_DEVICE]
+
+    @staticmethod
+    def _metric_has_active_value(
+        metrics_map: Dict[str, Any], key: str
+    ) -> bool:
+        record = metrics_map.get(key)
+        if not record:
+            return True
+        value = getattr(record, "value", record)
+        return _value_is_enabled(value)
 
     def _format_metric_value(self, value: Any) -> str:
         if value is None:
@@ -453,6 +478,7 @@ class KUBTelegramBot:
         room_name: str,
         device_id: int,
         snapshots: Optional[List[RoomSnapshot]] = None,
+        page: int = 0,
     ) -> Tuple[str, InlineKeyboardMarkup]:
         edge_user_id = self._get_edge_user_id(telegram_id)
         if not edge_user_id or not self.user_preferences:
@@ -483,32 +509,48 @@ class KUBTelegramBot:
 
         prefs = self.user_preferences.get_preferences(edge_user_id)
         room_bucket = prefs.get("rooms", {}).get(room_name, {})
-        current_metrics = room_bucket.get(device_id, [])
         metrics_from_snapshot = room.device_metrics.get(device_id) or {}
+        current_metrics = [
+            key
+            for key in room_bucket.get(device_id, [])
+            if self._metric_has_active_value(metrics_from_snapshot, key)
+        ]
         meta_bucket = room.metric_metadata.get(device_id, {})
         adapter_meta = get_device_metric_metadata(device.device_type)
 
-        available_metrics: List[str] = []
+        candidate_metrics: List[str] = []
         seen: set[str] = set()
-        for key in metrics_from_snapshot.keys():
-            if key not in seen:
-                seen.add(key)
-                available_metrics.append(key)
-        for key in list(meta_bucket.keys()) + list(adapter_meta.keys()):
-            if key not in seen:
-                seen.add(key)
-                available_metrics.append(key)
+        metrics_map = metrics_from_snapshot
 
-        if not available_metrics:
+        def _append_keys(keys: Iterable[str]):
+            for key in keys:
+                if not key:
+                    continue
+                if key in seen:
+                    continue
+                if not self._metric_has_active_value(metrics_map, key):
+                    continue
+                seen.add(key)
+                candidate_metrics.append(str(key))
+
+        _append_keys(current_metrics)
+        _append_keys(metrics_from_snapshot.keys())
+
+        if not candidate_metrics:
             return (
                 "Нет доступных метрик для отображения.",
                 InlineKeyboardMarkup(
                     [[InlineKeyboardButton("⬅️ Устройства", callback_data="pref_rooms")]]
                 ),
             )
+        total_pages = max(1, (len(candidate_metrics) + METRICS_PAGE_SIZE - 1) // METRICS_PAGE_SIZE)
+        page = max(0, min(page, total_pages - 1))
+        start_idx = page * METRICS_PAGE_SIZE
+        end_idx = start_idx + METRICS_PAGE_SIZE
+        visible_metrics = candidate_metrics[start_idx:end_idx]
 
         buttons: List[List[InlineKeyboardButton]] = []
-        for key in available_metrics:
+        for key in visible_metrics:
             meta_obj = meta_bucket.get(key)
             if meta_obj and getattr(meta_obj, "label", None):
                 label = meta_obj.label
@@ -531,6 +573,27 @@ class KUBTelegramBot:
         buttons.append(
             [InlineKeyboardButton("⬅️ Устройства", callback_data=f"pref_room:{room_token}")]
         )
+
+        if total_pages > 1:
+            nav_buttons: List[InlineKeyboardButton] = []
+            if page > 0:
+                prev_token = self._register_callback_token(
+                    telegram_id,
+                    {"room": room_name, "device_id": device_id, "page": page - 1},
+                )
+                nav_buttons.append(
+                    InlineKeyboardButton("⬅️ Предыдущие", callback_data=f"pref_metrics:{prev_token}")
+                )
+            if page < total_pages - 1:
+                next_token = self._register_callback_token(
+                    telegram_id,
+                    {"room": room_name, "device_id": device_id, "page": page + 1},
+                )
+                nav_buttons.append(
+                    InlineKeyboardButton("Следующие ➡️", callback_data=f"pref_metrics:{next_token}")
+                )
+            if nav_buttons:
+                buttons.append(nav_buttons)
         buttons.append(
             [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
         )
@@ -539,6 +602,8 @@ class KUBTelegramBot:
             f"🧩 *{md_escape(device.name or f'Устройство {device.device_id}')}*\n"
             "Включайте/выключайте метрики одной кнопкой."
         )
+        if total_pages > 1:
+            text += f"\n\n📄 Страница {page + 1} из {total_pages}."
         return text, InlineKeyboardMarkup(buttons)
 
     # =============================================================
@@ -1916,6 +1981,9 @@ class KUBTelegramBot:
             elif data.startswith("pref_toggle:"):
                 token = data.split(":", 1)[1]
                 await self._handle_pref_toggle_metric(query, context, token)
+            elif data.startswith("pref_metrics:"):
+                token = data.split(":", 1)[1]
+                await self._handle_pref_metrics_page(query, context, token)
 
             # НОВЫЕ ОБРАБОТЧИКИ МЕНЮ НАСТРОЕК
             elif data == "manage_users":
@@ -2068,6 +2136,21 @@ class KUBTelegramBot:
             return
 
         text, markup = self._build_metrics_menu(user.id, room_name, device_id)
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+
+    async def _handle_pref_metrics_page(self, query, context, token: str):
+        user = query.from_user
+        payload = self._resolve_callback_token(user.id, token)
+        if not payload or "room" not in payload or "device_id" not in payload:
+            await query.answer("Список устарел, откройте заново", show_alert=True)
+            return
+        page = int(payload.get("page", 0) or 0)
+        text, markup = self._build_metrics_menu(
+            user.id,
+            payload["room"],
+            int(payload["device_id"]),
+            page=page,
+        )
         await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
 
     async def _handle_show_status(self, query, context):

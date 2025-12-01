@@ -310,6 +310,29 @@ class KUB1063Adapter(DeviceAdapter):
         self._mapper = KUBVariableMapper()
         self._setup_variable_definitions()
         self._setup_variable_references()
+
+    def extra_metric_metadata(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "active_alarms_total": {
+                "label": "Активные тревоги",
+                "category": "Аварии",
+            },
+            "registered_alarms_total": {
+                "label": "История тревог",
+                "category": "Аварии",
+            },
+            "active_warnings_total": {
+                "label": "Предупреждения",
+                "category": "Аварии",
+            },
+            "registered_warnings_total": {
+                "label": "История предупреждений",
+                "category": "Аварии",
+            },
+        }
+
+    def get_alarm_catalog(self) -> Dict[int, Dict[str, str]]:
+        return ACTIVE_ALARM_DETAILS
     
     @property
     def device_type(self) -> str:
@@ -389,6 +412,12 @@ class KUB1063Adapter(DeviceAdapter):
                 special_values={0x7FFF: "disabled"},
                 description="Целое число со знаком"
             ),
+            # Булевые значения/флаги
+            VariableTypeDefinition(
+                id=11, name="Boolean", var_type=VariableType.BOOL,
+                scale=1.0, signed=False, unit=None,
+                description="Логический флаг (0/1)"
+            ),
         ]
         
         for type_def in type_definitions:
@@ -406,13 +435,29 @@ class KUB1063Adapter(DeviceAdapter):
             VariableReference("digital_outputs_1", 0x0081, 7, description="ГНВ базовой/туннельной вентиляции"),
             VariableReference("digital_outputs_2", 0x0082, 7, description="ГРВ, нагреватели, освещение, авария"),
             VariableReference("digital_outputs_3", 0x00A2, 7, description="Таймеры"),
+
+            # Кривая целевой температуры вентиляции
+            VariableReference(
+                "vent_curve_enabled",
+                0x0042,
+                11,
+                function_code=3,
+                description="Кривая целевой температуры: включена",
+            ),
+            VariableReference(
+                "vent_curve_points_count",
+                0x0043,
+                8,
+                function_code=3,
+                description="Количество точек кривой целевой температуры",
+            ),
             
             # Основные датчики
             VariableReference("pressure", 0x0083, 3, description="Отрицательное давление"),
             VariableReference("humidity", 0x0084, 2, description="Относительная влажность"),
             VariableReference("co2", 0x0085, 4, description="Концентрация CO2"),
             VariableReference("nh3", 0x0086, 5, description="Концентрация NH3"),
-            
+
             # Управляющие выходы ГРВ
             VariableReference("grv_base", 0x0087, 6, description="ГРВ базовой вентиляции"),
             VariableReference("grv_tunnel", 0x0088, 6, description="ГРВ туннельной вентиляции"),
@@ -424,7 +469,34 @@ class KUB1063Adapter(DeviceAdapter):
             VariableReference("air_intake_tunnel", 0x008C, 6, description="Туннельный воздухозаборник"),
             VariableReference("air_intake_3", 0x0092, 6, description="Воздухозаборник 3"),
             VariableReference("air_intake_4", 0x0093, 6, description="Воздухозаборник 4"),
-            
+
+            # Точки кривой целевой температуры вентиляции (день/целевая температура)
+        ]
+
+        base_addr = 0x0044
+        for idx in range(1, 11):
+            day_addr = base_addr + (idx - 1) * 2
+            temp_addr = day_addr + 1
+            variable_references.append(
+                VariableReference(
+                    f"vent_curve_day_{idx}",
+                    day_addr,
+                    10,
+                    function_code=3,
+                    description=f"Кривая целевой температуры · точка {idx} (день)",
+                )
+            )
+            variable_references.append(
+                VariableReference(
+                    f"vent_curve_temp_{idx}",
+                    temp_addr,
+                    1,
+                    function_code=3,
+                    description=f"Кривая целевой температуры · точка {idx} (температура)",
+                )
+            )
+
+        variable_references.extend([
             # Температурные датчики
             VariableReference("temp_inside_1", 0x008D, 1, description="Внутренняя температура 1"),
             VariableReference("temp_inside_2", 0x008E, 1, description="Внутренняя температура 2"),
@@ -479,7 +551,7 @@ class KUB1063Adapter(DeviceAdapter):
             VariableReference("temp_target", 0x00D4, 1, description="Целевая температура"),
             VariableReference("temp_inside", 0x00D5, 1, description="Текущая внутренняя температура"),
             VariableReference("temp_vent_activation", 0x00D6, 1, description="Температура активации вентиляции"),
-        ]
+        ])
 
         for relay in RELAY_FUNCTIONS:
             variable_references.append(
@@ -502,6 +574,8 @@ class KUB1063Adapter(DeviceAdapter):
     def parse_device_data(self, device_id: int, raw_registers: Dict[int, int]) -> DeviceData:
         data = super().parse_device_data(device_id, raw_registers)
         self._inject_relay_assignments(data)
+        self._aggregate_alarm_counters(data)
+        self._inject_ventilation_curve(data)
         return data
 
     def _inject_relay_assignments(self, data: DeviceData) -> None:
@@ -540,6 +614,96 @@ class KUB1063Adapter(DeviceAdapter):
         if assignments:
             registers["relay_assignments"] = sorted(assignments, key=lambda entry: entry.get("order", 0))
 
+    def _aggregate_alarm_counters(self, data: DeviceData) -> None:
+        """Суммирует битовые блоки аварий/предупреждений для UX."""
+
+        registers = data.registers
+
+        def _collect(prefix: str, parts: int = 4) -> list[int]:
+            values: list[int] = []
+            for idx in range(parts):
+                key = f"{prefix}_{idx}"
+                try:
+                    values.append(int(registers.get(key) or 0))
+                except Exception:
+                    values.append(0)
+            return values
+
+        def _bit_count(values: list[int]) -> int:
+            return sum(int(value).bit_count() for value in values)
+
+        registers["active_alarms_total"] = _bit_count(_collect("active_alarms"))
+        registers["registered_alarms_total"] = _bit_count(_collect("registered_alarms"))
+        registers["active_warnings_total"] = _bit_count(_collect("active_warnings"))
+        registers["registered_warnings_total"] = _bit_count(_collect("registered_warnings"))
+
+    def _inject_ventilation_curve(self, data: DeviceData) -> None:
+        """Формирует структуру кривой целевой температуры вентиляции."""
+
+        registers = data.registers
+        raw_registers = getattr(data, "raw_registers", {}) or {}
+
+        def _raw_or_parsed(name: str) -> Any:
+            return raw_registers.get(name, registers.get(name))
+
+        enabled_raw_value = _raw_or_parsed("vent_curve_enabled")
+        enabled_value = self._safe_int(enabled_raw_value)
+        enabled: Optional[bool]
+        if enabled_value in (0, 1):
+            enabled = bool(enabled_value)
+        else:
+            enabled = None
+
+        points_count_register = _raw_or_parsed("vent_curve_points_count")
+        points_count_raw = self._safe_int(points_count_register)
+        points_count: Optional[int]
+        if points_count_raw is not None and 0 <= points_count_raw <= 10:
+            points_count = points_count_raw
+        else:
+            points_count = None
+
+        points: List[Dict[str, Any]] = []
+        for idx in range(1, 11):
+            day_raw = _raw_or_parsed(f"vent_curve_day_{idx}")
+            temp_raw = registers.get(f"vent_curve_temp_{idx}")
+            if day_raw is None or temp_raw is None:
+                continue
+            day = self._safe_int(day_raw, allow_negative=True)
+            temp = temp_raw
+            if day is None or not (-99 <= day <= 999):
+                continue
+            points.append({"point": idx, "day": day, "temperature": temp})
+
+        if enabled is None and points_count is None and not points:
+            return
+
+        resolved_count = points_count if points_count is not None else (len(points) if points else None)
+
+        state_label: Optional[str]
+        if enabled is True:
+            state_label = "Кривая включена"
+        elif enabled is False:
+            state_label = "Кривая отключена"
+        else:
+            state_label = None
+
+        registers["ventilation_curve"] = {
+            "enabled": enabled,
+            "enabled_raw": self._safe_int(enabled_raw_value),
+            "points_count": resolved_count,
+            "points_count_raw": points_count_raw,
+            "points": points,
+            "state_label": state_label,
+        }
+
+        # Обновляем оригинальные регистры, чтобы потребители, читающие старые ключи,
+        # получали нормализованные значения без изменений на фронте.
+        registers["vent_curve_enabled"] = state_label if state_label is not None else enabled
+        registers["vent_curve_enabled_raw"] = self._safe_int(enabled_raw_value)
+        registers["vent_curve_points_count"] = resolved_count
+        registers["vent_curve_points_count_raw"] = points_count_raw
+        registers["vent_curve_state_label"] = state_label
+
     def _read_function_state(self, bitfield_name: str, bit: int, registers: Dict[str, Any]) -> Optional[bool]:
         value = registers.get(bitfield_name)
         if value is None:
@@ -551,12 +715,14 @@ class KUB1063Adapter(DeviceAdapter):
         return bool(mask & (1 << bit))
 
     @staticmethod
-    def _safe_int(value: Any) -> Optional[int]:
+    def _safe_int(value: Any, allow_negative: bool = False) -> Optional[int]:
         try:
             result = int(value)
         except (TypeError, ValueError):
             return None
-        return result if result >= 0 else None
+        if not allow_negative and result < 0:
+            return None
+        return result
 
     @staticmethod
     def _format_channel_label(channel: Optional[int], channel_type: str = "relay") -> Optional[str]:
@@ -807,37 +973,135 @@ class KUB1063Adapter(DeviceAdapter):
             return f"<code>{value:.1f}{unit}</code>"
         else:
             return f"<code>{value:.1f}{unit}</code>"
-ACTIVE_ALARM_DESCRIPTIONS = {
-    26: "Включён аварийный режим управления воздухозаборником 3",
-    27: "Включён аварийный режим управления воздухозаборником 4",
-    28: "Низкое напряжение питания",
-    30: "Не установлены дата и время",
-    33: "Перегрузка системы",
-    34: "Требуется первичная настройка",
-    35: "Превышена максимальная внутренняя температура",
-    36: "Низкая внутренняя температура",
-    37: "Высокая влажность",
-    38: "Высокое отрицательное давление",
-    39: "Низкое отрицательное давление",
-    40: "Обрыв датчика влажности",
-    41: "Обрыв датчика отрицательного давления",
-    42: "Обрыв датчика внутренней температуры 1",
-    43: "Обрыв датчика внутренней температуры 2",
-    44: "Обрыв датчика наружной температуры",
-    45: "Включён аварийный режим управления вентиляцией по температуре",
-    46: "Включён аварийный режим контроля влажности",
-    47: "Включён аварийный режим управления охладителем",
-    51: "Включён аварийный режим управления воздухозаборником 1",
-    52: "Включён аварийный режим управления воздухозаборником 2",
-    53: "Включён аварийный режим управления нагревателем 1",
-    54: "Включён аварийный режим управления нагревателем 2",
-    55: "Включён аварийный режим управления демпфером",
-    56: "Неправильные уставки",
-    57: "Высокая внутренняя температура",
-    58: "Включён аварийный режим управления туннельным воздухозаборником",
-    59: "Обрыв датчика температуры",
-    60: "Обрыв датчика внутренней температуры 3",
-    61: "Обрыв датчика внутренней температуры 4",
-    62: "Включён аварийный режим управления нагревателем 3",
-    63: "Включён аварийный режим управления нагревателем 4",
+ACTIVE_ALARM_DETAILS = {
+    26: {
+        "title": "Аварийный режим воздухозаборника 3",
+        "recommendation": "Проверьте назначение выхода и привод воздухозаборника 3. После устранения верните управление в автоматический режим.",
+    },
+    27: {
+        "title": "Аварийный режим воздухозаборника 4",
+        "recommendation": "Проверьте подключение воздухозаборника 4 и его уставки.",
+    },
+    28: {
+        "title": "Низкое напряжение питания",
+        "recommendation": "Проверьте питание контроллера (220 В/24 В), состояние ИБП и клемм.",
+    },
+    30: {
+        "title": "Не установлены дата и время",
+        "recommendation": "Установите актуальные дату и время на панели КУБ-1063.",
+    },
+    33: {
+        "title": "Перегрузка системы",
+        "recommendation": "Перезапустите контроллер и проверьте число фоновых задач/таймеров.",
+    },
+    34: {
+        "title": "Требуется первичная настройка",
+        "recommendation": "Запустите мастер начальной настройки и задайте базовые параметры.",
+    },
+    35: {
+        "title": "Превышена максимальная внутренняя температура",
+        "recommendation": "Увеличьте вентиляцию/охлаждение, проверьте уставки температуры.",
+    },
+    36: {
+        "title": "Низкая внутренняя температура",
+        "recommendation": "Проверьте нагреватели, реле и целевые значения температуры.",
+    },
+    37: {
+        "title": "Высокая влажность",
+        "recommendation": "Проверьте работу осушения/вентиляции и корректность датчика влажности.",
+    },
+    38: {
+        "title": "Высокое отрицательное давление",
+        "recommendation": "Проверьте заслонки, каналы и датчик давления.",
+    },
+    39: {
+        "title": "Низкое отрицательное давление",
+        "recommendation": "Проверьте вентиляторы и точность датчика давления.",
+    },
+    40: {
+        "title": "Обрыв датчика влажности",
+        "recommendation": "Проверить проводку датчика влажности и заменить при необходимости.",
+    },
+    41: {
+        "title": "Обрыв датчика отрицательного давления",
+        "recommendation": "Проверить соединение датчика давления и калибровку.",
+    },
+    42: {
+        "title": "Обрыв датчика внутренней температуры 1",
+        "recommendation": "Проверить датчик T1, кабель и клеммник.",
+    },
+    43: {
+        "title": "Обрыв датчика внутренней температуры 2",
+        "recommendation": "Проверить датчик T2 и проводку.",
+    },
+    44: {
+        "title": "Обрыв датчика наружной температуры",
+        "recommendation": "Осмотреть наружный датчик, восстановить проводку/заменить.",
+    },
+    45: {
+        "title": "Аварийный режим вентиляции по температуре",
+        "recommendation": "Проверить датчики температуры и параметры вентиляции, вернуть автоматический режим.",
+    },
+    46: {
+        "title": "Аварийный режим контроля влажности",
+        "recommendation": "Проверить датчик влажности и уставки управления.",
+    },
+    47: {
+        "title": "Аварийный режим управления охладителем",
+        "recommendation": "Проверить охладитель, реле и конфигурацию выхода.",
+    },
+    51: {
+        "title": "Аварийный режим воздухозаборника 1",
+        "recommendation": "Проверить привод воздухозаборника 1 и привязанный выход.",
+    },
+    52: {
+        "title": "Аварийный режим воздухозаборника 2",
+        "recommendation": "Проверить привод воздухозаборника 2.",
+    },
+    53: {
+        "title": "Аварийный режим нагревателя 1",
+        "recommendation": "Проверить контактор/реле нагревателя 1 и цепь питания.",
+    },
+    54: {
+        "title": "Аварийный режим нагревателя 2",
+        "recommendation": "Проверить нагреватель 2 и его цепь управления.",
+    },
+    55: {
+        "title": "Аварийный режим демпфера",
+        "recommendation": "Проверить привод демпфера и сигнал управления.",
+    },
+    56: {
+        "title": "Неправильные уставки",
+        "recommendation": "Проверьте заданные значения температуры, влажности и давления, скорректируйте их по технологической карте.",
+    },
+    57: {
+        "title": "Высокая внутренняя температура",
+        "recommendation": "Проверьте вентиляцию/охлаждение, уменьшите уставку или увеличьте скорость вентиляторов.",
+    },
+    58: {
+        "title": "Аварийный режим туннельного воздухозаборника",
+        "recommendation": "Проверить привод туннельного воздухозаборника и настройки канала.",
+    },
+    59: {
+        "title": "Обрыв датчика температуры",
+        "recommendation": "Проверить универсальный температурный датчик и кабель.",
+    },
+    60: {
+        "title": "Обрыв датчика внутренней температуры 3",
+        "recommendation": "Проверить датчик T3 и соединения.",
+    },
+    61: {
+        "title": "Обрыв датчика внутренней температуры 4",
+        "recommendation": "Проверить датчик T4 и соединения.",
+    },
+    62: {
+        "title": "Аварийный режим нагревателя 3",
+        "recommendation": "Проверить цепь нагревателя 3.",
+    },
+    63: {
+        "title": "Аварийный режим нагревателя 4",
+        "recommendation": "Проверить цепь нагревателя 4.",
+    },
 }
+
+ACTIVE_ALARM_DESCRIPTIONS = {bit: data["title"] for bit, data in ACTIVE_ALARM_DETAILS.items()}

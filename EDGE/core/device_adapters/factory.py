@@ -82,6 +82,22 @@ def _collect_adapter_metadata(adapter: DeviceAdapter) -> Dict[str, Dict[str, Any
                 entry["label"] = info.description
             if not entry.get("unit") and getattr(info, "unit", None):
                 entry["unit"] = info.unit
+    # Fallback: позволяем адаптеру объявлять дополнительные метрики вручную
+    extra_metadata = getattr(adapter, "extra_metric_metadata", None)
+    if callable(extra_metadata):
+        try:
+            extra = extra_metadata()
+        except Exception:
+            extra = None
+    else:
+        extra = extra_metadata
+    if isinstance(extra, dict):
+        for name, info in extra.items():
+            entry = metadata.setdefault(name, {})
+            if isinstance(info, dict):
+                entry.update({k: v for k, v in info.items() if v is not None})
+            else:
+                entry.setdefault("label", str(info))
     return metadata
 
 
@@ -102,6 +118,23 @@ def get_device_metric_metadata(device_type: Enum | str) -> Dict[str, Dict[str, A
     if not adapter:
         return {}
     return _collect_adapter_metadata(adapter)
+
+
+def get_alarm_catalog(device_type: Enum | str) -> Dict[int, Dict[str, Any]]:
+    adapter = get_device_adapter(device_type)
+    if not adapter:
+        return {}
+    catalog = getattr(adapter, "get_alarm_catalog", None)
+    if callable(catalog):
+        try:
+            data = catalog()
+            return dict(data) if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    raw_catalog = getattr(adapter, "alarm_catalog", None)
+    if isinstance(raw_catalog, dict):
+        return raw_catalog
+    return {}
 
 
 def get_supported_device_types() -> list[str]:

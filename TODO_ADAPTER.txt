@@ -2,3 +2,14 @@ TODO - KUB-1063 adapter rework
 1. Map relay assignment registers (0x0100-0x013F): GNV, GRV, heaters, lighting, emergency, etc. Document which register corresponds to each function.
 2. Extend kub1063.py to read these registers (VariableReferences) and normalize payload structure relay_assignments with channel+state per function.
 3. Update dashboard to consume relay_assignments list (render cards/buttons per function) and verify on live device.
+
+Борьба с хардкодом! todo лист ниже
+4. KUB-1063: перенести вычисление аварийного реле в адаптер — выдавать emergency_relay_state/state_label, чтобы UI/бот не лезли в битовые поля. (DONE: _inject_emergency_relay_state в kub1063.py)
+5. KUB-1063: расширить relay_assignments итоговыми display_* полями (state_string, register_hex, channel_label) и формировать карточки на backend. (DONE: channel_display/state_label/state_variant/register_hex в kub1063.py)
+6. KUB-1063: добавить метаданные для технических метрик (relay_channel и т.п.), чтобы UI не фильтровал их вручную. (DONE: factory.py помечает hidden, app MetricDescriptor.hidden используется)
+7. Аварии/предупреждения: адаптер должен отдавать нормализованные списки вместо использования ALARM_BIT_OFFSET в UI. (DONE: active_alarms_list / active_warnings_list + обновлённый дашборд)
+
+Новая цель: полностью убрать хардкод про КУБ-1063 из дашборда и описывать поведение через контракт адаптера.
+8. Дашборд: заменить format_kub1063_emergency_relay/relay_cards на чтение новых полей (emergency_relay, расширенный relay_assignments). (DONE — app использует backend поля)
+9. Дашборд: пересмотреть collect_device_payloads/essential_keys — UI должен получать только агрегаты от адаптера, без прямого доступа к digital_outputs_*.
+10. Контракт адаптера: описать и задокументировать формат «карточек/метрик», чтобы любые новые устройства подключались без правок UI.

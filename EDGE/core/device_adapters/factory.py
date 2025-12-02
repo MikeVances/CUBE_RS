@@ -98,6 +98,14 @@ def _collect_adapter_metadata(adapter: DeviceAdapter) -> Dict[str, Dict[str, Any
                 entry.update({k: v for k, v in info.items() if v is not None})
             else:
                 entry.setdefault("label", str(info))
+
+    device_type = getattr(adapter, "device_type", "")
+    if device_type == "KUB-1063":
+        technical_suffixes = ("_relay_channel", "_signal_channel", "_input_channel")
+        technical_keys = {"relay_assignments"}
+        for key, entry in metadata.items():
+            if key.endswith(technical_suffixes) or key in technical_keys:
+                entry["hidden"] = True
     return metadata
 
 

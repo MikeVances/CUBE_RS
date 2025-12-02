@@ -574,6 +574,7 @@ class KUB1063Adapter(DeviceAdapter):
     def parse_device_data(self, device_id: int, raw_registers: Dict[int, int]) -> DeviceData:
         data = super().parse_device_data(device_id, raw_registers)
         self._inject_relay_assignments(data)
+        self._inject_emergency_relay_state(data)
         self._aggregate_alarm_counters(data)
         self._inject_ventilation_curve(data)
         return data
@@ -596,17 +597,25 @@ class KUB1063Adapter(DeviceAdapter):
                 continue
 
             channel_type = info.get("channel_type", "relay")
+            channel_label = self._format_channel_label(channel, channel_type)
+            state_label, state_variant = self._format_relay_state(state, channel_type, channel)
+            register_hex = f"0x{info['register_address']:04X}" if info.get("register_address") else None
+            channel_display = channel_label or "Нет назначения"
 
             entry: Dict[str, Any] = {
                 "key": info["key"],
                 "label": info["label"],
                 "category": info["category"],
                 "channel": channel,
-                "channel_label": self._format_channel_label(channel, channel_type),
+                "channel_label": channel_label,
+                "channel_display": channel_display,
                 "state": state,
+                "state_label": state_label,
+                "state_variant": state_variant,
                 "bitfield": info["bitfield"],
                 "bit": info["bit"],
                 "register": info["register_address"],
+                "register_hex": register_hex,
                 "order": info["order"],
                 "channel_type": channel_type,
             }
@@ -636,6 +645,10 @@ class KUB1063Adapter(DeviceAdapter):
         registers["registered_alarms_total"] = _bit_count(_collect("registered_alarms"))
         registers["active_warnings_total"] = _bit_count(_collect("active_warnings"))
         registers["registered_warnings_total"] = _bit_count(_collect("registered_warnings"))
+        registers["active_alarms_list"] = self._decode_alarm_bits(_collect("active_alarms"))
+        registers["active_warnings_list"] = self._decode_alarm_bits(
+            _collect("active_warnings"), is_warning=True
+        )
 
     def _inject_ventilation_curve(self, data: DeviceData) -> None:
         """Формирует структуру кривой целевой температуры вентиляции."""
@@ -704,6 +717,100 @@ class KUB1063Adapter(DeviceAdapter):
         registers["vent_curve_points_count_raw"] = points_count_raw
         registers["vent_curve_state_label"] = state_label
 
+    def _inject_emergency_relay_state(self, data: DeviceData) -> None:
+        """Определяет состояние аварийного реле и добавляет метаданные."""
+
+        registers = data.registers
+        relay_assignments = registers.get("relay_assignments")
+        emergency_assignment: Optional[Dict[str, Any]] = None
+        if isinstance(relay_assignments, list):
+            for entry in relay_assignments:
+                if entry.get("key") == "emergency":
+                    emergency_assignment = entry
+                    break
+
+        channel: Optional[int] = None
+        channel_label: Optional[str] = None
+        assignment_state: Optional[bool] = None
+        if isinstance(emergency_assignment, dict):
+            channel = self._safe_int(emergency_assignment.get("channel"))
+            channel_label = emergency_assignment.get("channel_label")
+            state_raw = emergency_assignment.get("state")
+            if isinstance(state_raw, bool):
+                assignment_state = state_raw
+            if channel_label is None:
+                channel_label = self._format_channel_label(channel)
+
+        source: Optional[str] = None
+        state = assignment_state
+
+        if state is None and channel is not None:
+            state = self._read_emergency_channel_state(channel, registers)
+            if state is not None:
+                source = "channel_bitfield"
+
+        if state is None:
+            state = self._read_function_state("digital_outputs_2", 7, registers)
+            if state is not None:
+                source = "register_0x0117"
+
+        if state is not None and source is None:
+            source = "relay_assignment"
+
+        if state is True:
+            state_label = "Аварийное реле: ВКЛ"
+        elif state is False:
+            state_label = "Аварийное реле: ВЫКЛ"
+        else:
+            state_label = "Аварийное реле: —"
+
+        registers["emergency_relay"] = {
+            "state": state,
+            "state_label": state_label,
+            "channel": channel,
+            "channel_label": channel_label,
+            "source": source,
+        }
+        registers["emergency_relay_state"] = state
+        registers["emergency_relay_state_label"] = state_label
+
+    def _read_emergency_channel_state(
+        self, channel: int, registers: Dict[str, Any]
+    ) -> Optional[bool]:
+        if channel < 0:
+            return None
+        if channel < 8:
+            state = self._read_function_state("digital_outputs_2", channel, registers)
+            if state is None:
+                state = self._read_function_state("digital_outputs_1", channel, registers)
+            return state
+        if channel < 16:
+            return self._read_function_state("digital_outputs_3", channel - 8, registers)
+        return self._read_function_state("digital_outputs_3", channel - 16, registers)
+
+    def _decode_alarm_bits(
+        self, parts: list[int], *, is_warning: bool = False
+    ) -> list[dict[str, Any]]:
+        catalog = ACTIVE_ALARM_DETAILS if not is_warning else ACTIVE_ALARM_DETAILS
+        messages: list[dict[str, Any]] = []
+        for idx, value in enumerate(parts):
+            mask = value or 0
+            for bit in range(16):
+                if mask & (1 << bit):
+                    alarm_id = idx * 16 + bit
+                    details = catalog.get(alarm_id)
+                    label = details.get("label") if details else f"Авария {alarm_id}"
+                    severity = details.get("severity") if details else "warning"
+                    messages.append(
+                        {
+                            "id": alarm_id,
+                            "label": label,
+                            "severity": severity,
+                            "category": details.get("category") if details else None,
+                        }
+                    )
+        return messages
+
     def _read_function_state(self, bitfield_name: str, bit: int, registers: Dict[str, Any]) -> Optional[bool]:
         value = registers.get(bitfield_name)
         if value is None:
@@ -733,6 +840,18 @@ class KUB1063Adapter(DeviceAdapter):
         if channel_type == "analog_output":
             return f"AO{channel + 1}"
         return f"K{channel + 1}"
+
+    @staticmethod
+    def _format_relay_state(
+        state: Optional[bool], channel_type: str, channel: Optional[int]
+    ) -> tuple[str, str]:
+        if state is True:
+            return "ВКЛ", "on"
+        if state is False:
+            return "ВЫКЛ", "off"
+        if channel_type.startswith("analog") and channel is not None:
+            return "Назначено", "assigned"
+        return "Н/Д", "unknown"
 
     @property
     def register_map(self) -> Dict[str, RegisterInfo]:

@@ -82,6 +82,7 @@ class MetricDescriptor:
     unit: str = ""
     category: str = "Общие"
     normal_range: Optional[Tuple[float, float]] = None
+    hidden: bool = False
 
 
 @dataclass
@@ -365,7 +366,8 @@ def build_metric_descriptors() -> Dict[str, MetricDescriptor]:
                 continue
             label = meta.get("label") or key
             unit = meta.get("unit") or ""
-            descriptors[key] = MetricDescriptor(key, label, unit)
+            hidden = bool(meta.get("hidden", False))
+            descriptors[key] = MetricDescriptor(key, label, unit, hidden=hidden)
     return descriptors
 
 
@@ -380,9 +382,6 @@ HIDDEN_METRIC_PREFIXES = {
     "registered_warnings_",
 }
 ALARM_CATALOG_CACHE: Dict[str, Dict[int, Dict[str, Any]]] = {}
-ALARM_BIT_OFFSET = {
-    "KUB-1063": 26,
-}
 DISABLED_VALUE_SENTINELS = {-1, 0xFFFE, 0xFFFC}
 
 
@@ -702,28 +701,6 @@ def _render_relay_pill(state: Optional[bool], *, emergency: bool = False) -> str
     return f"<span class=\"{base_class}\">{text}</span>"
 
 
-def _normalize_relay_assignments(data: Any) -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    if isinstance(data, list):
-        source = data
-    elif isinstance(data, dict):
-        source = data.values()
-    else:
-        return entries
-
-    for item in source:
-        if isinstance(item, dict):
-            entries.append(item)
-    return entries
-
-
-def _find_relay_assignment(data: Any, key: str) -> Optional[Dict[str, Any]]:
-    for entry in _normalize_relay_assignments(data):
-        if entry.get("key") == key:
-            return entry
-    return None
-
-
 def format_kub1063_emergency_relay(
     payload: Dict[str, Any], status: Optional[Any], device: DeviceInfo
 ) -> tuple[Optional[str], Optional[bool]]:
@@ -731,98 +708,65 @@ def format_kub1063_emergency_relay(
     if device.device_type.value != "KUB-1063":
         return None, None
 
-    detected_state: Optional[bool] = None
+    emergency_block = payload.get("emergency_relay")
+    if isinstance(emergency_block, dict):
+        state = emergency_block.get("state")
+        label = emergency_block.get("state_label")
+        channel_label = emergency_block.get("channel_label")
+    else:
+        state = payload.get("emergency_relay_state")
+        label = payload.get("emergency_relay_state_label")
+        channel_label = payload.get("emergency_relay_channel_label")
 
-    def _make_response(state: Optional[bool], label_suffix: str = "") -> Optional[str]:
-        nonlocal detected_state
-        if state is None:
-            return None
-        detected_state = state
-        pill = _render_relay_pill(state, emergency=True)
-        return f"Состояние аварийного реле{label_suffix}: {pill}"
+    if state is None:
+        return None, None
 
-    relay_assignments = payload.get("relay_assignments")
-    relay_info = _find_relay_assignment(relay_assignments, "emergency")
-    if isinstance(relay_info, dict):
-        state = relay_info.get("state")
-        channel_label = relay_info.get("channel_label")
-        if state is not None:
-            label = f" ({channel_label})" if channel_label else ""
-            html = _make_response(bool(state), label)
-            if html:
-                return html, detected_state
+    pill = _render_relay_pill(state, emergency=True)
+    suffix = f" ({channel_label})" if channel_label else ""
+    text = label or "Состояние аварийного реле"
+    return f"{text}{suffix}: {pill}", bool(state)
 
-        channel = relay_info.get("channel")
-        if isinstance(channel, int) and channel >= 0:
-            state = None
-            if channel < 8:
-                state = _read_digital_output("digital_outputs_2", channel)
-                if state is None:
-                    state = _read_digital_output("digital_outputs_1", channel)
-            elif channel < 16:
-                state = _read_digital_output("digital_outputs_3", channel - 8)
-            else:
-                state = _read_digital_output("digital_outputs_3", channel - 16)
-            if state is not None:
-                label = f" ({channel_label})" if channel_label else ""
-                html = _make_response(state, label)
-                if html:
-                    return html, detected_state
 
-    def _resolve_channel() -> Optional[int]:
-        channel = payload.get("emergency_relay_channel")
-        if channel is None and status and getattr(status, "emergency_relay_channel", None) is not None:
-            channel = status.emergency_relay_channel
-        if channel is None:
-            return None
-        try:
-            channel_int = int(channel)
-        except (TypeError, ValueError):
-            return None
-        return channel_int if channel_int >= 0 else None
+def _resolve_emergency_state_label(
+    payload: Dict[str, Any]
+) -> tuple[str, Optional[bool], Optional[str]]:
+    """Возвращает текст состояния аварийного реле, его флаг и канал."""
 
-    def _read_digital_output(group: str, bit: int) -> Optional[bool]:
-        value = payload.get(group)
-        if value is None:
-            return None
-        try:
-            mask = int(value)
-        except (TypeError, ValueError):
-            return None
-        return bool(mask & (1 << bit))
+    block = payload.get("emergency_relay")
+    if isinstance(block, dict):
+        label = block.get("state_label")
+        state = block.get("state")
+        channel_label = block.get("channel_label")
+        if label:
+            return label, state if isinstance(state, bool) else None, channel_label
 
-    channel = _resolve_channel()
+    label = payload.get("emergency_relay_state_label")
+    state = payload.get("emergency_relay_state")
+    if label:
+        return label, state if isinstance(state, bool) else None, None
 
-    if channel is not None:
-        state = None
-        if channel < 8:
-            state = _read_digital_output("digital_outputs_2", channel)
-            if state is None:
-                state = _read_digital_output("digital_outputs_1", channel)
-        elif channel < 16:
-            state = _read_digital_output("digital_outputs_3", channel - 8)
-        else:
-            state = _read_digital_output("digital_outputs_3", channel - 16)
-        if state is not None:
-            html = _make_response(state)
-            if html:
-                return html, detected_state
+    assignments = payload.get("relay_assignments")
+    if isinstance(assignments, list):
+        for entry in assignments:
+            if entry.get("key") == "emergency":
+                entry_label = entry.get("state_label")
+                if entry_label:
+                    return f"Аварийное реле: {entry_label}", entry.get("state"), entry.get(
+                        "channel_label"
+                    )
+                break
 
-    # Если канал не определён, пробуем бит аварии в digital_outputs_2
-    state = _read_digital_output("digital_outputs_2", 7)
-    if state is not None:
-        html = _make_response(state)
-        if html:
-            return html, detected_state
-
-    return "Состояние аварийного реле: —", detected_state
+    return "Аварийное реле: —", None, None
 
 
 def format_kub1063_relay_cards(payload: Dict[str, Any], device: DeviceInfo) -> Optional[str]:
     if device.device_type.value != "KUB-1063":
         return None
 
-    entries = _normalize_relay_assignments(payload.get("relay_assignments"))
+    entries = payload.get("relay_assignments")
+    if not isinstance(entries, list):
+        return None
+
     if not entries:
         return None
 
@@ -836,43 +780,17 @@ def format_kub1063_relay_cards(payload: Dict[str, Any], device: DeviceInfo) -> O
     for category, group in grouped.items():
         cards: List[str] = []
         for item in group:
-            channel_label = item.get("channel_label")
-            channel_number = item.get("channel")
-            channel_type = item.get("channel_type", "relay")
-            if channel_label:
-                channel_display = channel_label
-            elif isinstance(channel_number, int) and channel_number >= 0:
-                if channel_type == "analog_input":
-                    channel_display = f"AI{channel_number + 1}"
-                elif channel_type == "analog_output":
-                    channel_display = f"AO{channel_number + 1}"
-                else:
-                    channel_display = f"K{channel_number + 1}"
-            else:
-                channel_display = "Нет назначения"
-
-            register_addr = item.get("register")
-            register_display = f"0x{int(register_addr):04X}" if isinstance(register_addr, int) else "—"
-
-            state_value = item.get("state")
-            if state_value is True:
-                state_variant = "relay-state-on"
-                state_text = "ВКЛ"
-            elif state_value is False:
-                state_variant = "relay-state-off"
-                state_text = "ВЫКЛ"
-            else:
-                if channel_type.startswith("analog") and channel_number is not None:
-                    state_variant = "relay-state-assigned"
-                    state_text = "Назначено"
-                else:
-                    state_variant = "relay-state-unknown"
-                    state_text = "Н/Д"
+            channel_display = item.get("channel_display") or "Нет назначения"
+            register_display = item.get("register_hex") or "—"
+            state_variant = item.get("state_variant") or "unknown"
+            state_text = item.get("state_label") or "Н/Д"
 
             extra_state_classes = []
             if item.get("key") == "emergency":
                 extra_state_classes.append("relay-state-emergency")
-            state_class = " ".join(["relay-card-state", state_variant, *extra_state_classes]).strip()
+            state_class = " ".join(
+                ["relay-card-state", f"relay-state-{state_variant}", *extra_state_classes]
+            ).strip()
 
             cards.append(
                 "".join(
@@ -902,20 +820,10 @@ def format_kub1063_relay_cards(payload: Dict[str, Any], device: DeviceInfo) -> O
 
 
 def _is_preference_metric(device: DeviceInfo, key: str) -> bool:
-    if key not in METRIC_DESCRIPTORS:
+    descriptor = METRIC_DESCRIPTORS.get(key)
+    if descriptor is None:
         return False
-    device_type = device.device_type.value
-    if device_type == "KUB-1063":
-        technical_suffixes = (
-            "_relay_channel",
-            "_signal_channel",
-            "_input_channel",
-        )
-        if key.endswith(technical_suffixes):
-            return False
-        if key == "relay_assignments":
-            return False
-    return True
+    return not descriptor.hidden
 
 
 def humanize_status(raw_status: Optional[str]) -> Optional[str]:
@@ -979,32 +887,33 @@ def collect_problem_reasons(
         if text:
             reasons.append(text)
 
+    alarm_entries = payload.get("active_alarms_list") or []
+    warning_entries = payload.get("active_warnings_list") or []
+
     if alarms_count:
-        mask_value = alarm_mask
-        if mask_value is not None and not isinstance(mask_value, int):
-            try:
-                mask_value = int(mask_value)
-            except (TypeError, ValueError):
-                mask_value = None
-        if mask_value is None:
-            raw_mask = payload.get("active_alarms")
-            try:
-                mask_value = int(raw_mask)
-            except (TypeError, ValueError):
-                mask_value = None
-        recommendations = []
-        if mask_value:
-            recs = _format_alarm_recommendations(device_type, mask_value)
-            recommendations.extend(recs)
-            reasons.extend(recs)
-        recorded_alarms = status_obj.alarms[:3] if status_obj and getattr(status_obj, "alarms", None) else []
-        reasons.extend(recorded_alarms)
-        if not recommendations and not recorded_alarms:
+        if alarm_entries:
+            reasons.extend(
+                [
+                    f"Авария: {entry.get('label') or entry.get('id')}"
+                    for entry in alarm_entries[:3]
+                ]
+            )
+        recorded_alarms = (
+            status_obj.alarms[:3]
+            if status_obj and getattr(status_obj, "alarms", None)
+            else []
+        )
+        if recorded_alarms:
+            reasons.extend(recorded_alarms)
+        if not alarm_entries and not recorded_alarms:
             reasons.append(f"Активных тревог: {alarms_count}")
-    elif status_obj and getattr(status_obj, "warnings", None):
-        warnings = status_obj.warnings[:2]
-        if warnings:
-            reasons.extend([f"Предупреждение: {msg}" for msg in warnings])
+    elif warning_entries:
+        reasons.extend(
+            [
+                f"Предупреждение: {entry.get('label') or entry.get('id')}"
+                for entry in warning_entries[:2]
+            ]
+        )
 
     fault_code = None
     if status_obj and getattr(status_obj, "fault_code", None):
@@ -1409,11 +1318,11 @@ def render_room_metrics(
         )
 
         metrics_map = device_metric_records.get(device.device_id, {})
-        alarm_mask_value = payload.get("active_alarms")
-        if alarm_mask_value is None:
-            record_mask = metrics_map.get("active_alarms")
-            if record_mask is not None:
-                alarm_mask_value = record_mask.value
+        alarm_entries = payload.get("active_alarms_list")
+        if alarm_entries is None:
+            record = metrics_map.get("active_alarms_list")
+            if record is not None:
+                alarm_entries = record.value
 
         problem_reasons: List[str] = []
         if not status_ok:
@@ -1423,18 +1332,29 @@ def render_room_metrics(
                 human_status=status_human,
                 alarms_count=alarm_value_int,
                 device_type=device.device_type.value,
-                alarm_mask=alarm_mask_value,
+                alarm_mask=alarm_entries,
             )
 
         detail_segments: List[str] = []
-        if problem_reasons:
-            detail_segments.append("<br/>".join(problem_reasons))
+        state_label, detected_emergency_state, channel_label = _resolve_emergency_state_label(
+            payload
+        )
+        if detected_emergency_state is None:
+            detail_segments.append(escape_html(state_label))
+        else:
+            pill = _render_relay_pill(detected_emergency_state, emergency=True)
+            suffix = f" ({escape_html(channel_label)})" if channel_label else ""
+            detail_segments.append(f"Аварийное реле{suffix}: {pill}")
 
-        relay_detail, detected_emergency_state = format_kub1063_emergency_relay(
+        relay_detail, relay_state_html = format_kub1063_emergency_relay(
             payload, status, device
         )
         if relay_detail:
             detail_segments.append(relay_detail)
+        if detected_emergency_state is None:
+            detected_emergency_state = relay_state_html
+        if problem_reasons:
+            detail_segments.append("<br/>".join(problem_reasons))
 
         detail_html = "<br/>".join(detail_segments)
 
@@ -1563,7 +1483,7 @@ def render_device_cards(room: RoomSnapshot, device_payloads: Dict[int, Dict[str,
             and alarms_count == 0
         )
 
-        problem_reasons = []
+        problem_reasons: List[str] = []
         if not status_ok:
             problem_reasons = collect_problem_reasons(
                 status_obj=status_obj,
@@ -1573,7 +1493,28 @@ def render_device_cards(room: RoomSnapshot, device_payloads: Dict[int, Dict[str,
                 device_type=device.device_type.value,
                 alarm_mask=payload.get("active_alarms"),
             )
-        detail_html = "<br/>".join(problem_reasons)
+
+        detail_segments: List[str] = []
+        state_label, detected_emergency_state, channel_label = _resolve_emergency_state_label(
+            payload
+        )
+        if detected_emergency_state is None:
+            detail_segments.append(escape_html(state_label))
+        else:
+            pill = _render_relay_pill(detected_emergency_state, emergency=True)
+            suffix = f" ({escape_html(channel_label)})" if channel_label else ""
+            detail_segments.append(f"Аварийное реле{suffix}: {pill}")
+
+        relay_detail, relay_state_html = format_kub1063_emergency_relay(
+            payload, status_obj, device
+        )
+        if relay_detail:
+            detail_segments.append(relay_detail)
+        if detected_emergency_state is None:
+            detected_emergency_state = relay_state_html
+        if problem_reasons:
+            detail_segments.extend(problem_reasons)
+        detail_html = "<br/>".join(detail_segments)
         pill_color = "#238636" if status_ok else "#dc3545"
         updated = parse_timestamp(payload.get("timestamp"))
         updated_str = updated.strftime("%d.%m %H:%M:%S") if updated else "—"

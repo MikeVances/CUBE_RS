@@ -773,6 +773,7 @@ class KUB1063Adapter(DeviceAdapter):
         }
         registers["emergency_relay_state"] = state
         registers["emergency_relay_state_label"] = state_label
+        registers["supports_alarm_reset"] = True
 
     def _read_emergency_channel_state(
         self, channel: int, registers: Dict[str, Any]
@@ -791,7 +792,7 @@ class KUB1063Adapter(DeviceAdapter):
     def _decode_alarm_bits(
         self, parts: list[int], *, is_warning: bool = False
     ) -> list[dict[str, Any]]:
-        catalog = ACTIVE_ALARM_DETAILS if not is_warning else ACTIVE_ALARM_DETAILS
+        catalog = ACTIVE_ALARM_DETAILS if not is_warning else ACTIVE_WARNING_DETAILS
         messages: list[dict[str, Any]] = []
         for idx, value in enumerate(parts):
             mask = value or 0
@@ -799,14 +800,22 @@ class KUB1063Adapter(DeviceAdapter):
                 if mask & (1 << bit):
                     alarm_id = idx * 16 + bit
                     details = catalog.get(alarm_id)
-                    label = details.get("label") if details else f"Авария {alarm_id}"
-                    severity = details.get("severity") if details else "warning"
+                    if details is None:
+                        if is_warning:
+                            continue
+                        label = f"Авария {alarm_id}"
+                        severity = "alarm"
+                        category = None
+                    else:
+                        label = details.get("label") or details.get("title") or f"Авария {alarm_id}"
+                        severity = details.get("severity") or ("warning" if is_warning else "alarm")
+                        category = details.get("category")
                     messages.append(
                         {
                             "id": alarm_id,
                             "label": label,
                             "severity": severity,
-                            "category": details.get("category") if details else None,
+                            "category": category,
                         }
                     )
         return messages
@@ -1057,10 +1066,8 @@ class KUB1063Adapter(DeviceAdapter):
         if warning_values:
             warnings.append(f"⚠️ Предупреждения: {', '.join(warning_values)}")
         
-        # Проверяем отключенные датчики
-        disabled_sensors = device_manager.get_variables_by_status("disabled")
-        for sensor in disabled_sensors:
-            warnings.append(f"🔇 {sensor}: отключен")
+        # Не включаем отключенные датчики в список предупреждений — они отображаются
+        # через статус переменных и не должны создавать шумных сообщений.
         
         return warnings
     
@@ -1224,3 +1231,4 @@ ACTIVE_ALARM_DETAILS = {
 }
 
 ACTIVE_ALARM_DESCRIPTIONS = {bit: data["title"] for bit, data in ACTIVE_ALARM_DETAILS.items()}
+ACTIVE_WARNING_DETAILS: Dict[int, Dict[str, Any]] = {}

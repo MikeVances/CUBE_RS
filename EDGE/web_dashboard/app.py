@@ -701,11 +701,12 @@ def _render_relay_pill(state: Optional[bool], *, emergency: bool = False) -> str
     return f"<span class=\"{base_class}\">{text}</span>"
 
 
-def format_kub1063_emergency_relay(
+def format_emergency_relay_block(
     payload: Dict[str, Any], status: Optional[Any], device: DeviceInfo
 ) -> tuple[Optional[str], Optional[bool]]:
-    """Определяет состояние аварийного реле для КУБ-1063."""
-    if device.device_type.value != "KUB-1063":
+    """Определяет состояние аварийного реле устройства."""
+    relay_data = payload.get("emergency_relay")
+    if not isinstance(relay_data, dict):
         return None, None
 
     emergency_block = payload.get("emergency_relay")
@@ -759,10 +760,7 @@ def _resolve_emergency_state_label(
     return "Аварийное реле: —", None, None
 
 
-def format_kub1063_relay_cards(payload: Dict[str, Any], device: DeviceInfo) -> Optional[str]:
-    if device.device_type.value != "KUB-1063":
-        return None
-
+def format_device_relay_cards(payload: Dict[str, Any], device: DeviceInfo) -> Optional[str]:
     entries = payload.get("relay_assignments")
     if not isinstance(entries, list):
         return None
@@ -960,6 +958,7 @@ def collect_device_payloads(registry: DeviceRegistry) -> Dict[int, Dict[str, Any
         "emergency_relay_state",
         "emergency_relay_state_label",
         "emergency_relay_channel",
+        "supports_alarm_reset",
         "relay_assignments",
         "active_alarms_list",
         "active_warnings_list",
@@ -1350,7 +1349,7 @@ def render_room_metrics(
             suffix = f" ({escape_html(channel_label)})" if channel_label else ""
             detail_segments.append(f"Аварийное реле{suffix}: {pill}")
 
-        relay_detail, relay_state_html = format_kub1063_emergency_relay(
+        relay_detail, relay_state_html = format_emergency_relay_block(
             payload, status, device
         )
         if relay_detail:
@@ -1428,7 +1427,7 @@ def render_room_metrics(
         if detected_emergency_state is True:
             relay_flag = True
         show_reset = ((alarm_value_int or 0) > 0) or relay_flag
-        if show_reset and _dashboard_user_can_reset() and device.device_type.value == "KUB-1063":
+        if show_reset and _dashboard_user_can_reset() and payload.get("supports_alarm_reset"):
             room_name = room.room or "room"
             room_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", room_name)
             reset_cols = st.columns([0.35, 0.65])
@@ -1444,7 +1443,7 @@ def render_room_metrics(
                 else:
                     reset_cols[1].error(f"Не удалось отправить команду: {command_id or 'ошибка'}")
 
-        relay_cards_html = format_kub1063_relay_cards(payload, device)
+        relay_cards_html = format_device_relay_cards(payload, device)
         if relay_cards_html:
             with st.expander("Назначения реле", expanded=False):
                 st.markdown(relay_cards_html, unsafe_allow_html=True)
@@ -1509,7 +1508,7 @@ def render_device_cards(room: RoomSnapshot, device_payloads: Dict[int, Dict[str,
             suffix = f" ({escape_html(channel_label)})" if channel_label else ""
             detail_segments.append(f"Аварийное реле{suffix}: {pill}")
 
-        relay_detail, relay_state_html = format_kub1063_emergency_relay(
+        relay_detail, relay_state_html = format_emergency_relay_block(
             payload, status_obj, device
         )
         if relay_detail:

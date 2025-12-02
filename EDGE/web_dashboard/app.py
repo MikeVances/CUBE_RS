@@ -956,11 +956,15 @@ def collect_device_payloads(registry: DeviceRegistry) -> Dict[int, Dict[str, Any
     essential_keys = {
         "connection_status",
         "status",
-        "digital_outputs_1",
-        "digital_outputs_2",
-        "digital_outputs_3",
+        "emergency_relay",
+        "emergency_relay_state",
+        "emergency_relay_state_label",
         "emergency_relay_channel",
         "relay_assignments",
+        "active_alarms_list",
+        "active_warnings_list",
+        "active_alarms_total",
+        "active_warnings_total",
     }
     for device in registry.get_devices(enabled_only=True):
         try:
